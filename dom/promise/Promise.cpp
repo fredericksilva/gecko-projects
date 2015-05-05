@@ -1,5 +1,5 @@
-/* -*- Mode: c++; c-basic-offset: 2; indent-tabs-mode: nil; tab-width: 40 -*- */
-/* vim: set ts=2 et sw=2 tw=80: */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -482,10 +482,10 @@ bool
 Promise::PerformMicroTaskCheckpoint()
 {
   CycleCollectedJSRuntime* runtime = CycleCollectedJSRuntime::Get();
-  nsTArray<nsCOMPtr<nsIRunnable>>& microtaskQueue =
+  std::queue<nsCOMPtr<nsIRunnable>>& microtaskQueue =
     runtime->GetPromiseMicroTaskQueue();
 
-  if (microtaskQueue.IsEmpty()) {
+  if (microtaskQueue.empty()) {
     return false;
   }
 
@@ -495,11 +495,11 @@ Promise::PerformMicroTaskCheckpoint()
   }
 
   do {
-    nsCOMPtr<nsIRunnable> runnable = microtaskQueue.ElementAt(0);
+    nsCOMPtr<nsIRunnable> runnable = microtaskQueue.front();
     MOZ_ASSERT(runnable);
 
     // This function can re-enter, so we remove the element before calling.
-    microtaskQueue.RemoveElementAt(0);
+    microtaskQueue.pop();
     nsresult rv = runnable->Run();
     if (NS_WARN_IF(NS_FAILED(rv))) {
       return false;
@@ -507,7 +507,7 @@ Promise::PerformMicroTaskCheckpoint()
     if (cx.isSome()) {
       JS_CheckForInterrupt(cx.ref());
     }
-  } while (!microtaskQueue.IsEmpty());
+  } while (!microtaskQueue.empty());
 
   return true;
 }
@@ -1168,10 +1168,10 @@ Promise::DispatchToMicroTask(nsIRunnable* aRunnable)
   MOZ_ASSERT(aRunnable);
 
   CycleCollectedJSRuntime* runtime = CycleCollectedJSRuntime::Get();
-  nsTArray<nsCOMPtr<nsIRunnable>>& microtaskQueue =
+  std::queue<nsCOMPtr<nsIRunnable>>& microtaskQueue =
     runtime->GetPromiseMicroTaskQueue();
 
-  microtaskQueue.AppendElement(aRunnable);
+  microtaskQueue.push(aRunnable);
 }
 
 #if defined(DOM_PROMISE_DEPRECATED_REPORTING)

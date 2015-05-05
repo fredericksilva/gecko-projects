@@ -1,5 +1,5 @@
-/* -*- Mode: c++; c-basic-offset: 2; indent-tabs-mode: nil; tab-width: 40 -*- */
-/* vim: set ts=2 et sw=2 tw=80: */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -13,7 +13,6 @@
 #include "mozilla/dom/BluetoothGattBinding.h"
 #include "mozilla/dom/BluetoothGattCharacteristicEvent.h"
 #include "mozilla/dom/Promise.h"
-#include "nsIUUIDGenerator.h"
 #include "nsServiceManagerUtils.h"
 
 using namespace mozilla;
@@ -74,27 +73,6 @@ BluetoothGatt::~BluetoothGatt()
   }
 
   UnregisterBluetoothSignalHandler(mAppUuid, this);
-}
-
-void
-BluetoothGatt::GenerateUuid(nsAString &aUuidString)
-{
-  nsresult rv;
-  nsCOMPtr<nsIUUIDGenerator> uuidGenerator =
-    do_GetService("@mozilla.org/uuid-generator;1", &rv);
-  NS_ENSURE_SUCCESS_VOID(rv);
-
-  nsID uuid;
-  rv = uuidGenerator->GenerateUUIDInPlace(&uuid);
-  NS_ENSURE_SUCCESS_VOID(rv);
-
-  // Build a string in {xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx} format
-  char uuidBuffer[NSID_LENGTH];
-  uuid.ToProvidedString(uuidBuffer);
-  NS_ConvertASCIItoUTF16 uuidString(uuidBuffer);
-
-  // Remove {} and the null terminator
-  aUuidString.Assign(Substring(uuidString, 1, NSID_LENGTH - 3));
 }
 
 void
@@ -200,9 +178,9 @@ public:
     aValue.setUndefined();
 
     const BluetoothValue& v = mReply->get_BluetoothReplySuccess().value();
-    NS_ENSURE_TRUE(v.type() == BluetoothValue::Tuint32_t, false);
+    NS_ENSURE_TRUE(v.type() == BluetoothValue::Tint32_t, false);
 
-    aValue.setInt32(static_cast<int32_t>(v.get_uint32_t()));
+    aValue.setInt32(static_cast<int32_t>(v.get_int32_t()));
     return true;
   }
 };
@@ -256,6 +234,8 @@ BluetoothGatt::DiscoverServices(ErrorResult& aRv)
   BT_ENSURE_TRUE_REJECT(bs, promise, NS_ERROR_NOT_AVAILABLE);
 
   mDiscoveringServices = true;
+  mServices.Clear();
+  BluetoothGattBinding::ClearCachedServicesValue(this);
   nsRefPtr<BluetoothReplyRunnable> result =
     new BluetoothVoidReplyRunnable(nullptr /* DOMRequest */,
                                    promise,
@@ -292,6 +272,7 @@ BluetoothGatt::HandleServicesDiscovered(const BluetoothValue& aValue)
   const InfallibleTArray<BluetoothGattServiceId>& serviceIds =
     aValue.get_ArrayOfBluetoothGattServiceId();
 
+  mServices.Clear();
   for (uint32_t i = 0; i < serviceIds.Length(); i++) {
     mServices.AppendElement(new BluetoothGattService(
       GetParentObject(), mAppUuid, serviceIds[i]));

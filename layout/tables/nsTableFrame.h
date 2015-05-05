@@ -15,6 +15,7 @@
 #include "nsCellMap.h"
 #include "nsGkAtoms.h"
 #include "nsDisplayList.h"
+#include "TableArea.h"
 
 class nsTableCellFrame;
 class nsTableCellMap;
@@ -300,7 +301,7 @@ public:
 
   friend class nsDelayedCalcBCBorders;
 
-  void AddBCDamageArea(const nsIntRect& aValue);
+  void AddBCDamageArea(const mozilla::TableArea& aValue);
   bool BCRecalcNeeded(nsStyleContext* aOldStyleContext,
                         nsStyleContext* aNewStyleContext);
   void PaintBCBorders(nsRenderingContext& aRenderingContext,
@@ -798,7 +799,7 @@ protected:
   void SetFullBCDamageArea();
   void CalcBCBorders();
 
-  void ExpandBCDamageArea(nsIntRect& aRect) const;
+  void ExpandBCDamageArea(mozilla::TableArea& aRect) const;
 
   void SetColumnDimensions(nscoord         aHeight,
                            const nsMargin& aReflowState);
@@ -985,7 +986,7 @@ inline nscoord
 nsTableFrame::GetContinuousLeftBCBorderWidth() const
 {
   int32_t aPixelsToTwips = nsPresContext::AppUnitsPerCSSPixel();
-  return BC_BORDER_RIGHT_HALF_COORD(aPixelsToTwips, mBits.mLeftContBCBorder);
+  return BC_BORDER_END_HALF_COORD(aPixelsToTwips, mBits.mLeftContBCBorder);
 }
 
 inline void nsTableFrame::SetContinuousLeftBCBorderWidth(nscoord aValue)

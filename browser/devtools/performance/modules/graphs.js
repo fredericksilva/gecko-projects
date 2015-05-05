@@ -26,6 +26,9 @@ loader.lazyRequireGetter(this, "MarkersOverview",
 loader.lazyRequireGetter(this, "EventEmitter",
   "devtools/toolkit/event-emitter");
 
+// TODO get rid of retro mode in bug 1160313
+loader.lazyRequireGetter(this, "Services");
+
 /**
  * For line graphs
  */
@@ -165,6 +168,24 @@ const GRAPH_DEFINITIONS = {
   }
 };
 
+// TODO get rid of retro mode in bug 1160313
+const GRAPH_DEFINITIONS_RETRO = {
+  memory: {
+    constructor: MemoryGraph,
+    selector: "#memory-overview",
+  },
+  framerate: {
+    constructor: FramerateGraph,
+    selector: "#time-framerate",
+    needsBlueprints: true,
+    primaryLink: true
+  },
+  timeline: {
+    constructor: TimelineGraph,
+    selector: "#markers-overview",
+  }
+};
+
 /**
  * A controller for orchestrating the performance's tool overview graphs. Constructs,
  * syncs, toggles displays and defines the memory, framerate and timeline view.
@@ -177,7 +198,9 @@ const GRAPH_DEFINITIONS = {
 function GraphsController ({ definition, root, getBlueprint, getTheme }) {
   this._graphs = {};
   this._enabled = new Set();
-  this._definition = definition || GRAPH_DEFINITIONS;
+  // TODO get rid of retro mode in bug 1160313
+  let RETRO_MODE = Services.prefs.getBoolPref("devtools.performance.ui.retro-mode");
+  this._definition = definition || (RETRO_MODE ? GRAPH_DEFINITIONS_RETRO : GRAPH_DEFINITIONS);
   this._root = root;
   this._getBlueprint = getBlueprint;
   this._getTheme = getTheme;
@@ -243,8 +266,8 @@ GraphsController.prototype = {
       yield this._rendering.promise;
     }
 
-    for (let graphName in this._graphs) {
-      yield this._graphs[graphName].destroy();
+    for (let graph of this.getWidgets()) {
+      yield graph.destroy();
     }
   }),
 
@@ -254,9 +277,9 @@ GraphsController.prototype = {
    */
   setTheme: function (options={}) {
     let theme = options.theme || this._getTheme();
-    for (let graph in this._graphs) {
-      this._graphs[graph].setTheme(theme);
-      this._graphs[graph].refresh({ force: options.redraw });
+    for (let graph of this.getWidgets()) {
+      graph.setTheme(theme);
+      graph.refresh({ force: options.redraw });
     }
   },
 
@@ -323,6 +346,14 @@ GraphsController.prototype = {
 
   getMappedSelection: function ({ mapStart, mapEnd }) {
     return this._getPrimaryLink().getMappedSelection({ mapStart, mapEnd });
+  },
+
+  /**
+   * Returns an array of graphs that have been created, not necessarily
+   * enabled currently.
+   */
+  getWidgets: function () {
+    return Object.keys(this._graphs).map(name => this._graphs[name]);
   },
 
   /**

@@ -240,15 +240,6 @@ SharedDecoderProxy::Shutdown()
 }
 
 bool
-SharedDecoderProxy::IsWaitingMediaResources()
-{
-  if (mManager->mActiveProxy == this) {
-    return mManager->mDecoder->IsWaitingMediaResources();
-  }
-  return mManager->mActiveProxy != nullptr;
-}
-
-bool
 SharedDecoderProxy::IsHardwareAccelerated() const
 {
   return mManager->mDecoder->IsHardwareAccelerated();

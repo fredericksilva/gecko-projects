@@ -639,6 +639,22 @@ nsContentUtils::InitializeModifierStrings()
   sModifierSeparator = new nsString(modifierSeparator);  
 }
 
+// Because of SVG/SMIL we have several atoms mapped to the same
+// id, but we can rely on ID_TO_EVENT to map id to only one atom.
+static bool
+ShouldAddEventToStringEventTable(const EventNameMapping& aMapping)
+{
+  switch(aMapping.mId) {
+#define ID_TO_EVENT(name_, id_, type_, struct_) \
+  case id_: return nsGkAtoms::on##name_ == aMapping.mAtom;
+#include "mozilla/EventNameList.h"
+#undef ID_TO_EVENT
+  default:
+    break;
+  }
+  return false;
+}
+
 bool
 nsContentUtils::InitializeEventTable() {
   NS_ASSERTION(!sAtomEventTable, "EventTable already initialized!");
@@ -651,6 +667,7 @@ nsContentUtils::InitializeEventTable() {
 #define NON_IDL_EVENT EVENT
 #include "mozilla/EventNameList.h"
 #undef WINDOW_ONLY_EVENT
+#undef NON_IDL_EVENT
 #undef EVENT
     { nullptr }
   };
@@ -664,8 +681,11 @@ nsContentUtils::InitializeEventTable() {
   // Subtract one from the length because of the trailing null
   for (uint32_t i = 0; i < ArrayLength(eventArray) - 1; ++i) {
     sAtomEventTable->Put(eventArray[i].mAtom, eventArray[i]);
-    sStringEventTable->Put(Substring(nsDependentAtomString(eventArray[i].mAtom), 2),
-                           eventArray[i]);
+    if (ShouldAddEventToStringEventTable(eventArray[i])) {
+      sStringEventTable->Put(
+        Substring(nsDependentAtomString(eventArray[i].mAtom), 2),
+        eventArray[i]);
+    }
   }
 
   return true;
@@ -7633,9 +7653,9 @@ nsContentUtils::SendMouseEvent(nsCOMPtr<nsIPresShell> aPresShell,
   else if (aType.EqualsLiteral("mousemove"))
     msg = NS_MOUSE_MOVE;
   else if (aType.EqualsLiteral("mouseover"))
-    msg = NS_MOUSE_ENTER;
+    msg = NS_MOUSE_ENTER_WIDGET;
   else if (aType.EqualsLiteral("mouseout"))
-    msg = NS_MOUSE_EXIT;
+    msg = NS_MOUSE_EXIT_WIDGET;
   else if (aType.EqualsLiteral("contextmenu")) {
     msg = NS_CONTEXTMENU;
     contextMenuKey = (aButton == 0);

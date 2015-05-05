@@ -102,6 +102,8 @@ static nsTArray<nsRefPtr<BluetoothReplyRunnable> > sGetDeviceRunnableArray;
 static nsTArray<nsRefPtr<BluetoothReplyRunnable> > sFetchUuidsRunnableArray;
 static nsTArray<nsRefPtr<BluetoothReplyRunnable> > sBondingRunnableArray;
 static nsTArray<nsRefPtr<BluetoothReplyRunnable> > sUnbondingRunnableArray;
+static bool sIsRestart(false);
+static bool sIsFirstTimeToggleOffBt(false);
 
 /**
  *  Static callback functions
@@ -388,6 +390,34 @@ BluetoothServiceBluedroid::StopInternal(BluetoothReplyRunnable* aRunnable)
 //
 
 void
+BluetoothServiceBluedroid::StartLeScanInternal(
+  const nsTArray<nsString>& aServiceUuids,
+  BluetoothReplyRunnable* aRunnable)
+{
+  MOZ_ASSERT(NS_IsMainThread());
+  ENSURE_BLUETOOTH_IS_READY_VOID(aRunnable);
+
+  BluetoothGattManager* gatt = BluetoothGattManager::Get();
+  ENSURE_GATT_MGR_IS_READY_VOID(gatt, aRunnable);
+
+  gatt->StartLeScan(aServiceUuids, aRunnable);
+}
+
+void
+BluetoothServiceBluedroid::StopLeScanInternal(
+  const nsAString& aScanUuid,
+  BluetoothReplyRunnable* aRunnable)
+{
+  MOZ_ASSERT(NS_IsMainThread());
+  ENSURE_BLUETOOTH_IS_READY_VOID(aRunnable);
+
+  BluetoothGattManager* gatt = BluetoothGattManager::Get();
+  ENSURE_GATT_MGR_IS_READY_VOID(gatt, aRunnable);
+
+  gatt->StopLeScan(aScanUuid, aRunnable);
+}
+
+void
 BluetoothServiceBluedroid::ConnectGattClientInternal(
   const nsAString& aAppUuid, const nsAString& aDeviceAddress,
   BluetoothReplyRunnable* aRunnable)
@@ -577,6 +607,15 @@ BluetoothServiceBluedroid::GattClientWriteDescriptorValueInternal(
     }                                                                  \
   } while(0)
 
+#define ENSURE_BLUETOOTH_IS_READY_VOID(runnable)                       \
+  do {                                                                 \
+    if (!sBtInterface || !IsEnabled()) {                               \
+      NS_NAMED_LITERAL_STRING(errorStr, "Bluetooth is not ready");     \
+      DispatchBluetoothReply(runnable, BluetoothValue(), errorStr);    \
+      return;                                                          \
+    }                                                                  \
+  } while(0)
+
 // Audio: Major service class = 0x100 (Bit 21 is set)
 #define SET_AUDIO_BIT(cod)               (cod |= 0x200000)
 // Rendering: Major service class = 0x20 (Bit 18 is set)
@@ -598,6 +637,8 @@ static nsTArray<nsRefPtr<BluetoothReplyRunnable> > sGetDeviceRunnableArray;
 static nsTArray<nsRefPtr<BluetoothReplyRunnable> > sBondingRunnableArray;
 static nsTArray<nsRefPtr<BluetoothReplyRunnable> > sUnbondingRunnableArray;
 static bool sAdapterDiscoverable(false);
+static bool sIsRestart(false);
+static bool sIsFirstTimeToggleOffBt(false);
 static uint32_t sAdapterDiscoverableTimeout(0);
 
 /**
@@ -1209,13 +1250,12 @@ private:
   BluetoothReplyRunnable* mRunnable;
 };
 
-nsresult
+void
 BluetoothServiceBluedroid::StartDiscoveryInternal(
   BluetoothReplyRunnable* aRunnable)
 {
   MOZ_ASSERT(NS_IsMainThread());
-
-  ENSURE_BLUETOOTH_IS_READY(aRunnable, NS_OK);
+  ENSURE_BLUETOOTH_IS_READY_VOID(aRunnable);
 
 #ifdef MOZ_B2G_BT_API_V2
   sChangeDiscoveryRunnableArray.AppendElement(aRunnable);
@@ -1224,8 +1264,6 @@ BluetoothServiceBluedroid::StartDiscoveryInternal(
 #endif
 
   sBtInterface->StartDiscovery(new StartDiscoveryResultHandler(aRunnable));
-
-  return NS_OK;
 }
 
 class BluetoothServiceBluedroid::CancelDiscoveryResultHandler final
@@ -1308,13 +1346,12 @@ BluetoothServiceBluedroid::FetchUuidsInternal(
 // Missing in bluetooth1
 #endif
 
-nsresult
+void
 BluetoothServiceBluedroid::StopDiscoveryInternal(
   BluetoothReplyRunnable* aRunnable)
 {
   MOZ_ASSERT(NS_IsMainThread());
-
-  ENSURE_BLUETOOTH_IS_READY(aRunnable, NS_OK);
+  ENSURE_BLUETOOTH_IS_READY_VOID(aRunnable);
 
 #ifdef MOZ_B2G_BT_API_V2
   sChangeDiscoveryRunnableArray.AppendElement(aRunnable);
@@ -1323,8 +1360,6 @@ BluetoothServiceBluedroid::StopDiscoveryInternal(
 #endif
 
   sBtInterface->CancelDiscovery(new CancelDiscoveryResultHandler(aRunnable));
-
-  return NS_OK;
 }
 
 class BluetoothServiceBluedroid::SetAdapterPropertyResultHandler final
@@ -2127,7 +2162,11 @@ public:
 private:
   void Proceed() const
   {
-    sBtInterface->Cleanup(nullptr);
+    if (!sIsRestart) {
+      sBtInterface->Cleanup(nullptr);
+    } else {
+      BT_LOGR("ProfileDeinitResultHandler::Proceed cancel cleanup() ");
+    }
   }
 
   unsigned char mNumProfiles;
@@ -2231,6 +2270,12 @@ BluetoothServiceBluedroid::AdapterStateChangedNotification(bool aState)
 
   BT_LOGR("BT_STATE: %d", aState);
 
+  if (sIsRestart && aState) {
+    // daemon restarted, reset flag
+    BT_LOGR("daemon restarted, reset flag");
+    sIsRestart = false;
+    sIsFirstTimeToggleOffBt = false;
+  }
   bool isBtEnabled = (aState == true);
 
   if (!isBtEnabled) {
@@ -2278,6 +2323,11 @@ BluetoothServiceBluedroid::AdapterStateChangedNotification(bool aState)
     if (!opp || !opp->Listen()) {
       BT_LOGR("Fail to start BluetoothOppManager listening");
     }
+  }
+  // After ProfileManagers deinit and cleanup, now restarts bluetooth daemon
+  if (sIsRestart && !aState) {
+    BT_LOGR("sIsRestart and off, now restart");
+    StartBluetooth(false);
   }
 #endif
 }
@@ -3074,3 +3124,39 @@ BluetoothServiceBluedroid::EnergyInfoNotification(
   // FIXME: This will be implemented in the later patchset
 }
 #endif
+
+void
+BluetoothServiceBluedroid::BackendErrorNotification(bool aCrashed)
+{
+  MOZ_ASSERT(NS_IsMainThread());
+ // Recovery step 2 stop bluetooth
+ if (aCrashed) {
+  BT_LOGR("Set aRestart = true");
+  sIsRestart = true;
+  BT_LOGR("Reocvery step2: stop bluetooth");
+#ifdef MOZ_B2G_BT_API_V2
+  StopBluetooth(false, nullptr);
+#else
+  StopBluetooth(false);
+#endif
+ }
+}
+
+void
+BluetoothServiceBluedroid::CompleteToggleBt(bool aEnabled)
+{
+  MOZ_ASSERT(NS_IsMainThread());
+
+  if (sIsRestart && !aEnabled && sIsFirstTimeToggleOffBt) {
+    // Both StopBluetooth and AdapterStateChangedNotification
+    // trigger CompleteToggleBt. We don't need to call CompleteToggleBt again
+  } else if (sIsRestart && !aEnabled && !sIsFirstTimeToggleOffBt) {
+    // Recovery step 3: cleanup and deinit Profile managers
+    BT_LOGR("CompleteToggleBt set sIsFirstTimeToggleOffBt = true");
+    sIsFirstTimeToggleOffBt = true;
+    BluetoothService::CompleteToggleBt(aEnabled);
+    AdapterStateChangedNotification(false);
+  } else {
+    BluetoothService::CompleteToggleBt(aEnabled);
+  }
+}
