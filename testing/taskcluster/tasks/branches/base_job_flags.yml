@@ -24,6 +24,7 @@ flags:
     - dolphin-512-eng
     - aries-nightly
     - aries-eng
+    - linux32_firefox
 
   tests:
     - cppunit

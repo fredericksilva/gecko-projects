@@ -21,13 +21,14 @@ def validate(task):
     if 'extra' not in task_def:
         raise BuildTaskValidationException('build task must have task.extra props')
 
-    if 'locations' not in task_def['extra']:
-        raise BuildTaskValidationException('task.extra.locations missing')
-
-    locations = task_def['extra']['locations']
-
-    if 'build' not in locations:
-        raise BuildTaskValidationException('task.extra.locations.build missing')
-
-    if 'tests' not in locations:
-        raise BuildTaskValidationException('task.extra.locations.tests missing')
+    # TODO: commented out because they aren't required for buildbot bridge jobs...
+#    if 'locations' not in task_def['extra']:
+#        raise BuildTaskValidationException('task.extra.locations missing')
+#
+#    locations = task_def['extra']['locations']
+#
+#    if 'build' not in locations:
+#        raise BuildTaskValidationException('task.extra.locations.build missing')
+#
+#    if 'tests' not in locations:
+#        raise BuildTaskValidationException('task.extra.locations.tests missing')

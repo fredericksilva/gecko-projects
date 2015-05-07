@@ -1,0 +1,47 @@
+# This is the "base" task which contains the common values all builds must
+# provide.
+---
+taskId: {{build_slugid}}
+
+task:
+  created: '{{now}}'
+  deadline: '{{#from_now}}24 hours{{/from_now}}'
+  metadata:
+    source: http://todo.com/soon
+    owner: release+taskcluster@mozilla.com
+
+  tags:
+    createdForUser: {{owner}}
+
+  workerType: buildbot-bridge
+  provisionerId: buildbot-bridge
+  schedulerId: task-graph-scheduler
+
+  routes:
+    - 'index.gecko.v1.{{project}}.revision.linux.{{head_rev}}.{{build_name}}.{{build_type}}'
+    - 'index.gecko.v1.{{project}}.latest.linux.{{build_name}}.{{build_type}}'
+
+  payload:
+    # Required by the Buildbot Bridge, filled out by children
+    #buildername: foo
+
+    # TODO: are there any properties that are shared by all jobs?
+    # buildid and builduid maybe? do we still need them even?
+    #properties:
+
+    sourcestamp:
+      # Should we be using {{base_repository}} instead?
+      # TODO: Buildbot needs a branch like "integration/mozilla-inbound"
+      # but we can only provide a full URL ({{head_repository}}) or the
+      # last part of the path ({{project}}). The buildbot bridge should
+      # probably take care of shortening this.
+      branch: '{{head_repository}}'
+      revision: '{{head_ref}}'
+
+  extra:
+    index:
+      rank: {{pushlog_id}}
+    treeherder:
+      groupSymbol: tc
+      groupName: Submitted by taskcluster
+      symbol: B

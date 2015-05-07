@@ -119,7 +119,7 @@ def extract_tests_from_platform(test_jobs, build_platform, build_task, tests):
     :param list tests: Test flags.
     :return: List of tasks (ex: [{ task: 'test_task.yml' }]
     '''
-    if tests is None:
+    if tests is None or test_jobs is None:
         return []
 
     results = []
@@ -235,7 +235,7 @@ def parse_commit(message, jobs):
             result.append({
                 'task': build_task,
                 'dependents': extract_tests_from_platform(
-                    jobs['tests'], platform_builds, build_task, tests
+                    jobs.get('tests'), platform_builds, build_task, tests
                 ),
                 'additional-parameters': additional_parameters
             })

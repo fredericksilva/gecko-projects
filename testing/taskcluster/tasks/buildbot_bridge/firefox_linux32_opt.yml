@@ -1,0 +1,18 @@
+$inherits:
+  from: 'tasks/buildbot_bridge.yml'
+  variables:
+    build_name: 'firefox_linux32'
+    build_type: 'opt'
+
+task:
+  metadata:
+    name: 'Linux Opt Build'
+    description: 'Linux Opt Build'
+
+  payload:
+    buildername: 'Linux {{project}} build'
+
+  extra:
+    treeherder:
+      machine:
+        platform: linux

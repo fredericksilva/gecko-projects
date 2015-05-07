@@ -271,22 +271,6 @@ class Graph(object):
             taskcluster_graph.build_task.validate(build_task)
             graph['tasks'].append(build_task)
 
-            tests_url = ARTIFACT_URL.format(
-                build_parameters['build_slugid'],
-                build_task['task']['extra']['locations']['tests']
-            )
-
-            build_url = ARTIFACT_URL.format(
-                build_parameters['build_slugid'],
-                build_task['task']['extra']['locations']['build']
-            )
-
-            # img_url is only necessary for device builds
-            img_url = ARTIFACT_URL.format(
-                build_parameters['build_slugid'],
-                build_task['task']['extra']['locations'].get('img', '')
-            )
-
             define_task = DEFINE_TASK.format(build_task['task']['workerType'])
 
             graph['scopes'].append(define_task)
@@ -314,6 +298,22 @@ class Graph(object):
                 raise ValueError(message.fomrat(build['task']))
 
             for test in build['dependents']:
+                tests_url = ARTIFACT_URL.format(
+                    build_parameters['build_slugid'],
+                    build_task['task']['extra']['locations']['tests']
+                )
+
+                build_url = ARTIFACT_URL.format(
+                    build_parameters['build_slugid'],
+                    build_task['task']['extra']['locations']['build']
+                )
+
+                # img_url is only necessary for device builds
+                img_url = ARTIFACT_URL.format(
+                    build_parameters['build_slugid'],
+                    build_task['task']['extra']['locations'].get('img', '')
+                )
+
                 test = test['allowed_build_tasks'][build['task']]
                 test_parameters = copy.copy(build_parameters)
                 test_parameters['build_url'] = build_url
