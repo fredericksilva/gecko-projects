@@ -1,5 +1,5 @@
 /* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=2 et sw=2 tw=80: */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -27,7 +27,6 @@ namespace dom {
 
 class DOMError;
 class DOMStringList;
-class PBlobChild;
 
 namespace indexedDB {
 
@@ -37,22 +36,29 @@ class BackgroundTransactionChild;
 class BackgroundVersionChangeTransactionChild;
 class IDBDatabase;
 class IDBObjectStore;
+class IDBOpenDBRequest;
 class IDBRequest;
 class IndexMetadata;
 class ObjectStoreSpec;
 class OpenCursorParams;
-class PBackgroundIDBDatabaseFileChild;
 class RequestParams;
 
-class IDBTransaction MOZ_FINAL
+class IDBTransaction final
   : public IDBWrapperCache
   , public nsIRunnable
 {
+  friend class BackgroundCursorChild;
+  friend class BackgroundRequestChild;
+
+  class WorkerFeature;
+  friend class WorkerFeature;
+
 public:
   enum Mode
   {
     READ_ONLY = 0,
     READ_WRITE,
+    READ_WRITE_FLUSH,
     VERSION_CHANGE,
 
     // Only needed for IPC serialization helper, should never be used in code.
@@ -73,6 +79,7 @@ private:
   nsTArray<nsString> mObjectStoreNames;
   nsTArray<nsRefPtr<IDBObjectStore>> mObjectStores;
   nsTArray<nsRefPtr<IDBObjectStore>> mDeletedObjectStores;
+  nsAutoPtr<WorkerFeature> mWorkerFeature;
 
   // Tagged with mMode. If mMode is VERSION_CHANGE then mBackgroundActor will be
   // a BackgroundVersionChangeTransactionChild. Otherwise it will be a
@@ -82,22 +89,23 @@ private:
     BackgroundVersionChangeTransactionChild* mVersionChangeBackgroundActor;
   } mBackgroundActor;
 
+  const int64_t mLoggingSerialNumber;
 
   // Only used for VERSION_CHANGE transactions.
   int64_t mNextObjectStoreId;
   int64_t mNextIndexId;
 
-#ifdef MOZ_ENABLE_PROFILER_SPS
-  uint64_t mSerialNumber;
-#endif
-
   nsresult mAbortCode;
   uint32_t mPendingRequestCount;
+
+  nsString mFilename;
+  uint32_t mLineNo;
 
   ReadyState mReadyState;
   Mode mMode;
 
   bool mCreating;
+  bool mRegistered;
   bool mAbortedByScript;
 
 #ifdef DEBUG
@@ -109,6 +117,7 @@ public:
   static already_AddRefed<IDBTransaction>
   CreateVersionChange(IDBDatabase* aDatabase,
                       BackgroundVersionChangeTransactionChild* aActor,
+                      IDBOpenDBRequest* aOpenRequest,
                       int64_t aNextObjectStoreId,
                       int64_t aNextIndexId);
 
@@ -143,9 +152,8 @@ public:
     }
   }
 
-  void
-  StartRequest(BackgroundRequestChild* aBackgroundActor,
-               const RequestParams& aParams);
+  BackgroundRequestChild*
+  StartRequest(IDBRequest* aRequest, const RequestParams& aParams);
 
   void
   OpenCursor(BackgroundCursorChild* aBackgroundActor,
@@ -153,12 +161,6 @@ public:
 
   void
   RefreshSpec(bool aMayDelete);
-
-  void
-  OnNewRequest();
-
-  void
-  OnRequestFinished();
 
   bool
   IsOpen() const;
@@ -174,7 +176,9 @@ public:
   IsWriteAllowed() const
   {
     AssertIsOnOwningThread();
-    return mMode == READ_WRITE || mMode == VERSION_CHANGE;
+    return mMode == READ_WRITE ||
+           mMode == READ_WRITE_FLUSH ||
+           mMode == VERSION_CHANGE;
   }
 
   bool
@@ -183,6 +187,16 @@ public:
     AssertIsOnOwningThread();
     return NS_FAILED(mAbortCode);
   }
+
+  nsresult
+  AbortCode() const
+  {
+    AssertIsOnOwningThread();
+    return mAbortCode;
+  }
+
+  void
+  GetCallerLocation(nsAString& aFilename, uint32_t* aLineNo) const;
 
   // 'Get' prefix is to avoid name collisions with the enum
   Mode
@@ -230,14 +244,13 @@ public:
   void
   Abort(nsresult aAbortCode);
 
-#ifdef MOZ_ENABLE_PROFILER_SPS
-  uint32_t
-  GetSerialNumber() const
+  int64_t
+  LoggingSerialNumber() const
   {
     AssertIsOnOwningThread();
-    return mSerialNumber;
+
+    return mLoggingSerialNumber;
   }
-#endif
 
   nsPIDOMWindow*
   GetParentObject() const;
@@ -278,11 +291,11 @@ public:
 
   // nsWrapperCache
   virtual JSObject*
-  WrapObject(JSContext* aCx) MOZ_OVERRIDE;
+  WrapObject(JSContext* aCx, JS::Handle<JSObject*> aGivenProto) override;
 
   // nsIDOMEventTarget
   virtual nsresult
-  PreHandleEvent(EventChainPreVisitor& aVisitor) MOZ_OVERRIDE;
+  PreHandleEvent(EventChainPreVisitor& aVisitor) override;
 
 private:
   IDBTransaction(IDBDatabase* aDatabase,
@@ -298,6 +311,12 @@ private:
 
   void
   SendAbort(nsresult aResultCode);
+
+  void
+  OnNewRequest();
+
+  void
+  OnRequestFinished(bool aActorDestroyedNormally);
 };
 
 } // namespace indexedDB

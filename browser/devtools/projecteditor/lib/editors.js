@@ -134,8 +134,8 @@ var TextEditor = Class({
       let keyUpper = key.getAttribute("key").toUpperCase();
       let toolModifiers = key.getAttribute("modifiers");
       let modifiers = {
-        alt: toolModifiers.contains("alt"),
-        shift: toolModifiers.contains("shift")
+        alt: toolModifiers.includes("alt"),
+        shift: toolModifiers.includes("shift")
       };
 
       // On the key press, we will dispatch the event within projecteditor.
@@ -204,7 +204,7 @@ var TextEditor = Class({
    */
   load: function(resource) {
     // Wait for the editor.appendTo and resource.load before proceeding.
-    // They can run  in parallel.
+    // They can run in parallel.
     return promise.all([
       resource.load(),
       this.appended
@@ -245,7 +245,9 @@ var TextEditor = Class({
    */
   focus: function() {
     return this.appended.then(() => {
-      this.editor.focus();
+      if (this.editor) {
+        this.editor.focus();
+      }
     });
   }
 });

@@ -1,4 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -46,7 +47,8 @@ MultipartFileImpl::GetInternalStream(nsIInputStream** aStream)
     NS_ENSURE_SUCCESS(rv, rv);
   }
 
-  return CallQueryInterface(stream, aStream);
+  stream.forget(aStream);
+  return NS_OK;
 }
 
 already_AddRefed<FileImpl>
@@ -186,9 +188,11 @@ void
 MultipartFileImpl::SetLengthAndModifiedDate()
 {
   MOZ_ASSERT(mLength == UINT64_MAX);
-  MOZ_ASSERT(mLastModificationDate == UINT64_MAX);
+  MOZ_ASSERT(mLastModificationDate == INT64_MAX);
 
   uint64_t totalLength = 0;
+  int64_t lastModified = 0;
+  bool lastModifiedSet = false;
 
   for (uint32_t index = 0, count = mBlobImpls.Length(); index < count; index++) {
     nsRefPtr<FileImpl>& blob = mBlobImpls[index];
@@ -204,6 +208,16 @@ MultipartFileImpl::SetLengthAndModifiedDate()
 
     MOZ_ASSERT(UINT64_MAX - subBlobLength >= totalLength);
     totalLength += subBlobLength;
+
+    if (blob->IsFile()) {
+      int64_t partLastModified = blob->GetLastModified(error);
+      MOZ_ALWAYS_TRUE(!error.Failed());
+
+      if (lastModified < partLastModified) {
+        lastModified = partLastModified;
+        lastModifiedSet = true;
+      }
+    }
   }
 
   mLength = totalLength;
@@ -213,7 +227,8 @@ MultipartFileImpl::SetLengthAndModifiedDate()
     //   var x = new Date(); var f = new File(...);
     //   x.getTime() < f.dateModified.getTime()
     // could fail.
-    mLastModificationDate = JS_Now();
+    mLastModificationDate =
+      lastModifiedSet ? lastModified * PR_USEC_PER_MSEC : JS_Now();
   }
 }
 
@@ -233,6 +248,36 @@ MultipartFileImpl::GetMozFullPathInternal(nsAString& aFilename,
   }
 
   blobImpl->GetMozFullPathInternal(aFilename, aRv);
+}
+
+nsresult
+MultipartFileImpl::SetMutable(bool aMutable)
+{
+  nsresult rv;
+
+  // This looks a little sketchy since FileImpl objects are supposed to be
+  // threadsafe. However, we try to enforce that all FileImpl objects must be
+  // set to immutable *before* being passed to another thread, so this should
+  // be safe.
+  if (!aMutable && !mImmutable && !mBlobImpls.IsEmpty()) {
+    for (uint32_t index = 0, count = mBlobImpls.Length();
+         index < count;
+         index++) {
+      rv = mBlobImpls[index]->SetMutable(aMutable);
+      if (NS_WARN_IF(NS_FAILED(rv))) {
+        return rv;
+      }
+    }
+  }
+
+  rv = FileImplBase::SetMutable(aMutable);
+  if (NS_WARN_IF(NS_FAILED(rv))) {
+    return rv;
+  }
+
+  MOZ_ASSERT_IF(!aMutable, mImmutable);
+
+  return NS_OK;
 }
 
 void
@@ -321,7 +366,8 @@ MultipartFileImpl::InitializeChromeFile(nsPIDOMWindow* aWindow,
   }
 
   // Pre-cache modified date.
-  aRv = blob->GetMozLastModifiedDate(&unused);
+  int64_t unusedDate;
+  aRv = blob->GetMozLastModifiedDate(&unusedDate);
   if (NS_WARN_IF(aRv.Failed())) {
     return;
   }
@@ -351,4 +397,16 @@ MultipartFileImpl::InitializeChromeFile(nsPIDOMWindow* aWindow,
   }
 
   InitializeChromeFile(aWindow, file, aBag, false, aRv);
+}
+
+bool
+MultipartFileImpl::MayBeClonedToOtherThreads() const
+{
+  for (uint32_t i = 0; i < mBlobImpls.Length(); ++i) {
+    if (!mBlobImpls[i]->MayBeClonedToOtherThreads()) {
+      return false;
+    }
+  }
+
+  return true;
 }

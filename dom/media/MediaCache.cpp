@@ -66,8 +66,9 @@ static const uint32_t FREE_BLOCK_SCAN_LIMIT = 16;
 // size limits).
 static MediaCache* gMediaCache;
 
-class MediaCacheFlusher MOZ_FINAL : public nsIObserver,
-                                      public nsSupportsWeakReference {
+class MediaCacheFlusher final : public nsIObserver,
+                                public nsSupportsWeakReference
+{
   MediaCacheFlusher() {}
   ~MediaCacheFlusher();
 public:
@@ -193,6 +194,10 @@ public:
 
   // This queues a call to Update() on the main thread.
   void QueueUpdate();
+
+  // Notify all streams for the resource ID that the suspended status changed
+  // at the end of MediaCache::Update.
+  void QueueSuspendedStatusUpdate(int64_t aResourceID);
 
   // Updates the cache state asynchronously on the main thread:
   // -- try to trim the cache back to its desired size, if necessary
@@ -347,6 +352,8 @@ protected:
 #ifdef DEBUG
   bool            mInUpdate;
 #endif
+  // A list of resource IDs to notify about the change in suspended status.
+  nsTArray<int64_t> mSuspendedStatusToNotify;
 };
 
 NS_IMETHODIMP
@@ -1167,8 +1174,10 @@ MediaCache::Update()
       actions.AppendElement(NONE);
 
       MediaCacheStream* stream = mStreams[i];
-      if (stream->mClosed)
+      if (stream->mClosed) {
+        CACHE_LOG(PR_LOG_DEBUG, ("Stream %p closed", stream));
         continue;
+      }
 
       // Figure out where we should be reading from. It's the first
       // uncached byte after the current mStreamOffset.
@@ -1274,7 +1283,7 @@ MediaCache::Update()
         for (uint32_t j = 0; j < i; ++j) {
           MediaCacheStream* other = mStreams[j];
           if (other->mResourceID == stream->mResourceID &&
-              !other->mClient->IsSuspended() &&
+              !other->mClosed && !other->mClient->IsSuspended() &&
               other->mChannelOffset/BLOCK_SIZE == desiredOffset/BLOCK_SIZE) {
             // This block is already going to be read by the other stream.
             // So don't try to read it from this stream as well.
@@ -1351,10 +1360,12 @@ MediaCache::Update()
     case RESUME:
       CACHE_LOG(PR_LOG_DEBUG, ("Stream %p Resumed", stream));
       rv = stream->mClient->CacheClientResume();
+      QueueSuspendedStatusUpdate(stream->mResourceID);
       break;
     case SUSPEND:
       CACHE_LOG(PR_LOG_DEBUG, ("Stream %p Suspended", stream));
       rv = stream->mClient->CacheClientSuspend();
+      QueueSuspendedStatusUpdate(stream->mResourceID);
       break;
     default:
       rv = NS_OK;
@@ -1369,6 +1380,15 @@ MediaCache::Update()
       stream->CloseInternal(mon);
     }
   }
+
+  // Notify streams about the suspended status changes.
+  for (uint32_t i = 0; i < mSuspendedStatusToNotify.Length(); ++i) {
+    MediaCache::ResourceStreamIterator iter(mSuspendedStatusToNotify[i]);
+    while (MediaCacheStream* stream = iter.Next()) {
+      stream->mClient->CacheClientNotifySuspendedStatusChanged();
+    }
+  }
+  mSuspendedStatusToNotify.Clear();
 }
 
 class UpdateEvent : public nsRunnable
@@ -1397,6 +1417,15 @@ MediaCache::QueueUpdate()
   mUpdateQueued = true;
   nsCOMPtr<nsIRunnable> event = new UpdateEvent();
   NS_DispatchToMainThread(event);
+}
+
+void
+MediaCache::QueueSuspendedStatusUpdate(int64_t aResourceID)
+{
+  NS_ASSERTION(NS_IsMainThread(), "Only call on main thread");
+  if (!mSuspendedStatusToNotify.Contains(aResourceID)) {
+    mSuspendedStatusToNotify.AppendElement(aResourceID);
+  }
 }
 
 #ifdef DEBUG_VERIFY_CACHE
@@ -1669,6 +1698,7 @@ MediaCache::NoteSeek(MediaCacheStream* aStream, int64_t aOldOffset)
       std::min<int64_t>((aOldOffset + BLOCK_SIZE - 1)/BLOCK_SIZE,
              aStream->mBlocks.Length());
     while (blockIndex < endIndex) {
+      MOZ_ASSERT(endIndex > 0);
       int32_t cacheBlockIndex = aStream->mBlocks[endIndex - 1];
       if (cacheBlockIndex >= 0) {
         BlockOwner* bo = GetBlockOwner(cacheBlockIndex, aStream);
@@ -1979,6 +2009,10 @@ MediaCacheStream::CloseInternal(ReentrantMonitorAutoEnter& aReentrantMonitor)
   if (mClosed)
     return;
   mClosed = true;
+  // Closing a stream will change the return value of
+  // MediaCacheStream::AreAllStreamsForResourceSuspended as well as
+  // ChannelMediaResource::IsSuspendedByCache. Let's notify it.
+  gMediaCache->QueueSuspendedStatusUpdate(mResourceID);
   gMediaCache->ReleaseStreamBlocks(this);
   // Wake up any blocked readers
   aReentrantMonitor.NotifyAll();
@@ -2233,7 +2267,7 @@ MediaCacheStream::Read(char* aBuffer, uint32_t aCount, uint32_t* aBytes)
         int64_t bytes = std::min<int64_t>(size, streamWithPartialBlock->mChannelOffset - mStreamOffset);
         // Clamp bytes until 64-bit file size issues are fixed.
         bytes = std::min(bytes, int64_t(INT32_MAX));
-        NS_ABORT_IF_FALSE(bytes >= 0 && bytes <= aCount, "Bytes out of range.");
+        MOZ_ASSERT(bytes >= 0 && bytes <= aCount, "Bytes out of range.");
         memcpy(aBuffer,
           reinterpret_cast<char*>(streamWithPartialBlock->mPartialBlockBuffer.get()) + offsetInStreamBlock, bytes);
         if (mCurrentMode == MODE_METADATA) {
@@ -2258,7 +2292,7 @@ MediaCacheStream::Read(char* aBuffer, uint32_t aCount, uint32_t* aBytes)
 
     int64_t offset = cacheBlock*BLOCK_SIZE + offsetInStreamBlock;
     int32_t bytes;
-    NS_ABORT_IF_FALSE(size >= 0 && size <= INT32_MAX, "Size out of range.");
+    MOZ_ASSERT(size >= 0 && size <= INT32_MAX, "Size out of range.");
     nsresult rv = gMediaCache->ReadCacheFile(offset, aBuffer + count, int32_t(size), &bytes);
     if (NS_FAILED(rv)) {
       if (count == 0)
@@ -2330,7 +2364,7 @@ MediaCacheStream::ReadFromCache(char* aBuffer, int64_t aOffset, int64_t aCount)
       // Clamp bytes until 64-bit file size issues are fixed.
       int64_t toCopy = std::min<int64_t>(size, mChannelOffset - streamOffset);
       bytes = std::min(toCopy, int64_t(INT32_MAX));
-      NS_ABORT_IF_FALSE(bytes >= 0 && bytes <= toCopy, "Bytes out of range.");
+      MOZ_ASSERT(bytes >= 0 && bytes <= toCopy, "Bytes out of range.");
       memcpy(aBuffer + count,
         reinterpret_cast<char*>(mPartialBlockBuffer.get()) + offsetInStreamBlock, bytes);
     } else {
@@ -2339,7 +2373,7 @@ MediaCacheStream::ReadFromCache(char* aBuffer, int64_t aOffset, int64_t aCount)
         return NS_ERROR_FAILURE;
       }
       int64_t offset = cacheBlock*BLOCK_SIZE + offsetInStreamBlock;
-      NS_ABORT_IF_FALSE(size >= 0 && size <= INT32_MAX, "Size out of range.");
+      MOZ_ASSERT(size >= 0 && size <= INT32_MAX, "Size out of range.");
       nsresult rv = gMediaCache->ReadCacheFile(offset, aBuffer + count, int32_t(size), &bytes);
       if (NS_FAILED(rv)) {
         return rv;

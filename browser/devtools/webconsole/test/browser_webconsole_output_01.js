@@ -29,6 +29,7 @@ let inputTests = [
   {
     input: "'hello \\nfrom \\rthe \\\"string world!'",
     output: "\"hello \nfrom \rthe \"string world!\"",
+    consoleOutput: "hello \nfrom \rthe \"string world!",
   },
 
   // 1
@@ -36,12 +37,14 @@ let inputTests = [
     // unicode test
     input: "'\xFA\u1E47\u0129\xE7\xF6d\xEA \u021B\u0115\u0219\u0165'",
     output: "\"\xFA\u1E47\u0129\xE7\xF6d\xEA \u021B\u0115\u0219\u0165\"",
+    consoleOutput: "\xFA\u1E47\u0129\xE7\xF6d\xEA \u021B\u0115\u0219\u0165",
   },
 
   // 2
   {
     input: "'" + longString + "'",
     output: '"' + initialString + "\"[\u2026]",
+    consoleOutput: initialString + "[\u2026]",
     printOutput: initialString,
   },
 
@@ -49,6 +52,7 @@ let inputTests = [
   {
     input: "''",
     output: '""',
+    consoleOutput: "",
     printOutput: '""',
   },
 
@@ -62,6 +66,7 @@ let inputTests = [
   {
     input: "'0'",
     output: '"0"',
+    consoleOutput: "0",
   },
 
   // 6
@@ -74,6 +79,7 @@ let inputTests = [
   {
     input: "'42'",
     output: '"42"',
+    consoleOutput: "42",
   },
 
   // 8
@@ -82,32 +88,31 @@ let inputTests = [
     output: "/foobar/",
     inspectable: true,
   },
+
+  // 9
+  {
+    input: "Symbol()",
+    output: "Symbol()"
+  },
+
+  // 10
+  {
+    input: "Symbol('foo')",
+    output: "Symbol(foo)"
+  },
+
+  // 11
+  {
+    input: "Symbol.iterator",
+    output: "Symbol(Symbol.iterator)"
+  },
 ];
-
-if (typeof Symbol !== "undefined") {
-  inputTests.push(
-    // 9
-    {
-      input: "Symbol()",
-      output: "Symbol()"
-    },
-
-    // 10
-    {
-      input: "Symbol('foo')",
-      output: "Symbol(foo)"
-    },
-
-    // 11
-    {
-      input: "Symbol.iterator",
-      output: "Symbol(Symbol.iterator)"
-    });
-}
 
 longString = initialString = null;
 
 function test() {
+  requestLongerTimeout(2);
+
   registerCleanupFunction(() => {
     DebuggerServer.LONG_STRING_LENGTH = LONG_STRING_LENGTH;
     DebuggerServer.LONG_STRING_INITIAL_LENGTH = LONG_STRING_INITIAL_LENGTH;
@@ -121,6 +126,6 @@ function test() {
 }
 
 function finishUp() {
-  inputTests = null;
+  longString = initialString = inputTests = null;
   finishTest();
 }

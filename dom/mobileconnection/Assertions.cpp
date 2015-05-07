@@ -1,3 +1,5 @@
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -56,6 +58,18 @@ ASSERT_MOBILE_ROAMING_MODE_EQUALITY(Affiliated, CDMA_ROAMING_PREFERENCE_AFFILIAT
 ASSERT_MOBILE_ROAMING_MODE_EQUALITY(Any, CDMA_ROAMING_PREFERENCE_ANY);
 
 #undef ASSERT_MOBILE_ROAMING_MODE_EQUALITY
+
+#define ASSERT_MOBILE_NETWORK_TYPE_EQUALITY(webidlState, xpidlState) \
+  static_assert(static_cast<int32_t>(MobileNetworkType::webidlState) == nsIMobileConnection::xpidlState, \
+                "MobileNetworkType::" #webidlState " should equal to nsIMobileConnection::" #xpidlState)
+
+ASSERT_MOBILE_NETWORK_TYPE_EQUALITY(Gsm, MOBILE_NETWORK_TYPE_GSM);
+ASSERT_MOBILE_NETWORK_TYPE_EQUALITY(Wcdma, MOBILE_NETWORK_TYPE_WCDMA);
+ASSERT_MOBILE_NETWORK_TYPE_EQUALITY(Cdma, MOBILE_NETWORK_TYPE_CDMA);
+ASSERT_MOBILE_NETWORK_TYPE_EQUALITY(Evdo, MOBILE_NETWORK_TYPE_EVDO);
+ASSERT_MOBILE_NETWORK_TYPE_EQUALITY(Lte, MOBILE_NETWORK_TYPE_LTE);
+
+#undef ASSERT_MOBILE_NETWORK_TYPE_EQUALITY
 
 } // namespace dom
 } // namespace mozilla

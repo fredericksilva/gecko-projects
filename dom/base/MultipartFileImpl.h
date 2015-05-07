@@ -1,4 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -17,7 +18,7 @@
 using namespace mozilla;
 using namespace mozilla::dom;
 
-class MultipartFileImpl MOZ_FINAL : public FileImplBase
+class MultipartFileImpl final : public FileImplBase
 {
 public:
   NS_DECL_ISUPPORTS_INHERITED
@@ -84,22 +85,25 @@ public:
   virtual already_AddRefed<FileImpl>
   CreateSlice(uint64_t aStart, uint64_t aLength,
               const nsAString& aContentType,
-              ErrorResult& aRv) MOZ_OVERRIDE;
+              ErrorResult& aRv) override;
 
-  virtual uint64_t GetSize(ErrorResult& aRv) MOZ_OVERRIDE
+  virtual uint64_t GetSize(ErrorResult& aRv) override
   {
     return mLength;
   }
 
-  virtual nsresult GetInternalStream(nsIInputStream** aInputStream) MOZ_OVERRIDE;
+  virtual nsresult GetInternalStream(nsIInputStream** aInputStream) override;
 
-  virtual const nsTArray<nsRefPtr<FileImpl>>* GetSubBlobImpls() const MOZ_OVERRIDE
+  virtual const nsTArray<nsRefPtr<FileImpl>>* GetSubBlobImpls() const override
   {
     return &mBlobImpls;
   }
 
   virtual void GetMozFullPathInternal(nsAString& aFullPath,
-                                      ErrorResult& aRv) MOZ_OVERRIDE;
+                                      ErrorResult& aRv) override;
+
+  virtual nsresult
+  SetMutable(bool aMutable) override;
 
   void SetName(const nsAString& aName)
   {
@@ -110,6 +114,8 @@ public:
   {
     mIsFromNsIFile = aValue;
   }
+
+  virtual bool MayBeClonedToOtherThreads() const override;
 
 protected:
   virtual ~MultipartFileImpl() {}

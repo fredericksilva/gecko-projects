@@ -8,22 +8,23 @@
  */
 
 [Constructor(optional BodyInit body, optional ResponseInit init),
- Exposed=(Window,Worker),
- Func="mozilla::dom::Headers::PrefEnabled"]
+ Exposed=(Window,Worker)]
 interface Response {
-  static Response error();
-  static Response redirect(ScalarValueString url, optional unsigned short status = 302);
+  [NewObject] static Response error();
+  [Throws,
+   NewObject] static Response redirect(USVString url, optional unsigned short status = 302);
 
   readonly attribute ResponseType type;
 
-  readonly attribute ScalarValueString url;
+  readonly attribute USVString url;
   readonly attribute unsigned short status;
+  readonly attribute boolean ok;
   readonly attribute ByteString statusText;
-  readonly attribute Headers headers;
+  [SameObject] readonly attribute Headers headers;
 
-  Response clone();
+  [Throws,
+   NewObject] Response clone();
 };
-
 Response implements Body;
 
 dictionary ResponseInit {

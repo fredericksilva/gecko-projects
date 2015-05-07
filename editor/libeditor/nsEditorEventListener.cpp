@@ -3,6 +3,9 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+#include "nsEditorEventListener.h"
+
 #include "mozilla/Assertions.h"         // for MOZ_ASSERT, etc
 #include "mozilla/EventListenerManager.h" // for EventListenerManager
 #include "mozilla/IMEStateManager.h"    // for IMEStateManager
@@ -15,7 +18,6 @@
 #include "nsCaret.h"                    // for nsCaret
 #include "nsDebug.h"                    // for NS_ENSURE_TRUE, etc
 #include "nsEditor.h"                   // for nsEditor, etc
-#include "nsEditorEventListener.h"
 #include "nsFocusManager.h"             // for nsFocusManager
 #include "nsGkAtoms.h"                  // for nsGkAtoms, nsGkAtoms::input
 #include "nsIClipboard.h"               // for nsIClipboard, etc
@@ -51,6 +53,7 @@
 #include "nsRange.h"
 #include "nsServiceManagerUtils.h"      // for do_GetService
 #include "nsString.h"                   // for nsAutoString
+#include "nsQueryObject.h"              // for do_QueryObject
 #ifdef HANDLE_NATIVE_TEXT_DIRECTION_SWITCH
 #include "nsContentUtils.h"             // for nsContentUtils, etc
 #include "nsIBidiKeyboard.h"            // for nsIBidiKeyboard
@@ -371,12 +374,12 @@ nsEditorEventListener::HandleEvent(nsIDOMEvent* aEvent)
       return DragEnter(dragEvent);
     }
     // dragover
-    case NS_DRAGDROP_OVER_SYNTH: {
+    case NS_DRAGDROP_OVER: {
       nsCOMPtr<nsIDOMDragEvent> dragEvent = do_QueryInterface(aEvent);
       return DragOver(dragEvent);
     }
     // dragexit
-    case NS_DRAGDROP_EXIT_SYNTH: {
+    case NS_DRAGDROP_EXIT: {
       nsCOMPtr<nsIDOMDragEvent> dragEvent = do_QueryInterface(aEvent);
       return DragExit(dragEvent);
     }
@@ -813,6 +816,10 @@ nsEditorEventListener::DragEnter(nsIDOMDragEvent* aDragEvent)
     mCaret = new nsCaret();
     mCaret->Init(presShell);
     mCaret->SetCaretReadOnly(true);
+    // This is to avoid the requirement that the Selection is Collapsed which
+    // it can't be when dragging a selection in the same shell.
+    // See nsCaret::IsVisible().
+    mCaret->SetVisibilityDuringSelection(true);
   }
 
   presShell->SetCaret(mCaret);
@@ -876,10 +883,6 @@ nsEditorEventListener::CleanupDragDropCaret()
 
   nsCOMPtr<nsIPresShell> presShell = GetPresShell();
   if (presShell) {
-    nsCOMPtr<nsISelectionController> selCon(do_QueryInterface(presShell));
-    if (selCon) {
-      selCon->SetCaretEnabled(false);
-    }
     presShell->RestoreCaret();
   }
 
@@ -1142,7 +1145,7 @@ nsEditorEventListener::IsFileControlTextBox()
     return false;
   }
   nsIContent* parent = root->FindFirstNonChromeOnlyAccessContent();
-  if (!parent || !parent->IsHTML(nsGkAtoms::input)) {
+  if (!parent || !parent->IsHTMLElement(nsGkAtoms::input)) {
     return false;
   }
   nsCOMPtr<nsIFormControl> formControl = do_QueryInterface(parent);

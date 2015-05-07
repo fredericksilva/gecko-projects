@@ -288,10 +288,10 @@ void NodeIterator::ContentRemoved(nsIDocument *aDocument,
     mWorkingPointer.AdjustAfterRemoval(mRoot, container, aChild, aPreviousSibling);
 }
 
-JSObject*
-NodeIterator::WrapObject(JSContext *cx)
+bool
+NodeIterator::WrapObject(JSContext *cx, JS::Handle<JSObject*> aGivenProto, JS::MutableHandle<JSObject*> aReflector)
 {
-    return NodeIteratorBinding::Wrap(cx, this);
+    return NodeIteratorBinding::Wrap(cx, this, aGivenProto, aReflector);
 }
 
 } // namespace dom

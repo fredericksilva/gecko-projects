@@ -9,12 +9,12 @@ EXPORTS.mozilla += [
 ]
 
 UNIFIED_SOURCES += [
+    'CertBlocklist.cpp',
     'DataStorage.cpp',
     'nsBOOTModule.cpp',
     'nsEntropyCollector.cpp',
     'nsSecureBrowserUIImpl.cpp',
     'nsSecurityHeaderParser.cpp',
-    'nsSecurityWarningDialogs.cpp',
     'nsSiteSecurityService.cpp',
     'PublicKeyPinningService.cpp',
     'RootCertificateTelemetryUtils.cpp',
@@ -24,8 +24,10 @@ LOCAL_INCLUDES += [
     '../../../pkix/include',
 ]
 
-FAIL_ON_WARNINGS = True
+GENERATED_INCLUDES += [
+    '/dist/public/nss',
+]
 
-MSVC_ENABLE_PGO = True
+FAIL_ON_WARNINGS = True
 
 FINAL_LIBRARY = 'xul'

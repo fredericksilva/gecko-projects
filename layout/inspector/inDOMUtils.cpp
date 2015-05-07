@@ -45,6 +45,7 @@
 #include "nsColor.h"
 #include "nsStyleSet.h"
 #include "nsStyleUtil.h"
+#include "nsQueryObject.h"
 
 using namespace mozilla;
 using namespace mozilla::css;
@@ -95,7 +96,7 @@ inDOMUtils::GetAllStyleSheets(nsIDOMDocument *aDocument, uint32_t *aLength,
     sheets.AppendElement(document->GetStyleSheetAt(i));
   }
 
-  nsISupports** ret = static_cast<nsISupports**>(NS_Alloc(sheets.Count() *
+  nsISupports** ret = static_cast<nsISupports**>(moz_xmalloc(sheets.Count() *
                                                  sizeof(nsISupports*)));
 
   for (int32_t i = 0; i < sheets.Count(); i++) {
@@ -234,8 +235,7 @@ inDOMUtils::GetCSSStyleRules(nsIDOMElement *aElement,
     }
   }
 
-  *_retval = rules;
-  NS_ADDREF(*_retval);
+  rules.forget(_retval);
 
   return NS_OK;
 }
@@ -295,7 +295,7 @@ inDOMUtils::GetSelectorCount(nsIDOMCSSStyleRule* aRule, uint32_t *aCount)
   ErrorResult rv;
   nsRefPtr<StyleRule> rule = GetRuleFromDOMRule(aRule, rv);
   if (rv.Failed()) {
-    return rv.ErrorCode();
+    return rv.StealNSResult();
   }
 
   uint32_t count = 0;
@@ -334,7 +334,7 @@ inDOMUtils::GetSelectorText(nsIDOMCSSStyleRule* aRule,
   ErrorResult rv;
   nsCSSSelectorList* sel = GetSelectorAtIndex(aRule, aSelectorIndex, rv);
   if (rv.Failed()) {
-    return rv.ErrorCode();
+    return rv.StealNSResult();
   }
 
   nsRefPtr<StyleRule> rule = GetRuleFromDOMRule(aRule, rv);
@@ -352,7 +352,7 @@ inDOMUtils::GetSpecificity(nsIDOMCSSStyleRule* aRule,
   ErrorResult rv;
   nsCSSSelectorList* sel = GetSelectorAtIndex(aRule, aSelectorIndex, rv);
   if (rv.Failed()) {
-    return rv.ErrorCode();
+    return rv.StealNSResult();
   }
 
   *aSpecificity = sel->mWeight;
@@ -372,7 +372,7 @@ inDOMUtils::SelectorMatchesElement(nsIDOMElement* aElement,
   ErrorResult rv;
   nsCSSSelectorList* tail = GetSelectorAtIndex(aRule, aSelectorIndex, rv);
   if (rv.Failed()) {
-    return rv.ErrorCode();
+    return rv.StealNSResult();
   }
 
   // We want just the one list item, not the whole list tail
@@ -456,7 +456,7 @@ inDOMUtils::GetCSSPropertyNames(uint32_t aFlags, uint32_t* aCount,
   }
 
   char16_t** props =
-    static_cast<char16_t**>(nsMemory::Alloc(maxCount * sizeof(char16_t*)));
+    static_cast<char16_t**>(moz_xmalloc(maxCount * sizeof(char16_t*)));
 
 #define DO_PROP(_prop)                                                  \
   PR_BEGIN_MACRO                                                        \
@@ -522,7 +522,7 @@ static void GetKeywordsForProperty(const nsCSSProperty aProperty,
   }
   const nsCSSProps::KTableValue *keywordTable =
     nsCSSProps::kKeywordTableTable[aProperty];
-  if (keywordTable && keywordTable != nsCSSProps::kBoxPropSourceKTable) {
+  if (keywordTable) {
     size_t i = 0;
     while (nsCSSKeyword(keywordTable[i]) != eCSSKeyword_UNKNOWN) {
       nsCSSKeyword word = nsCSSKeyword(keywordTable[i]);
@@ -616,7 +616,7 @@ inDOMUtils::GetSubpropertiesForCSSProperty(const nsAString& aProperty,
 
   nsTArray<nsString> array;
   if (!nsCSSProps::IsShorthand(propertyID)) {
-    *aValues = static_cast<char16_t**>(nsMemory::Alloc(sizeof(char16_t*)));
+    *aValues = static_cast<char16_t**>(moz_xmalloc(sizeof(char16_t*)));
     (*aValues)[0] = ToNewUnicode(nsCSSProps::GetStringValue(propertyID));
     *aLength = 1;
     return NS_OK;
@@ -630,7 +630,7 @@ inDOMUtils::GetSubpropertiesForCSSProperty(const nsAString& aProperty,
   }
 
   *aValues =
-    static_cast<char16_t**>(nsMemory::Alloc(subpropCount * sizeof(char16_t*)));
+    static_cast<char16_t**>(moz_xmalloc(subpropCount * sizeof(char16_t*)));
   *aLength = subpropCount;
   for (const nsCSSProperty *props = nsCSSProps::SubpropertyEntryFor(propertyID),
                            *props_start = props;
@@ -748,7 +748,8 @@ inDOMUtils::GetCSSValuesForProperty(const nsAString& aProperty,
     GetOtherValuesForProperty(propertyParserVariant, array);
   } else {
     // Property is shorthand.
-    CSSPROPS_FOR_SHORTHAND_SUBPROPERTIES(subproperty, propertyID) {
+    CSSPROPS_FOR_SHORTHAND_SUBPROPERTIES(subproperty, propertyID,
+                                         nsCSSProps::eEnabledForAllContent) {
       // Get colors (once) first.
       uint32_t propertyParserVariant = nsCSSProps::ParserVariant(*subproperty);
       if (propertyParserVariant & VARIANT_COLOR) {
@@ -756,7 +757,8 @@ inDOMUtils::GetCSSValuesForProperty(const nsAString& aProperty,
         break;
       }
     }
-    CSSPROPS_FOR_SHORTHAND_SUBPROPERTIES(subproperty, propertyID) {
+    CSSPROPS_FOR_SHORTHAND_SUBPROPERTIES(subproperty, propertyID,
+                                         nsCSSProps::eEnabledForAllContent) {
       uint32_t propertyParserVariant = nsCSSProps::ParserVariant(*subproperty);
       if (propertyParserVariant & VARIANT_KEYWORD) {
         GetKeywordsForProperty(*subproperty, array);
@@ -771,7 +773,7 @@ inDOMUtils::GetCSSValuesForProperty(const nsAString& aProperty,
 
   *aLength = array.Length();
   char16_t** ret =
-    static_cast<char16_t**>(NS_Alloc(*aLength * sizeof(char16_t*)));
+    static_cast<char16_t**>(moz_xmalloc(*aLength * sizeof(char16_t*)));
   for (uint32_t i = 0; i < *aLength; ++i) {
     ret[i] = ToNewUnicode(array[i]);
   }
@@ -867,6 +869,11 @@ inDOMUtils::CssPropertyIsValid(const nsAString& aPropertyName,
     return NS_OK;
   }
 
+  if (propertyID == eCSSPropertyExtra_variable) {
+    *_retval = true;
+    return NS_OK;
+  }
+
   // Get a parser, parse the property.
   nsCSSParser parser;
   *_retval = parser.IsValueValidForProperty(propertyID, aPropertyValue);
@@ -895,7 +902,7 @@ inDOMUtils::GetBindingURLs(nsIDOMElement *aElement, nsIArray **_retval)
     binding = binding->GetBaseBinding();
   }
 
-  NS_ADDREF(*_retval = urls);
+  urls.forget(_retval);
   return NS_OK;
 }
 

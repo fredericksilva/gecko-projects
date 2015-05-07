@@ -1,4 +1,5 @@
-/* vim: set shiftwidth=2 tabstop=8 autoindent cindent expandtab: */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -6,53 +7,48 @@
 #ifndef mozilla_dom_AnimationTimeline_h
 #define mozilla_dom_AnimationTimeline_h
 
+#include "nsISupports.h"
 #include "nsWrapperCache.h"
 #include "nsCycleCollectionParticipant.h"
+#include "mozilla/AnimationUtils.h"
 #include "mozilla/Attributes.h"
-#include "mozilla/TimeStamp.h"
+#include "nsIGlobalObject.h"
 #include "js/TypeDecls.h"
-#include "nsIDocument.h"
-
-struct JSContext;
 
 namespace mozilla {
 namespace dom {
 
-class AnimationTimeline MOZ_FINAL : public nsWrapperCache
+class AnimationTimeline
+  : public nsISupports
+  , public nsWrapperCache
 {
 public:
-  explicit AnimationTimeline(nsIDocument* aDocument)
-    : mDocument(aDocument)
+  explicit AnimationTimeline(nsIGlobalObject* aWindow)
+    : mWindow(aWindow)
   {
+    MOZ_ASSERT(mWindow);
   }
 
-  NS_INLINE_DECL_CYCLE_COLLECTING_NATIVE_REFCOUNTING(AnimationTimeline)
-  NS_DECL_CYCLE_COLLECTION_SCRIPT_HOLDER_NATIVE_CLASS(AnimationTimeline)
+protected:
+  virtual ~AnimationTimeline() { }
 
-  nsISupports* GetParentObject() const { return mDocument; }
-  virtual JSObject* WrapObject(JSContext* aCx) MOZ_OVERRIDE;
+public:
+  NS_DECL_CYCLE_COLLECTING_ISUPPORTS
+  NS_DECL_CYCLE_COLLECTION_SCRIPT_HOLDER_CLASS(AnimationTimeline)
+
+  nsIGlobalObject* GetParentObject() const { return mWindow; }
 
   // AnimationTimeline methods
-  Nullable<TimeDuration> GetCurrentTime() const;
+  virtual Nullable<TimeDuration> GetCurrentTime() const = 0;
 
   // Wrapper functions for AnimationTimeline DOM methods when called from
   // script.
-  Nullable<double> GetCurrentTimeAsDouble() const;
-
-  Nullable<TimeDuration> ToTimelineTime(const TimeStamp& aTimeStamp) const;
-  TimeStamp ToTimeStamp(const TimeDuration& aTimelineTime) const;
+  Nullable<double> GetCurrentTimeAsDouble() const {
+    return AnimationUtils::TimeDurationToDouble(GetCurrentTime());
+  }
 
 protected:
-  TimeStamp GetCurrentTimeStamp() const;
-
-  virtual ~AnimationTimeline() { }
-
-  nsCOMPtr<nsIDocument> mDocument;
-
-  // Store the most recently returned value of current time. This is used
-  // in cases where we don't have a refresh driver (e.g. because we are in
-  // a display:none iframe).
-  mutable TimeStamp mLastCurrentTime;
+  nsCOMPtr<nsIGlobalObject> mWindow;
 };
 
 } // namespace dom

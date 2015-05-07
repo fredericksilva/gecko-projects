@@ -21,6 +21,7 @@
 #include "mozilla/dom/SpeechRecognitionEvent.h"
 #include "nsIObserverService.h"
 #include "nsServiceManagerUtils.h"
+#include "nsQueryObject.h"
 
 #include <algorithm>
 
@@ -141,9 +142,9 @@ SpeechRecognition::SetState(FSMState state)
 }
 
 JSObject*
-SpeechRecognition::WrapObject(JSContext* aCx)
+SpeechRecognition::WrapObject(JSContext* aCx, JS::Handle<JSObject*> aGivenProto)
 {
-  return SpeechRecognitionBinding::Wrap(aCx, this);
+  return SpeechRecognitionBinding::Wrap(aCx, this, aGivenProto);
 }
 
 already_AddRefed<SpeechRecognition>
@@ -713,6 +714,7 @@ SpeechRecognition::Start(const Optional<NonNull<DOMMediaStream>>& aStream, Error
   if (aStream.WasPassed()) {
     StartRecording(&aStream.Value());
   } else {
+    AutoNoJSAPI();
     MediaManager* manager = MediaManager::Get();
     manager->GetUserMedia(GetOwner(),
                           constraints,

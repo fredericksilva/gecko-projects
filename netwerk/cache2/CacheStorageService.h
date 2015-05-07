@@ -20,7 +20,6 @@
 #include "nsTArray.h"
 
 class nsIURI;
-class nsICacheEntryOpenCallback;
 class nsICacheEntryDoomCallback;
 class nsICacheStorageVisitor;
 class nsIRunnable;
@@ -34,7 +33,6 @@ class CacheStorageService;
 class CacheStorage;
 class CacheEntry;
 class CacheEntryHandle;
-class CacheEntryTable;
 
 class CacheMemoryConsumer
 {
@@ -44,7 +42,7 @@ private:
   uint32_t mFlags : 2;
 
 private:
-  CacheMemoryConsumer() MOZ_DELETE;
+  CacheMemoryConsumer() = delete;
 
 protected:
   enum {
@@ -64,9 +62,9 @@ protected:
   void DoMemoryReport(uint32_t aCurrentSize);
 };
 
-class CacheStorageService MOZ_FINAL : public nsICacheStorageService
-                                    , public nsIMemoryReporter
-                                    , public nsITimerCallback
+class CacheStorageService final : public nsICacheStorageService
+                                , public nsIMemoryReporter
+                                , public nsITimerCallback
 {
 public:
   NS_DECL_THREADSAFE_ISUPPORTS
@@ -320,7 +318,7 @@ private:
 
   private:
     uint32_t const Limit() const;
-    MemoryPool() MOZ_DELETE;
+    MemoryPool() = delete;
   };
 
   MemoryPool mDiskPool;

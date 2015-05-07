@@ -11,6 +11,8 @@ var loop = loop || {};
 loop.contacts = (function(_, mozL10n) {
   "use strict";
 
+  var sharedMixins = loop.shared.mixins;
+
   const Button = loop.shared.views.Button;
   const ButtonGroup = loop.shared.views.ButtonGroup;
   const CALL_TYPES = loop.shared.utils.CALL_TYPES;
@@ -81,6 +83,72 @@ loop.contacts = (function(_, mozL10n) {
     contact[field][0].value = value;
   };
 
+  const GravatarPromo = React.createClass({
+    mixins: [sharedMixins.WindowCloseMixin],
+
+    propTypes: {
+      handleUse: React.PropTypes.func.isRequired
+    },
+
+    getInitialState: function() {
+      return {
+        showMe: navigator.mozLoop.getLoopPref("contacts.gravatars.promo") &&
+          !navigator.mozLoop.getLoopPref("contacts.gravatars.show")
+      };
+    },
+
+    handleCloseButtonClick: function() {
+      navigator.mozLoop.setLoopPref("contacts.gravatars.promo", false);
+      this.setState({ showMe: false });
+    },
+
+    handleLinkClick: function(event) {
+      if (!event.target || !event.target.href) {
+        return;
+      }
+
+      event.preventDefault();
+      navigator.mozLoop.openURL(event.target.href);
+      this.closeWindow();
+    },
+
+    handleUseButtonClick: function() {
+      navigator.mozLoop.setLoopPref("contacts.gravatars.promo", false);
+      navigator.mozLoop.setLoopPref("contacts.gravatars.show", true);
+      this.setState({ showMe: false });
+      this.props.handleUse();
+    },
+
+    render: function() {
+      if (!this.state.showMe) {
+        return null;
+      }
+
+      let privacyUrl = navigator.mozLoop.getLoopPref("legal.privacy_url");
+      let message = mozL10n.get("gravatars_promo_message", {
+        "learn_more": React.renderToStaticMarkup(
+          <a href={privacyUrl} target="_blank">
+            {mozL10n.get("gravatars_promo_message_learnmore")}
+          </a>
+        )
+      });
+      return (
+        <div className="contacts-gravatar-promo">
+          <Button additionalClass="button-close" onClick={this.handleCloseButtonClick}/>
+          <p dangerouslySetInnerHTML={{__html: message}}
+             onClick={this.handleLinkClick}></p>
+          <ButtonGroup>
+            <Button caption={mozL10n.get("gravatars_promo_button_nothanks")}
+                    onClick={this.handleCloseButtonClick}/>
+            <Button caption={mozL10n.get("gravatars_promo_button_use")}
+                    additionalClass="button-accept"
+                    onClick={this.handleUseButtonClick}/>
+          </ButtonGroup>
+        </div>
+      );
+    }
+  });
+
   const ContactDropdown = React.createClass({
     propTypes: {
       handleAction: React.PropTypes.func.isRequired,
@@ -89,7 +157,7 @@ loop.contacts = (function(_, mozL10n) {
 
     getInitialState: function () {
       return {
-        openDirUp: false,
+        openDirUp: false
       };
     },
 
@@ -107,7 +175,7 @@ loop.contacts = (function(_, mozL10n) {
       if (menuNodeRect.top + menuNodeRect.height >=
           listNodeRect.top + listNodeRect.height) {
         this.setState({
-          openDirUp: true,
+          openDirUp: true
         });
       }
     },
@@ -154,7 +222,7 @@ loop.contacts = (function(_, mozL10n) {
                               "disabled": !this.props.canEdit })}
               onClick={this.onItemClick} data-action="remove">
             <i className="icon icon-remove" />
-            {mozL10n.get("remove_contact_menu_button")}
+            {mozL10n.get("remove_contact_menu_button2")}
           </li>
         </ul>
       );
@@ -164,7 +232,7 @@ loop.contacts = (function(_, mozL10n) {
   const ContactDetail = React.createClass({
     getInitialState: function() {
       return {
-        showMenu: false,
+        showMenu: false
       };
     },
 
@@ -232,7 +300,9 @@ loop.contacts = (function(_, mozL10n) {
 
       return (
         <li className={contactCSSClass} onMouseLeave={this.hideDropdownMenu}>
-          <div className="avatar" />
+          <div className="avatar">
+            <img src={navigator.mozLoop.getUserAvatar(email.value)} />
+          </div>
           <div className="details">
             <div className="username"><strong>{names.firstName}</strong> {names.lastName}
               <i className={cx({"icon icon-google": this.props.contact.category[0] == "google"})} />
@@ -258,7 +328,15 @@ loop.contacts = (function(_, mozL10n) {
   });
 
   const ContactsList = React.createClass({
-    mixins: [React.addons.LinkedStateMixin],
+    mixins: [
+      React.addons.LinkedStateMixin,
+      loop.shared.mixins.WindowCloseMixin
+    ],
+
+    propTypes: {
+      notifications: React.PropTypes.instanceOf(
+        loop.shared.models.NotificationCollection).isRequired
+    },
 
     /**
      * Contacts collection object
@@ -273,7 +351,7 @@ loop.contacts = (function(_, mozL10n) {
     getInitialState: function() {
       return {
         importBusy: false,
-        filter: "",
+        filter: ""
       };
     },
 
@@ -386,10 +464,15 @@ loop.contacts = (function(_, mozL10n) {
         service: "google"
       }, (err, stats) => {
         this.setState({ importBusy: false });
-        // TODO: bug 1076764 - proper error and success reporting.
         if (err) {
-          throw err;
+          console.error("Contact import error", err);
+          this.props.notifications.errorL10n("import_contacts_failure_message");
+          return;
         }
+        this.props.notifications.successL10n("import_contacts_success_message", {
+          num: stats.success,
+          total: stats.success
+        });
       });
     },
 
@@ -403,25 +486,25 @@ loop.contacts = (function(_, mozL10n) {
           this.props.startForm("contacts_edit", contact);
           break;
         case "remove":
-          navigator.mozLoop.confirm(
-            mozL10n.get("confirm_delete_contact_alert"),
-            mozL10n.get("confirm_delete_contact_remove_button"),
-            mozL10n.get("confirm_delete_contact_cancel_button"),
-            (err, result) => {
+          navigator.mozLoop.confirm({
+            message: mozL10n.get("confirm_delete_contact_alert"),
+            okButton: mozL10n.get("confirm_delete_contact_remove_button"),
+            cancelButton: mozL10n.get("confirm_delete_contact_cancel_button")
+          }, (err, result) => {
+            if (err) {
+              throw err;
+            }
+
+            if (!result) {
+              return;
+            }
+
+            navigator.mozLoop.contacts.remove(contact._guid, err => {
               if (err) {
                 throw err;
               }
-
-              if (!result) {
-                return;
-              }
-
-              navigator.mozLoop.contacts.remove(contact._guid, err => {
-                if (err) {
-                  throw err;
-                }
-              });
             });
+          });
           break;
         case "block":
         case "unblock":
@@ -435,17 +518,25 @@ loop.contacts = (function(_, mozL10n) {
         case "video-call":
           if (!contact.blocked) {
             navigator.mozLoop.calls.startDirectCall(contact, CALL_TYPES.AUDIO_VIDEO);
+            this.closeWindow();
           }
           break;
         case "audio-call":
           if (!contact.blocked) {
             navigator.mozLoop.calls.startDirectCall(contact, CALL_TYPES.AUDIO_ONLY);
+            this.closeWindow();
           }
           break;
         default:
           console.error("Unrecognized action: " + actionName);
           break;
       }
+    },
+
+    handleUseGravatar: function() {
+      // We got permission to use Gravatar icons now, so we need to redraw the
+      // list entirely to show them.
+      this.refresh();
     },
 
     sortContacts: function(contact1, contact2) {
@@ -462,8 +553,10 @@ loop.contacts = (function(_, mozL10n) {
       let cx = React.addons.classSet;
 
       let viewForItem = item => {
-        return <ContactDetail key={item._guid} contact={item}
-                              handleContactAction={this.handleContactAction} />
+        return (
+          <ContactDetail key={item._guid} contact={item}
+                         handleContactAction={this.handleContactAction} />
+        );
       };
 
       let shownContacts = _.groupBy(this.contacts, function(contact) {
@@ -476,8 +569,8 @@ loop.contacts = (function(_, mozL10n) {
         let filter = this.state.filter.trim().toLocaleLowerCase();
         if (filter) {
           let filterFn = contact => {
-            return contact.name[0].toLocaleLowerCase().contains(filter) ||
-                   getPreferred(contact, "email").value.toLocaleLowerCase().contains(filter);
+            return contact.name[0].toLocaleLowerCase().includes(filter) ||
+                   getPreferred(contact, "email").value.toLocaleLowerCase().includes(filter);
           };
           if (shownContacts.available) {
             shownContacts.available = shownContacts.available.filter(filterFn);
@@ -494,7 +587,7 @@ loop.contacts = (function(_, mozL10n) {
             <ButtonGroup>
               <Button caption={this.state.importBusy
                                ? mozL10n.get("importing_contacts_progress_button")
-                               : mozL10n.get("import_contacts_button")}
+                               : mozL10n.get("import_contacts_button2")}
                       disabled={this.state.importBusy}
                       onClick={this.handleImportButtonClick}>
                 <div className={cx({"contact-import-spinner": true,
@@ -509,6 +602,7 @@ loop.contacts = (function(_, mozL10n) {
                    placeholder={mozL10n.get("contacts_search_placesholder")}
                    valueLink={this.linkState("filter")} />
             : null }
+            <GravatarPromo handleUse={this.handleUseGravatar}/>
           </div>
           <ul className="contact-list">
             {shownContacts.available ?
@@ -539,7 +633,7 @@ loop.contacts = (function(_, mozL10n) {
         pristine: true,
         name: "",
         email: "",
-        tel: "",
+        tel: ""
       };
     },
 
@@ -557,7 +651,7 @@ loop.contacts = (function(_, mozL10n) {
     handleAcceptButtonClick: function() {
       // Allow validity error indicators to be displayed.
       this.setState({
-        pristine: false,
+        pristine: false
       });
 
       let emailInput = this.refs.email.getDOMNode();
@@ -583,7 +677,7 @@ loop.contacts = (function(_, mozL10n) {
             }
           });
           this.setState({
-            contact: null,
+            contact: null
           });
           break;
         case "add":
@@ -635,7 +729,7 @@ loop.contacts = (function(_, mozL10n) {
           <input ref="email" type="email" required={phoneOrEmailRequired}
                  className={cx({pristine: this.state.pristine})}
                  valueLink={this.linkState("email")} />
-          <label>{mozL10n.get("new_contact_phone_placeholder")}</label>
+          <label>{mozL10n.get("new_contact_fxos_phone_placeholder")}</label>
           <input ref="tel" type="tel" required={phoneOrEmailRequired}
                  className={cx({pristine: this.state.pristine})}
                  valueLink={this.linkState("tel")} />
@@ -658,6 +752,6 @@ loop.contacts = (function(_, mozL10n) {
     ContactsList: ContactsList,
     ContactDetailsForm: ContactDetailsForm,
     _getPreferred: getPreferred,
-    _setPreferred: setPreferred,
+    _setPreferred: setPreferred
   };
 })(_, document.mozL10n);

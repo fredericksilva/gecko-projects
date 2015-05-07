@@ -45,7 +45,7 @@ class OggCodecStore
     Monitor mMonitor;
 };
 
-class OggReader MOZ_FINAL : public MediaDecoderReader
+class OggReader final : public MediaDecoderReader
 {
 public:
   explicit OggReader(AbstractMediaDecoder* aDecoder);
@@ -54,34 +54,32 @@ protected:
   ~OggReader();
 
 public:
-  virtual nsresult Init(MediaDecoderReader* aCloneDonor);
-  virtual nsresult ResetDecode();
-  virtual bool DecodeAudioData();
+  virtual nsresult Init(MediaDecoderReader* aCloneDonor) override;
+  virtual nsresult ResetDecode() override;
+  virtual bool DecodeAudioData() override;
 
   // If the Theora granulepos has not been captured, it may read several packets
   // until one with a granulepos has been captured, to ensure that all packets
   // read have valid time info.
   virtual bool DecodeVideoFrame(bool &aKeyframeSkip,
-                                  int64_t aTimeThreshold);
+                                  int64_t aTimeThreshold) override;
 
-  virtual bool HasAudio() {
-    return (mVorbisState != 0 && mVorbisState->mActive)
-#ifdef MOZ_OPUS
-      || (mOpusState != 0 && mOpusState->mActive)
-#endif /* MOZ_OPUS */
-      ;
+  virtual bool HasAudio() override {
+    return (mVorbisState != 0 && mVorbisState->mActive) ||
+           (mOpusState != 0 && mOpusState->mActive);
   }
 
-  virtual bool HasVideo() {
+  virtual bool HasVideo() override {
     return mTheoraState != 0 && mTheoraState->mActive;
   }
 
   virtual nsresult ReadMetadata(MediaInfo* aInfo,
-                                MetadataTags** aTags);
-  virtual void Seek(int64_t aTime, int64_t aStartTime, int64_t aEndTime, int64_t aCurrentTime);
-  virtual nsresult GetBuffered(dom::TimeRanges* aBuffered);
+                                MetadataTags** aTags) override;
+  virtual nsRefPtr<SeekPromise>
+  Seek(int64_t aTime, int64_t aEndTime) override;
+  virtual nsresult GetBuffered(dom::TimeRanges* aBuffered) override;
 
-  virtual bool IsMediaSeekable() MOZ_OVERRIDE;
+  virtual bool IsMediaSeekable() override;
 
 private:
   // TODO: DEPRECATED. This uses synchronous decoding.
@@ -98,7 +96,7 @@ private:
   // to the start of the stream.
   nsresult ResetDecode(bool start);
 
-  nsresult SeekInternal(int64_t aTime, int64_t aStartTime, int64_t aEndTime, int64_t aCurrentTime);
+  nsresult SeekInternal(int64_t aTime, int64_t aEndTime);
 
   bool HasSkeleton() {
     return mSkeletonState != 0 && mSkeletonState->mActive;
@@ -285,7 +283,6 @@ private:
   // Decode state of the Vorbis bitstream we're decoding, if we have audio.
   VorbisState* mVorbisState;
 
-#ifdef MOZ_OPUS
   // Decode state of the Opus bitstream we're decoding, if we have one.
   OpusState *mOpusState;
 
@@ -293,7 +290,6 @@ private:
   // contructor was called. We can't check it dynamically because
   // we're not on the main thread;
   bool mOpusEnabled;
-#endif /* MOZ_OPUS */
 
   // Decode state of the Skeleton bitstream.
   SkeletonState* mSkeletonState;

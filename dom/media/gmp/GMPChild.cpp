@@ -4,6 +4,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "GMPChild.h"
+#include "GMPContentChild.h"
 #include "GMPProcessChild.h"
 #include "GMPLoader.h"
 #include "GMPVideoDecoderChild.h"
@@ -25,7 +26,7 @@
 
 using mozilla::dom::CrashReporterChild;
 
-static const int MAX_PLUGIN_VOUCHER_LENGTH = 50000;
+static const int MAX_VOUCHER_LENGTH = 500000;
 
 #ifdef XP_WIN
 #include <stdlib.h> // for _exit()
@@ -33,16 +34,26 @@ static const int MAX_PLUGIN_VOUCHER_LENGTH = 50000;
 #include <unistd.h> // for _exit()
 #endif
 
-#if defined(MOZ_SANDBOX) && defined(XP_WIN)
-#define TARGET_SANDBOX_EXPORTS
-#include "mozilla/sandboxTarget.h"
-#elif defined (MOZ_GMP_SANDBOX)
-#if defined(XP_LINUX) || defined(XP_MACOSX)
+#if defined(MOZ_GMP_SANDBOX)
+#if defined(XP_MACOSX)
 #include "mozilla/Sandbox.h"
 #endif
 #endif
 
 namespace mozilla {
+
+#undef LOG
+#undef LOGD
+
+#ifdef PR_LOGGING
+extern PRLogModuleInfo* GetGMPLog();
+#define LOG(level, x, ...) PR_LOG(GetGMPLog(), (level), (x, ##__VA_ARGS__))
+#define LOGD(x, ...) LOG(PR_LOG_DEBUG, "GMPChild[pid=%d] " x, (int)base::GetCurrentProcId(), ##__VA_ARGS__)
+#else
+#define LOG(level, x, ...)
+#define LOGD(x, ...)
+#endif
+
 namespace gmp {
 
 GMPChild::GMPChild()
@@ -50,11 +61,13 @@ GMPChild::GMPChild()
   , mGMPMessageLoop(MessageLoop::current())
   , mGMPLoader(nullptr)
 {
+  LOGD("GMPChild ctor");
   nsDebugImpl::SetMultiprocessMode("GMP");
 }
 
 GMPChild::~GMPChild()
 {
+  LOGD("GMPChild dtor");
 }
 
 static bool
@@ -215,48 +228,44 @@ GetAppPaths(nsCString &aAppPath, nsCString &aAppBinaryPath)
   return true;
 }
 
-void
-GMPChild::StartMacSandbox()
+bool
+GMPChild::SetMacSandboxInfo()
 {
+  if (!mGMPLoader) {
+    return false;
+  }
   nsAutoCString pluginDirectoryPath, pluginFilePath;
   if (!GetPluginPaths(mPluginPath, pluginDirectoryPath, pluginFilePath)) {
-    MOZ_CRASH("Error scanning plugin path");
+    return false;
   }
   nsAutoCString appPath, appBinaryPath;
   if (!GetAppPaths(appPath, appBinaryPath)) {
-    MOZ_CRASH("Error resolving child process path");
+    return false;
   }
 
   MacSandboxInfo info;
   info.type = MacSandboxType_Plugin;
   info.pluginInfo.type = MacSandboxPluginType_GMPlugin_Default;
-  info.pluginInfo.pluginPath.Assign(pluginDirectoryPath);
-  mPluginBinaryPath.Assign(pluginFilePath);
-  info.pluginInfo.pluginBinaryPath.Assign(pluginFilePath);
-  info.appPath.Assign(appPath);
-  info.appBinaryPath.Assign(appBinaryPath);
+  info.pluginInfo.pluginPath.assign(pluginDirectoryPath.get());
+  info.pluginInfo.pluginBinaryPath.assign(pluginFilePath.get());
+  info.appPath.assign(appPath.get());
+  info.appBinaryPath.assign(appBinaryPath.get());
 
-  nsAutoCString err;
-  if (!mozilla::StartMacSandbox(info, err)) {
-    NS_WARNING(err.get());
-    MOZ_CRASH("sandbox_init() failed");
-  }
+  mGMPLoader->SetSandboxInfo(&info);
+  return true;
 }
 #endif // XP_MACOSX && MOZ_GMP_SANDBOX
 
-void
-GMPChild::CheckThread()
-{
-  MOZ_ASSERT(mGMPMessageLoop == MessageLoop::current());
-}
-
 bool
 GMPChild::Init(const std::string& aPluginPath,
-               base::ProcessHandle aParentProcessHandle,
+               const std::string& aVoucherPath,
+               base::ProcessId aParentPid,
                MessageLoop* aIOLoop,
                IPC::Channel* aChannel)
 {
-  if (!Open(aChannel, aParentProcessHandle, aIOLoop)) {
+  LOGD("%s pluginPath=%s", __FUNCTION__, aPluginPath.c_str());
+
+  if (NS_WARN_IF(!Open(aChannel, aParentPid, aIOLoop))) {
     return false;
   }
 
@@ -265,12 +274,15 @@ GMPChild::Init(const std::string& aPluginPath,
 #endif
 
   mPluginPath = aPluginPath;
+  mVoucherPath = aVoucherPath;
   return true;
 }
 
 bool
 GMPChild::RecvSetNodeId(const nsCString& aNodeId)
 {
+  LOGD("%s nodeId=%s", __FUNCTION__, aNodeId.Data());
+
   // Store the per origin salt for the node id. Note: we do this in a
   // separate message than RecvStartPlugin() so that the string is not
   // sitting in a string on the IPC code's call stack.
@@ -298,6 +310,10 @@ GMPChild::PreLoadLibraries(const std::string& aPluginPath)
     {
        "d3d9.dll", // Create an `IDirect3D9` to get adapter information
        "dxva2.dll", // Get monitor information
+       "evr.dll", // MFGetStrideForBitmapInfoHeader
+       "mfh264dec.dll", // H.264 decoder (on Windows Vista)
+       "mfheaacdec.dll", // AAC decoder (on Windows Vista)
+       "mfplat.dll", // MFCreateSample, MFCreateAlignedMemoryBuffer, MFCreateMediaType
        "msauddecmft.dll", // AAC decoder (on Windows 8)
        "msmpeg2adec.dll", // AAC decoder (on Windows 7)
        "msmpeg2vdec.dll", // H.264 decoder
@@ -311,7 +327,11 @@ GMPChild::PreLoadLibraries(const std::string& aPluginPath)
   infoFile->GetPath(path);
 
   std::ifstream stream;
-  stream.open(path.get());
+#ifdef _MSC_VER
+  stream.open(static_cast<const wchar_t*>(path.get()));
+#else
+  stream.open(NS_ConvertUTF16toUTF8(path).get());
+#endif
   if (!stream.good()) {
     NS_WARNING("Failure opening info file for required DLLs");
     return false;
@@ -347,43 +367,6 @@ GMPChild::PreLoadLibraries(const std::string& aPluginPath)
 }
 #endif
 
-#if defined(MOZ_GMP_SANDBOX)
-
-#if defined(XP_LINUX)
-class LinuxSandboxStarter : public SandboxStarter {
-public:
-  LinuxSandboxStarter(const std::string& aLibPath)
-    : mLibPath(aLibPath)
-  {}
-  virtual void Start() MOZ_OVERRIDE {
-    if (mozilla::MediaPluginSandboxStatus() != mozilla::kSandboxingWouldFail) {
-      mozilla::SetMediaPluginSandbox(mLibPath.c_str());
-    } else {
-      printf_stderr("GMPChild::LoadPluginLibrary: Loading media plugin %s unsandboxed.\n",
-                    mLibPath.c_str());
-    }
-  }
-private:
-  std::string mLibPath;
-};
-#endif
-
-#if defined(XP_MACOSX)
-class MacOSXSandboxStarter : public SandboxStarter {
-public:
-  MacOSXSandboxStarter(GMPChild* aGMPChild)
-    : mGMPChild(aGMPChild)
-  {}
-  virtual void Start() MOZ_OVERRIDE {
-    mGMPChild->StartMacSandbox();
-  }
-private:
-  GMPChild* mGMPChild;
-};
-#endif
-
-#endif // MOZ_GMP_SANDBOX
-
 bool
 GMPChild::GetLibPath(nsACString& aOutLibPath)
 {
@@ -406,10 +389,13 @@ GMPChild::GetLibPath(nsACString& aOutLibPath)
 bool
 GMPChild::RecvStartPlugin()
 {
+  LOGD("%s", __FUNCTION__);
+
 #if defined(XP_WIN)
   PreLoadLibraries(mPluginPath);
 #endif
   PreLoadPluginVoucher(mPluginPath);
+  PreLoadSandboxVoucher();
 
   nsCString libPath;
   if (!GetLibPath(libPath)) {
@@ -425,16 +411,12 @@ GMPChild::RecvStartPlugin()
     return false;
   }
 
-#if defined(MOZ_GMP_SANDBOX)
-#if defined(XP_MACOSX)
-  nsAutoPtr<SandboxStarter> starter(new MacOSXSandboxStarter(this));
-  mGMPLoader->SetStartSandboxStarter(starter);
-#elif defined(XP_LINUX)
-  nsAutoPtr<SandboxStarter> starter(new
-    LinuxSandboxStarter(std::string(libPath.get(), libPath.get()+libPath.Length())));
-  mGMPLoader->SetStartSandboxStarter(starter);
+#if defined(MOZ_GMP_SANDBOX) && defined(XP_MACOSX)
+  if (!SetMacSandboxInfo()) {
+    NS_WARNING("Failed to set Mac GMP sandbox info");
+    return false;
+  }
 #endif
-#endif // MOZ_GMP_SANDBOX
 
   if (!mGMPLoader->Load(libPath.get(),
                         libPath.Length(),
@@ -447,7 +429,7 @@ GMPChild::RecvStartPlugin()
 
   void* sh = nullptr;
   GMPAsyncShutdownHost* host = static_cast<GMPAsyncShutdownHost*>(this);
-  GMPErr err = GetAPI("async-shutdown", host, &sh);
+  GMPErr err = GetAPI(GMP_API_ASYNC_SHUTDOWN, host, &sh);
   if (err == GMPNoErr && sh) {
     mAsyncShutdown = reinterpret_cast<GMPAsyncShutdown*>(sh);
     SendAsyncShutdownRequired();
@@ -465,6 +447,13 @@ GMPChild::GMPMessageLoop()
 void
 GMPChild::ActorDestroy(ActorDestroyReason aWhy)
 {
+  LOGD("%s reason=%d", __FUNCTION__, aWhy);
+
+  for (uint32_t i = mGMPContentChildren.Length(); i > 0; i--) {
+    MOZ_ASSERT_IF(aWhy == NormalShutdown, !mGMPContentChildren[i - 1]->IsUsed());
+    mGMPContentChildren[i - 1]->Close();
+  }
+
   if (mGMPLoader) {
     mGMPLoader->Shutdown();
   }
@@ -477,9 +466,9 @@ GMPChild::ActorDestroy(ActorDestroyReason aWhy)
 }
 
 void
-GMPChild::ProcessingError(Result aWhat)
+GMPChild::ProcessingError(Result aCode, const char* aReason)
 {
-  switch (aWhat) {
+  switch (aCode) {
     case MsgDropped:
       _exit(0); // Don't trigger a crash report.
     case MsgNotKnown:
@@ -499,19 +488,6 @@ GMPChild::ProcessingError(Result aWhat)
   }
 }
 
-PGMPAudioDecoderChild*
-GMPChild::AllocPGMPAudioDecoderChild()
-{
-  return new GMPAudioDecoderChild(this);
-}
-
-bool
-GMPChild::DeallocPGMPAudioDecoderChild(PGMPAudioDecoderChild* aActor)
-{
-  delete aActor;
-  return true;
-}
-
 mozilla::dom::PCrashReporterChild*
 GMPChild::AllocPCrashReporterChild(const NativeThreadId& aThread)
 {
@@ -522,114 +498,6 @@ bool
 GMPChild::DeallocPCrashReporterChild(PCrashReporterChild* aCrashReporter)
 {
   delete aCrashReporter;
-  return true;
-}
-
-PGMPVideoDecoderChild*
-GMPChild::AllocPGMPVideoDecoderChild()
-{
-  return new GMPVideoDecoderChild(this);
-}
-
-bool
-GMPChild::DeallocPGMPVideoDecoderChild(PGMPVideoDecoderChild* aActor)
-{
-  delete aActor;
-  return true;
-}
-
-PGMPDecryptorChild*
-GMPChild::AllocPGMPDecryptorChild()
-{
-  GMPDecryptorChild* actor = new GMPDecryptorChild(this, mPluginVoucher);
-  actor->AddRef();
-  return actor;
-}
-
-bool
-GMPChild::DeallocPGMPDecryptorChild(PGMPDecryptorChild* aActor)
-{
-  static_cast<GMPDecryptorChild*>(aActor)->Release();
-  return true;
-}
-
-bool
-GMPChild::RecvPGMPAudioDecoderConstructor(PGMPAudioDecoderChild* aActor)
-{
-  auto vdc = static_cast<GMPAudioDecoderChild*>(aActor);
-
-  void* vd = nullptr;
-  GMPErr err = GetAPI("decode-audio", &vdc->Host(), &vd);
-  if (err != GMPNoErr || !vd) {
-    return false;
-  }
-
-  vdc->Init(static_cast<GMPAudioDecoder*>(vd));
-
-  return true;
-}
-
-PGMPVideoEncoderChild*
-GMPChild::AllocPGMPVideoEncoderChild()
-{
-  return new GMPVideoEncoderChild(this);
-}
-
-bool
-GMPChild::DeallocPGMPVideoEncoderChild(PGMPVideoEncoderChild* aActor)
-{
-  delete aActor;
-  return true;
-}
-
-bool
-GMPChild::RecvPGMPVideoDecoderConstructor(PGMPVideoDecoderChild* aActor)
-{
-  auto vdc = static_cast<GMPVideoDecoderChild*>(aActor);
-
-  void* vd = nullptr;
-  GMPErr err = GetAPI("decode-video", &vdc->Host(), &vd);
-  if (err != GMPNoErr || !vd) {
-    NS_WARNING("GMPGetAPI call failed trying to construct decoder.");
-    return false;
-  }
-
-  vdc->Init(static_cast<GMPVideoDecoder*>(vd));
-
-  return true;
-}
-
-bool
-GMPChild::RecvPGMPVideoEncoderConstructor(PGMPVideoEncoderChild* aActor)
-{
-  auto vec = static_cast<GMPVideoEncoderChild*>(aActor);
-
-  void* ve = nullptr;
-  GMPErr err = GetAPI("encode-video", &vec->Host(), &ve);
-  if (err != GMPNoErr || !ve) {
-    NS_WARNING("GMPGetAPI call failed trying to construct encoder.");
-    return false;
-  }
-
-  vec->Init(static_cast<GMPVideoEncoder*>(ve));
-
-  return true;
-}
-
-bool
-GMPChild::RecvPGMPDecryptorConstructor(PGMPDecryptorChild* aActor)
-{
-  GMPDecryptorChild* child = static_cast<GMPDecryptorChild*>(aActor);
-  GMPDecryptorHost* host = static_cast<GMPDecryptorHost*>(child);
-
-  void* session = nullptr;
-  GMPErr err = GetAPI("eme-decrypt", host, &session);
-  if (err != GMPNoErr || !session) {
-    return false;
-  }
-
-  child->Init(static_cast<GMPDecryptor*>(session));
-
   return true;
 }
 
@@ -696,6 +564,8 @@ GMPChild::RecvCrashPluginNow()
 bool
 GMPChild::RecvBeginAsyncShutdown()
 {
+  LOGD("%s AsyncShutdown=%d", __FUNCTION__, mAsyncShutdown!=nullptr);
+
   MOZ_ASSERT(mGMPMessageLoop == MessageLoop::current());
   if (mAsyncShutdown) {
     mAsyncShutdown->BeginShutdown();
@@ -705,9 +575,19 @@ GMPChild::RecvBeginAsyncShutdown()
   return true;
 }
 
+bool
+GMPChild::RecvCloseActive()
+{
+  for (uint32_t i = mGMPContentChildren.Length(); i > 0; i--) {
+    mGMPContentChildren[i - 1]->CloseActive();
+  }
+  return true;
+}
+
 void
 GMPChild::ShutdownComplete()
 {
+  LOGD("%s", __FUNCTION__);
   MOZ_ASSERT(mGMPMessageLoop == MessageLoop::current());
   SendAsyncShutdownComplete();
 }
@@ -748,7 +628,7 @@ GMPChild::PreLoadPluginVoucher(const std::string& aPluginPath)
   std::streampos end = stream.tellg();
   stream.seekg (0, std::ios::beg);
   auto length = end - start;
-  if (length > MAX_PLUGIN_VOUCHER_LENGTH) {
+  if (length > MAX_VOUCHER_LENGTH) {
     NS_WARNING("Plugin voucher file too big!");
     return false;
   }
@@ -763,5 +643,62 @@ GMPChild::PreLoadPluginVoucher(const std::string& aPluginPath)
   return true;
 }
 
+void
+GMPChild::PreLoadSandboxVoucher()
+{
+  std::ifstream stream;
+  stream.open(mVoucherPath.c_str(), std::ios::binary);
+  if (!stream.good()) {
+    NS_WARNING("PreLoadSandboxVoucher can't find sandbox voucher file!");
+    return;
+  }
+
+  std::streampos start = stream.tellg();
+  stream.seekg (0, std::ios::end);
+  std::streampos end = stream.tellg();
+  stream.seekg (0, std::ios::beg);
+  auto length = end - start;
+  if (length > MAX_VOUCHER_LENGTH) {
+    NS_WARNING("PreLoadSandboxVoucher sandbox voucher file too big!");
+    return;
+  }
+
+  mSandboxVoucher.SetLength(length);
+  stream.read((char*)mSandboxVoucher.Elements(), length);
+  if (!stream) {
+    NS_WARNING("PreLoadSandboxVoucher failed to read plugin voucher file!");
+    return;
+  }
+}
+
+PGMPContentChild*
+GMPChild::AllocPGMPContentChild(Transport* aTransport,
+                                ProcessId aOtherPid)
+{
+  GMPContentChild* child =
+    mGMPContentChildren.AppendElement(new GMPContentChild(this))->get();
+  child->Open(aTransport, aOtherPid, XRE_GetIOMessageLoop(), ipc::ChildSide);
+
+  return child;
+}
+
+void
+GMPChild::GMPContentChildActorDestroy(GMPContentChild* aGMPContentChild)
+{
+  for (uint32_t i = mGMPContentChildren.Length(); i > 0; i--) {
+    UniquePtr<GMPContentChild>& toDestroy = mGMPContentChildren[i - 1];
+    if (toDestroy.get() == aGMPContentChild) {
+      SendPGMPContentChildDestroyed();
+      MessageLoop::current()->PostTask(FROM_HERE,
+                                       new DeleteTask<GMPContentChild>(toDestroy.release()));
+      mGMPContentChildren.RemoveElementAt(i - 1);
+      break;
+    }
+  }
+}
+
 } // namespace gmp
 } // namespace mozilla
+
+#undef LOG
+#undef LOGD

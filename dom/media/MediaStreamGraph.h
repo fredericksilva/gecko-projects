@@ -16,11 +16,13 @@
 #include "VideoFrameContainer.h"
 #include "VideoSegment.h"
 #include "MainThreadUtils.h"
+#include "MediaTaskQueue.h"
 #include "nsAutoRef.h"
 #include "GraphDriver.h"
 #include <speex/speex_resampler.h>
 #include "mozilla/dom/AudioChannelBinding.h"
 #include "DOMMediaStream.h"
+#include "AudioContext.h"
 
 class nsIRunnable;
 
@@ -174,10 +176,16 @@ public:
    * at aTrackOffset (relative to the start of the stream).
    */
   virtual void NotifyQueuedTrackChanges(MediaStreamGraph* aGraph, TrackID aID,
-                                        TrackRate aTrackRate,
-                                        TrackTicks aTrackOffset,
+                                        StreamTime aTrackOffset,
                                         uint32_t aTrackEvents,
                                         const MediaSegment& aQueuedMedia) {}
+
+  /**
+   * Notify that all new tracks this iteration have been created.
+   * This is to ensure that tracks added atomically to MediaStreamGraph
+   * are also notified of atomically to MediaStreamListeners.
+   */
+  virtual void NotifyFinishedTrackCreation(MediaStreamGraph* aGraph) {}
 };
 
 /**
@@ -198,8 +206,7 @@ public:
    * Note that NotifyQueuedTrackChanges() calls will also still occur.
    */
   virtual void NotifyRealtimeData(MediaStreamGraph* aGraph, TrackID aID,
-                                  TrackRate aTrackRate,
-                                  TrackTicks aTrackOffset,
+                                  StreamTime aTrackOffset,
                                   uint32_t aTrackEvents,
                                   const MediaSegment& aMedia) {}
 };
@@ -241,7 +248,7 @@ class MediaInputPort;
 class AudioNodeEngine;
 class AudioNodeExternalInputStream;
 class AudioNodeStream;
-struct AudioChunk;
+class CameraPreviewMediaStream;
 
 /**
  * A stream of synchronized audio and video data. All (not blocked) streams
@@ -311,6 +318,7 @@ public:
   NS_INLINE_DECL_THREADSAFE_REFCOUNTING(MediaStream)
 
   explicit MediaStream(DOMMediaStream* aWrapper);
+  virtual dom::AudioContext::AudioContextId AudioContextId() const { return 0; }
 
 protected:
   // Protected destructor, to discourage deletion outside of Release():
@@ -357,6 +365,8 @@ public:
   // Explicitly block. Useful for example if a media element is pausing
   // and we need to stop its stream emitting its buffered data.
   virtual void ChangeExplicitBlockerCount(int32_t aDelta);
+  void BlockStreamIfNeeded();
+  void UnblockStreamIfNeeded();
   // Events will be dispatched by calling methods of aListener.
   virtual void AddListener(MediaStreamListener* aListener);
   virtual void RemoveListener(MediaStreamListener* aListener);
@@ -390,7 +400,7 @@ public:
    *
    * Main thread only.
    */
-  void RunAfterPendingUpdates(nsRefPtr<nsIRunnable> aRunnable);
+  void RunAfterPendingUpdates(already_AddRefed<nsIRunnable> aRunnable);
 
   // Signal that the client is done with this MediaStream. It will be deleted later.
   virtual void Destroy();
@@ -420,6 +430,7 @@ public:
   virtual SourceMediaStream* AsSourceStream() { return nullptr; }
   virtual ProcessedMediaStream* AsProcessedStream() { return nullptr; }
   virtual AudioNodeStream* AsAudioNodeStream() { return nullptr; }
+  virtual CameraPreviewMediaStream* AsCameraPreviewStream() { return nullptr; }
 
   // media graph thread only
   void Init();
@@ -457,10 +468,26 @@ public:
   {
     mExplicitBlockerCount.SetAtAndAfter(aTime, mExplicitBlockerCount.GetAt(aTime) + aDelta);
   }
+  void BlockStreamIfNeededImpl(GraphTime aTime)
+  {
+    bool blocked = mExplicitBlockerCount.GetAt(aTime) > 0;
+    if (blocked) {
+      return;
+    }
+    ChangeExplicitBlockerCountImpl(aTime, 1);
+  }
+  void UnblockStreamIfNeededImpl(GraphTime aTime)
+  {
+    bool blocked = mExplicitBlockerCount.GetAt(aTime) > 0;
+    if (!blocked) {
+      return;
+    }
+    ChangeExplicitBlockerCountImpl(aTime, -1);
+  }
   void AddListenerImpl(already_AddRefed<MediaStreamListener> aListener);
   void RemoveListenerImpl(MediaStreamListener* aListener);
   void RemoveAllListenersImpl();
-  void SetTrackEnabledImpl(TrackID aTrackID, bool aEnabled);
+  virtual void SetTrackEnabledImpl(TrackID aTrackID, bool aEnabled);
   /**
    * Returns true when this stream requires the contents of its inputs even if
    * its own outputs are not being consumed. This is used to signal inputs to
@@ -489,19 +516,21 @@ public:
 
   double StreamTimeToSeconds(StreamTime aTime)
   {
-    return TrackTicksToSeconds(mBuffer.GraphRate(), aTime);
+    NS_ASSERTION(0 <= aTime && aTime <= STREAM_TIME_MAX, "Bad time");
+    return static_cast<double>(aTime)/mBuffer.GraphRate();
   }
   int64_t StreamTimeToMicroseconds(StreamTime aTime)
   {
-    return TimeToTicksRoundDown(1000000, aTime);
+    NS_ASSERTION(0 <= aTime && aTime <= STREAM_TIME_MAX, "Bad time");
+    return (aTime*1000000)/mBuffer.GraphRate();
   }
+  StreamTime MicrosecondsToStreamTimeRoundDown(int64_t aMicroseconds) {
+    return (aMicroseconds*mBuffer.GraphRate())/1000000;
+  }
+
   TrackTicks TimeToTicksRoundUp(TrackRate aRate, StreamTime aTime)
   {
     return RateConvertTicksRoundUp(aRate, mBuffer.GraphRate(), aTime);
-  }
-  TrackTicks TimeToTicksRoundDown(TrackRate aRate, StreamTime aTime)
-  {
-    return RateConvertTicksRoundDown(aRate, mBuffer.GraphRate(), aTime);
   }
   StreamTime TicksToTimeRoundDown(TrackRate aRate, TrackTicks aTicks)
   {
@@ -534,9 +563,9 @@ public:
 
   bool HasCurrentData() { return mHasCurrentData; }
 
-  StreamBuffer::Track* EnsureTrack(TrackID aTrack, TrackRate aSampleRate);
+  StreamBuffer::Track* EnsureTrack(TrackID aTrack);
 
-  void ApplyTrackDisabling(TrackID aTrackID, MediaSegment* aSegment, MediaSegment* aRawSegment = nullptr);
+  virtual void ApplyTrackDisabling(TrackID aTrackID, MediaSegment* aSegment, MediaSegment* aRawSegment = nullptr);
 
   DOMMediaStream* GetWrapper()
   {
@@ -620,7 +649,7 @@ protected:
     // blocking.
     MediaTime mBlockedAudioTime;
     // Last tick written to the audio output.
-    TrackTicks mLastTickWritten;
+    StreamTime mLastTickWritten;
     TrackID mTrackID;
   };
   nsTArray<AudioOutputStream> mAudioOutputStreams;
@@ -693,10 +722,10 @@ public:
     mNeedsMixing(false)
   {}
 
-  virtual SourceMediaStream* AsSourceStream() { return this; }
+  virtual SourceMediaStream* AsSourceStream() override { return this; }
 
   // Media graph thread only
-  virtual void DestroyImpl();
+  virtual void DestroyImpl() override;
 
   // Call these on any thread.
   /**
@@ -718,14 +747,35 @@ public:
   void AddDirectListener(MediaStreamDirectListener* aListener);
   void RemoveDirectListener(MediaStreamDirectListener* aListener);
 
+  enum {
+    ADDTRACK_QUEUED    = 0x01 // Queue track add until FinishAddTracks()
+  };
   /**
    * Add a new track to the stream starting at the given base time (which
    * must be greater than or equal to the last time passed to
    * AdvanceKnownTracksTime). Takes ownership of aSegment. aSegment should
    * contain data starting after aStart.
    */
-  void AddTrack(TrackID aID, TrackRate aRate, TrackTicks aStart,
-                MediaSegment* aSegment);
+  void AddTrack(TrackID aID, StreamTime aStart, MediaSegment* aSegment,
+                uint32_t aFlags = 0)
+  {
+    AddTrackInternal(aID, GraphRate(), aStart, aSegment, aFlags);
+  }
+
+  /**
+   * Like AddTrack, but resamples audio from aRate to the graph rate.
+   */
+  void AddAudioTrack(TrackID aID, TrackRate aRate, StreamTime aStart,
+                     AudioSegment* aSegment, uint32_t aFlags = 0)
+  {
+    AddTrackInternal(aID, aRate, aStart, aSegment, aFlags);
+  }
+
+  /**
+   * Call after a series of AddTrack or AddAudioTrack calls to implement
+   * any pending track adds.
+   */
+  void FinishAddTracks();
 
   /**
    * Append media data to a track. Ownership of aSegment remains with the caller,
@@ -740,13 +790,20 @@ public:
    */
   bool HaveEnoughBuffered(TrackID aID);
   /**
+   * Get the stream time of the end of the data that has been appended so far.
+   * Can be called from any thread but won't be useful if it can race with
+   * an AppendToTrack call, so should probably just be called from the thread
+   * that also calls AppendToTrack.
+   */
+  StreamTime GetEndOfAppendedData(TrackID aID);
+  /**
    * Ensures that aSignalRunnable will be dispatched to aSignalThread
    * when we don't have enough buffered data in the track (which could be
    * immediately). Will dispatch the runnable immediately if the track
    * does not exist. No op if a runnable is already present for this track.
    */
   void DispatchWhenNotEnoughBuffered(TrackID aID,
-      nsIEventTarget* aSignalThread, nsIRunnable* aSignalRunnable);
+      MediaTaskQueue* aSignalQueue, nsIRunnable* aSignalRunnable);
   /**
    * Indicate that a track has ended. Do not do any more API calls
    * affecting this track.
@@ -765,15 +822,24 @@ public:
    */
   void FinishWithLockHeld();
   void Finish()
-    {
-      MutexAutoLock lock(mMutex);
-      FinishWithLockHeld();
-    }
+  {
+    MutexAutoLock lock(mMutex);
+    FinishWithLockHeld();
+  }
 
   // Overriding allows us to hold the mMutex lock while changing the track enable status
-  void SetTrackEnabledImpl(TrackID aTrackID, bool aEnabled) {
+  virtual void
+  SetTrackEnabledImpl(TrackID aTrackID, bool aEnabled) override {
     MutexAutoLock lock(mMutex);
     MediaStream::SetTrackEnabledImpl(aTrackID, aEnabled);
+  }
+
+  // Overriding allows us to ensure mMutex is locked while changing the track enable status
+  virtual void
+  ApplyTrackDisabling(TrackID aTrackID, MediaSegment* aSegment,
+                      MediaSegment* aRawSegment = nullptr) override {
+    mMutex.AssertCurrentThreadOwns();
+    MediaStream::ApplyTrackDisabling(aTrackID, aSegment, aRawSegment);
   }
 
   /**
@@ -791,7 +857,7 @@ public:
    * any "extra" buffering, but NotifyQueued TrackChanges() on a TrackUnion
    * will be buffered.
    */
-  TrackTicks GetBufferedTicks(TrackID aID);
+  StreamTime GetBufferedTicks(TrackID aID);
 
   void RegisterForAudioMixing();
 
@@ -801,13 +867,13 @@ public:
 
 protected:
   struct ThreadAndRunnable {
-    void Init(nsIEventTarget* aTarget, nsIRunnable* aRunnable)
+    void Init(MediaTaskQueue* aTarget, nsIRunnable* aRunnable)
     {
       mTarget = aTarget;
       mRunnable = aRunnable;
     }
 
-    nsCOMPtr<nsIEventTarget> mTarget;
+    nsRefPtr<MediaTaskQueue> mTarget;
     nsCOMPtr<nsIRunnable> mRunnable;
   };
   enum TrackCommands {
@@ -821,29 +887,32 @@ protected:
     TrackID mID;
     // Sample rate of the input data.
     TrackRate mInputRate;
-    // Sample rate of the output data, always equal to the sample rate of the
-    // graph.
-    TrackRate mOutputRate;
     // Resampler if the rate of the input track does not match the
     // MediaStreamGraph's.
     nsAutoRef<SpeexResamplerState> mResampler;
 #ifdef DEBUG
     int mResamplerChannelCount;
 #endif
-    TrackTicks mStart;
-    // Each time the track updates are flushed to the media graph thread,
-    // this is cleared.
-    uint32_t mCommands;
+    StreamTime mStart;
+    // End-time of data already flushed to the track (excluding mData)
+    StreamTime mEndOfFlushedData;
     // Each time the track updates are flushed to the media graph thread,
     // the segment buffer is emptied.
     nsAutoPtr<MediaSegment> mData;
     nsTArray<ThreadAndRunnable> mDispatchWhenNotEnough;
+    // Each time the track updates are flushed to the media graph thread,
+    // this is cleared.
+    uint32_t mCommands;
     bool mHaveEnough;
   };
 
   bool NeedsMixing();
 
   void ResampleAudioToGraphSampleRate(TrackData* aTrackData, MediaSegment* aSegment);
+
+  void AddTrackInternal(TrackID aID, TrackRate aRate,
+                        StreamTime aStart, MediaSegment* aSegment,
+                        uint32_t aFlags);
 
   TrackData* FindDataForTrack(TrackID aID)
   {
@@ -874,6 +943,7 @@ protected:
   // protected by mMutex
   StreamTime mUpdateKnownTracksTime;
   nsTArray<TrackData> mUpdateTracks;
+  nsTArray<TrackData> mPendingTracks;
   nsTArray<nsRefPtr<MediaStreamDirectListener> > mDirectListeners;
   bool mPullEnabled;
   bool mUpdateFinished;
@@ -897,7 +967,7 @@ protected:
  * the Destroy message is processed on the graph manager thread we disconnect
  * the port and drop the graph's reference, destroying the object.
  */
-class MediaInputPort MOZ_FINAL {
+class MediaInputPort final {
 private:
   // Do not call this constructor directly. Instead call aDest->AllocateInputPort.
   MediaInputPort(MediaStream* aSource, ProcessedMediaStream* aDest,
@@ -1040,7 +1110,7 @@ public:
    */
   void SetAutofinish(bool aAutofinish);
 
-  virtual ProcessedMediaStream* AsProcessedStream() { return this; }
+  virtual ProcessedMediaStream* AsProcessedStream() override { return this; }
 
   friend class MediaStreamGraphImpl;
 
@@ -1058,7 +1128,7 @@ public:
   {
     return mInputs.Length();
   }
-  virtual void DestroyImpl();
+  virtual void DestroyImpl() override;
   /**
    * This gets called after we've computed the blocking states for all
    * streams (mBlocked is up to date up to mStateComputedTime).
@@ -1091,7 +1161,7 @@ public:
   // true for echo loops, only for muted cycles.
   bool InMutedCycle() const { return mCycleMarker; }
 
-  virtual size_t SizeOfExcludingThis(MallocSizeOf aMallocSizeOf) const MOZ_OVERRIDE
+  virtual size_t SizeOfExcludingThis(MallocSizeOf aMallocSizeOf) const override
   {
     size_t amount = MediaStream::SizeOfExcludingThis(aMallocSizeOf);
     // Not owned:
@@ -1100,7 +1170,7 @@ public:
     return amount;
   }
 
-  virtual size_t SizeOfIncludingThis(MallocSizeOf aMallocSizeOf) const MOZ_OVERRIDE
+  virtual size_t SizeOfIncludingThis(MallocSizeOf aMallocSizeOf) const override
   {
     return aMallocSizeOf(this) + SizeOfExcludingThis(aMallocSizeOf);
   }
@@ -1131,7 +1201,7 @@ public:
   //
 
   // Main thread only
-  static MediaStreamGraph* GetInstance(DOMMediaStream::TrackTypeHints aHint = DOMMediaStream::HINT_CONTENTS_UNKNOWN,
+  static MediaStreamGraph* GetInstance(bool aStartWithAudioDriver = false,
                                        dom::AudioChannel aChannel = dom::AudioChannel::Normal);
   static MediaStreamGraph* CreateNonRealtimeInstance(TrackRate aSampleRate);
   // Idempotent
@@ -1176,11 +1246,26 @@ public:
   CreateAudioNodeExternalInputStream(AudioNodeEngine* aEngine,
                                      TrackRate aSampleRate = 0);
 
+  /* From the main thread, ask the MSG to send back an event when the graph
+   * thread is running, and audio is being processed. */
+  void NotifyWhenGraphStarted(AudioNodeStream* aNodeStream);
+  /* From the main thread, suspend, resume or close an AudioContext.
+   * aNodeStream is the stream of the DestinationNode of the AudioContext.
+   *
+   * This can possibly pause the graph thread, releasing system resources, if
+   * all streams have been suspended/closed.
+   *
+   * When the operation is complete, aPromise is resolved.
+   */
+  void ApplyAudioContextOperation(AudioNodeStream* aNodeStream,
+                                  dom::AudioContextOperation aState,
+                                  void * aPromise);
+
   bool IsNonRealtime() const;
   /**
    * Start processing non-realtime for a specific number of ticks.
    */
-  void StartNonRealtimeProcessing(TrackRate aRate, uint32_t aTicksToProcess);
+  void StartNonRealtimeProcessing(uint32_t aTicksToProcess);
 
   /**
    * Media graph thread only.
@@ -1194,9 +1279,15 @@ public:
     *mPendingUpdateRunnables.AppendElement() = aRunnable;
   }
 
+  /**
+   * Returns graph sample rate in Hz.
+   */
+  TrackRate GraphRate() const { return mSampleRate; }
+
 protected:
-  MediaStreamGraph()
+  explicit MediaStreamGraph(TrackRate aSampleRate)
     : mNextGraphUpdateIndex(1)
+    , mSampleRate(aSampleRate)
   {
     MOZ_COUNT_CTOR(MediaStreamGraph);
   }
@@ -1212,6 +1303,13 @@ protected:
   // The number of updates we have sent to the media graph thread + 1.
   // We start this at 1 just to ensure that 0 is usable as a special value.
   int64_t mNextGraphUpdateIndex;
+
+  /**
+   * Sample rate at which this graph runs. For real time graphs, this is
+   * the rate of the audio mixer. For offline graphs, this is the rate specified
+   * at construction.
+   */
+  TrackRate mSampleRate;
 };
 
 }

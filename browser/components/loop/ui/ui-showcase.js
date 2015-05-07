@@ -18,7 +18,7 @@
   // 1.1 Panel
   var PanelView = loop.panel.PanelView;
   // 1.2. Conversation Window
-  var IncomingCallView = loop.conversation.IncomingCallView;
+  var AcceptCallView = loop.conversationViews.AcceptCallView;
   var DesktopPendingConversationView = loop.conversationViews.PendingConversationView;
   var CallFailedView = loop.conversationViews.CallFailedView;
   var DesktopRoomConversationView = loop.roomViews.DesktopRoomConversationView;
@@ -28,7 +28,8 @@
   var UnsupportedBrowserView  = loop.webapp.UnsupportedBrowserView;
   var UnsupportedDeviceView   = loop.webapp.UnsupportedDeviceView;
   var CallUrlExpiredView      = loop.webapp.CallUrlExpiredView;
-  var PendingConversationView = loop.webapp.PendingConversationView;
+  var GumPromptConversationView = loop.webapp.GumPromptConversationView;
+  var WaitingConversationView = loop.webapp.WaitingConversationView;
   var StartConversationView   = loop.webapp.StartConversationView;
   var FailedConversationView  = loop.webapp.FailedConversationView;
   var EndedConversationView   = loop.webapp.EndedConversationView;
@@ -39,8 +40,10 @@
   var ConversationView = loop.shared.views.ConversationView;
   var FeedbackView = loop.shared.views.FeedbackView;
 
-  // Room constants
+  // Store constants
   var ROOM_STATES = loop.store.ROOM_STATES;
+  var FEEDBACK_STATES = loop.store.FEEDBACK_STATES;
+  var CALL_TYPES = loop.shared.utils.CALL_TYPES;
 
   // Local helpers
   function returnTrue() {
@@ -53,6 +56,28 @@
 
   function noop(){}
 
+  // We save the visibility change listeners so that we can fake an event
+  // to the panel once we've loaded all the views.
+  var visibilityListeners = [];
+  var rootObject = window;
+
+  rootObject.document.addEventListener = function(eventName, func) {
+    if (eventName === "visibilitychange") {
+      visibilityListeners.push(func);
+    }
+    window.addEventListener(eventName, func);
+  };
+
+  rootObject.document.removeEventListener = function(eventName, func) {
+    if (eventName === "visibilitychange") {
+      var index = visibilityListeners.indexOf(func);
+      visibilityListeners.splice(index, 1);
+    }
+    window.removeEventListener(eventName, func);
+  };
+
+  loop.shared.mixins.setRootObject(rootObject);
+
   // Feedback API client configured to send data to the stage input server,
   // which is available at https://input.allizom.org
   var stageFeedbackApiClient = new loop.FeedbackAPIClient(
@@ -61,18 +86,33 @@
     }
   );
 
+  var mockSDK = _.extend({}, Backbone.Events);
+
   var dispatcher = new loop.Dispatcher();
-  var activeRoomStore = new loop.store.ActiveRoomStore({
-    dispatcher: dispatcher,
+  var activeRoomStore = new loop.store.ActiveRoomStore(dispatcher, {
     mozLoop: navigator.mozLoop,
-    sdkDriver: {}
+    sdkDriver: mockSDK
   });
-  var roomStore = new loop.store.RoomStore({
-    dispatcher: dispatcher,
+  var roomStore = new loop.store.RoomStore(dispatcher, {
     mozLoop: navigator.mozLoop
+  });
+  var feedbackStore = new loop.store.FeedbackStore(dispatcher, {
+    feedbackClient: stageFeedbackApiClient
+  });
+  var conversationStore = new loop.store.ConversationStore(dispatcher, {
+    client: {},
+    mozLoop: navigator.mozLoop,
+    sdkDriver: mockSDK
+  });
+
+  loop.store.StoreMixin.register({
+    conversationStore: conversationStore,
+    feedbackStore: feedbackStore
   });
 
   // Local mocks
+
+  var mockMozLoopRooms = _.extend({}, navigator.mozLoop);
 
   var mockContact = {
     name: ["Mr Smith"],
@@ -82,11 +122,8 @@
   };
 
   var mockClient = {
-    requestCallUrl: noop,
     requestCallUrlInfo: noop
   };
-
-  var mockSDK = {};
 
   var mockConversationModel = new loop.shared.models.ConversationModel({
     callerId: "Mrs Jones",
@@ -108,45 +145,64 @@
     level: "error",
     message: "Could Not Authenticate",
     details: "Did you change your password?",
-    detailsButtonLabel: "Retry",
+    detailsButtonLabel: "Retry"
   });
 
-  var SVGIcon = React.createClass({displayName: 'SVGIcon',
+  var SVGIcon = React.createClass({displayName: "SVGIcon",
     render: function() {
+      var sizeUnit = this.props.size.split("x")[0] + "px";
       return (
-        React.DOM.span({className: "svg-icon", style: {
-          "background-image": "url(/content/shared/img/icons-16x16.svg#" + this.props.shapeId + ")"
+        React.createElement("span", {className: "svg-icon", style: {
+          "backgroundImage": "url(../content/shared/img/icons-" + this.props.size +
+                              ".svg#" + this.props.shapeId + ")",
+          "backgroundSize": sizeUnit + " " + sizeUnit
         }})
       );
     }
   });
 
-  var SVGIcons = React.createClass({displayName: 'SVGIcons',
-    shapes: [
-      "audio", "audio-hover", "audio-active", "block",
-      "block-red", "block-hover", "block-active", "contacts", "contacts-hover",
-      "contacts-active", "copy", "checkmark", "google", "google-hover",
-      "google-active", "history", "history-hover", "history-active",
-      "precall", "precall-hover", "precall-active", "settings", "settings-hover",
-      "settings-active", "tag", "tag-hover", "tag-active", "trash", "unblock",
-      "unblock-hover", "unblock-active", "video", "video-hover", "video-active"
-    ],
+  var SVGIcons = React.createClass({displayName: "SVGIcons",
+    shapes: {
+      "10x10": ["close", "close-active", "close-disabled", "dropdown",
+        "dropdown-white", "dropdown-active", "dropdown-disabled", "expand",
+        "expand-active", "expand-disabled", "minimize", "minimize-active",
+        "minimize-disabled"
+      ],
+      "14x14": ["audio", "audio-active", "audio-disabled", "facemute",
+        "facemute-active", "facemute-disabled", "hangup", "hangup-active",
+        "hangup-disabled", "incoming", "incoming-active", "incoming-disabled",
+        "link", "link-active", "link-disabled", "mute", "mute-active",
+        "mute-disabled", "pause", "pause-active", "pause-disabled", "video",
+        "video-white", "video-active", "video-disabled", "volume", "volume-active",
+        "volume-disabled"
+      ],
+      "16x16": ["add", "add-hover", "add-active", "audio", "audio-hover", "audio-active",
+        "block", "block-red", "block-hover", "block-active", "contacts", "contacts-hover",
+        "contacts-active", "copy", "checkmark", "google", "google-hover", "google-active",
+        "history", "history-hover", "history-active", "leave", "precall", "precall-hover",
+        "precall-active", "screen-white", "screenmute-white", "settings",
+        "settings-hover", "settings-active", "share-darkgrey", "tag", "tag-hover",
+        "tag-active", "trash", "unblock", "unblock-hover", "unblock-active", "video",
+        "video-hover", "video-active", "tour"
+      ]
+    },
 
     render: function() {
+      var icons = this.shapes[this.props.size].map(function(shapeId, i) {
+        return (
+          React.createElement("li", {key: this.props.size + "-" + i, className: "svg-icon-entry"}, 
+            React.createElement("p", null, React.createElement(SVGIcon, {shapeId: shapeId, size: this.props.size})), 
+            React.createElement("p", null, shapeId)
+          )
+        );
+      }, this);
       return (
-        React.DOM.div({className: "svg-icon-list"}, 
-          this.shapes.map(function(shapeId, i) {
-            return React.DOM.div({key: i, className: "svg-icon-entry"}, 
-              React.DOM.p(null, SVGIcon({shapeId: shapeId})), 
-              React.DOM.p(null, shapeId)
-            );
-          }, this)
-        )
+        React.createElement("ul", {className: "svg-icon-list"}, icons)
       );
     }
   });
 
-  var Example = React.createClass({displayName: 'Example',
+  var Example = React.createClass({displayName: "Example",
     makeId: function(prefix) {
       return (prefix || "") + this.props.summary.toLowerCase().replace(/\s/g, "-");
     },
@@ -154,13 +210,13 @@
     render: function() {
       var cx = React.addons.classSet;
       return (
-        React.DOM.div({className: "example"}, 
-          React.DOM.h3({id: this.makeId()}, 
+        React.createElement("div", {className: "example"}, 
+          React.createElement("h3", {id: this.makeId()}, 
             this.props.summary, 
-            React.DOM.a({href: this.makeId("#")}, " ¶")
+            React.createElement("a", {href: this.makeId("#")}, " ¶")
           ), 
-          React.DOM.div({className: cx({comp: true, dashed: this.props.dashed}), 
-               style: this.props.style || {}}, 
+          React.createElement("div", {className: cx({comp: true, dashed: this.props.dashed}), 
+               style: this.props.style}, 
             this.props.children
           )
         )
@@ -168,27 +224,27 @@
     }
   });
 
-  var Section = React.createClass({displayName: 'Section',
+  var Section = React.createClass({displayName: "Section",
     render: function() {
       return (
-        React.DOM.section({id: this.props.name}, 
-          React.DOM.h1(null, this.props.name), 
+        React.createElement("section", {id: this.props.name, className: this.props.className}, 
+          React.createElement("h1", null, this.props.name), 
           this.props.children
         )
       );
     }
   });
 
-  var ShowCase = React.createClass({displayName: 'ShowCase',
+  var ShowCase = React.createClass({displayName: "ShowCase",
     render: function() {
       return (
-        React.DOM.div({className: "showcase"}, 
-          React.DOM.header(null, 
-            React.DOM.h1(null, "Loop UI Components Showcase"), 
-            React.DOM.nav({className: "showcase-menu"}, 
+        React.createElement("div", {className: "showcase"}, 
+          React.createElement("header", null, 
+            React.createElement("h1", null, "Loop UI Components Showcase"), 
+            React.createElement("nav", {className: "showcase-menu"}, 
               React.Children.map(this.props.children, function(section) {
                 return (
-                  React.DOM.a({className: "btn btn-info", href: "#" + section.props.name}, 
+                  React.createElement("a", {className: "btn btn-info", href: "#" + section.props.name}, 
                     section.props.name
                   )
                 );
@@ -201,122 +257,132 @@
     }
   });
 
-  var App = React.createClass({displayName: 'App',
+  var App = React.createClass({displayName: "App",
     render: function() {
       return (
-        ShowCase(null, 
-          Section({name: "PanelView"}, 
-            React.DOM.p({className: "note"}, 
-              React.DOM.strong(null, "Note:"), " 332px wide."
+        React.createElement(ShowCase, null, 
+          React.createElement(Section, {name: "PanelView"}, 
+            React.createElement("p", {className: "note"}, 
+              React.createElement("strong", null, "Note:"), " 332px wide."
             ), 
-            Example({summary: "Call URL retrieved", dashed: "true", style: {width: "332px"}}, 
-              PanelView({client: mockClient, notifications: notifications, 
-                         callUrl: "http://invalid.example.url/", 
-                         dispatcher: dispatcher, 
-                         roomStore: roomStore})
-            ), 
-            Example({summary: "Call URL retrieved - authenticated", dashed: "true", style: {width: "332px"}}, 
-              PanelView({client: mockClient, notifications: notifications, 
-                         callUrl: "http://invalid.example.url/", 
+            React.createElement(Example, {summary: "Room list tab", dashed: "true", style: {width: "332px"}}, 
+              React.createElement(PanelView, {client: mockClient, notifications: notifications, 
                          userProfile: {email: "test@example.com"}, 
-                         dispatcher: dispatcher, 
-                         roomStore: roomStore})
-            ), 
-            Example({summary: "Pending call url retrieval", dashed: "true", style: {width: "332px"}}, 
-              PanelView({client: mockClient, notifications: notifications, 
-                         dispatcher: dispatcher, 
-                         roomStore: roomStore})
-            ), 
-            Example({summary: "Pending call url retrieval - authenticated", dashed: "true", style: {width: "332px"}}, 
-              PanelView({client: mockClient, notifications: notifications, 
-                         userProfile: {email: "test@example.com"}, 
-                         dispatcher: dispatcher, 
-                         roomStore: roomStore})
-            ), 
-            Example({summary: "Error Notification", dashed: "true", style: {width: "332px"}}, 
-              PanelView({client: mockClient, notifications: errNotifications, 
-                         dispatcher: dispatcher, 
-                         roomStore: roomStore})
-            ), 
-            Example({summary: "Error Notification - authenticated", dashed: "true", style: {width: "332px"}}, 
-              PanelView({client: mockClient, notifications: errNotifications, 
-                         userProfile: {email: "test@example.com"}, 
-                         dispatcher: dispatcher, 
-                         roomStore: roomStore})
-            ), 
-            Example({summary: "Room list tab", dashed: "true", style: {width: "332px"}}, 
-              PanelView({client: mockClient, notifications: notifications, 
-                         userProfile: {email: "test@example.com"}, 
+                         mozLoop: mockMozLoopRooms, 
                          dispatcher: dispatcher, 
                          roomStore: roomStore, 
                          selectedTab: "rooms"})
+            ), 
+            React.createElement(Example, {summary: "Contact list tab", dashed: "true", style: {width: "332px"}}, 
+              React.createElement(PanelView, {client: mockClient, notifications: notifications, 
+                         userProfile: {email: "test@example.com"}, 
+                         mozLoop: mockMozLoopRooms, 
+                         dispatcher: dispatcher, 
+                         roomStore: roomStore, 
+                         selectedTab: "contacts"})
+            ), 
+            React.createElement(Example, {summary: "Error Notification", dashed: "true", style: {width: "332px"}}, 
+              React.createElement(PanelView, {client: mockClient, notifications: errNotifications, 
+                         mozLoop: navigator.mozLoop, 
+                         dispatcher: dispatcher, 
+                         roomStore: roomStore})
+            ), 
+            React.createElement(Example, {summary: "Error Notification - authenticated", dashed: "true", style: {width: "332px"}}, 
+              React.createElement(PanelView, {client: mockClient, notifications: errNotifications, 
+                         userProfile: {email: "test@example.com"}, 
+                         mozLoop: navigator.mozLoop, 
+                         dispatcher: dispatcher, 
+                         roomStore: roomStore})
+            ), 
+            React.createElement(Example, {summary: "Contact import success", dashed: "true", style: {width: "332px"}}, 
+              React.createElement(PanelView, {notifications: new loop.shared.models.NotificationCollection([{level: "success", message: "Import success"}]), 
+                         userProfile: {email: "test@example.com"}, 
+                         mozLoop: mockMozLoopRooms, 
+                         dispatcher: dispatcher, 
+                         roomStore: roomStore, 
+                         selectedTab: "contacts"})
+            ), 
+            React.createElement(Example, {summary: "Contact import error", dashed: "true", style: {width: "332px"}}, 
+              React.createElement(PanelView, {notifications: new loop.shared.models.NotificationCollection([{level: "error", message: "Import error"}]), 
+                         userProfile: {email: "test@example.com"}, 
+                         mozLoop: mockMozLoopRooms, 
+                         dispatcher: dispatcher, 
+                         roomStore: roomStore, 
+                         selectedTab: "contacts"})
             )
           ), 
 
-          Section({name: "IncomingCallView"}, 
-            Example({summary: "Default / incoming video call", dashed: "true", style: {width: "260px", height: "254px"}}, 
-              React.DOM.div({className: "fx-embedded"}, 
-                IncomingCallView({model: mockConversationModel, 
-                                  video: true})
+          React.createElement(Section, {name: "AcceptCallView"}, 
+            React.createElement(Example, {summary: "Default / incoming video call", dashed: "true", style: {width: "300px", height: "272px"}}, 
+              React.createElement("div", {className: "fx-embedded"}, 
+                React.createElement(AcceptCallView, {callType: CALL_TYPES.AUDIO_VIDEO, 
+                                callerId: "Mr Smith", 
+                                dispatcher: dispatcher, 
+                                mozLoop: mockMozLoopRooms})
               )
             ), 
 
-            Example({summary: "Default / incoming audio only call", dashed: "true", style: {width: "260px", height: "254px"}}, 
-              React.DOM.div({className: "fx-embedded"}, 
-                IncomingCallView({model: mockConversationModel, 
-                                  video: false})
+            React.createElement(Example, {summary: "Default / incoming audio only call", dashed: "true", style: {width: "300px", height: "272px"}}, 
+              React.createElement("div", {className: "fx-embedded"}, 
+                React.createElement(AcceptCallView, {callType: CALL_TYPES.AUDIO_ONLY, 
+                                callerId: "Mr Smith", 
+                                dispatcher: dispatcher, 
+                                mozLoop: mockMozLoopRooms})
               )
             )
           ), 
 
-          Section({name: "IncomingCallView-ActiveState"}, 
-            Example({summary: "Default", dashed: "true", style: {width: "260px", height: "254px"}}, 
-              React.DOM.div({className: "fx-embedded"}, 
-                IncomingCallView({model: mockConversationModel, 
-                                   showMenu: true})
+          React.createElement(Section, {name: "AcceptCallView-ActiveState"}, 
+            React.createElement(Example, {summary: "Default", dashed: "true", style: {width: "300px", height: "272px"}}, 
+              React.createElement("div", {className: "fx-embedded"}, 
+                React.createElement(AcceptCallView, {callType: CALL_TYPES.AUDIO_VIDEO, 
+                                callerId: "Mr Smith", 
+                                dispatcher: dispatcher, 
+                                mozLoop: mockMozLoopRooms, 
+                                showMenu: true})
               )
             )
           ), 
 
-          Section({name: "ConversationToolbar"}, 
-            React.DOM.h2(null, "Desktop Conversation Window"), 
-            React.DOM.div({className: "fx-embedded override-position"}, 
-              Example({summary: "Default (260x265)", dashed: "true"}, 
-                ConversationToolbar({video: {enabled: true}, 
+          React.createElement(Section, {name: "ConversationToolbar"}, 
+            React.createElement("h2", null, "Desktop Conversation Window"), 
+            React.createElement("div", {className: "fx-embedded override-position"}, 
+              React.createElement(Example, {summary: "Default", dashed: "true", style: {width: "300px", height: "272px"}}, 
+                React.createElement(ConversationToolbar, {video: {enabled: true}, 
                                      audio: {enabled: true}, 
                                      hangup: noop, 
                                      publishStream: noop})
               ), 
-              Example({summary: "Video muted"}, 
-                ConversationToolbar({video: {enabled: false}, 
+              React.createElement(Example, {summary: "Video muted", style: {width: "300px", height: "272px"}}, 
+                React.createElement(ConversationToolbar, {video: {enabled: false}, 
                                      audio: {enabled: true}, 
                                      hangup: noop, 
                                      publishStream: noop})
               ), 
-              Example({summary: "Audio muted"}, 
-                ConversationToolbar({video: {enabled: true}, 
+              React.createElement(Example, {summary: "Audio muted", style: {width: "300px", height: "272px"}}, 
+                React.createElement(ConversationToolbar, {video: {enabled: true}, 
                                      audio: {enabled: false}, 
                                      hangup: noop, 
                                      publishStream: noop})
               )
             ), 
 
-            React.DOM.h2(null, "Standalone"), 
-            React.DOM.div({className: "standalone override-position"}, 
-              Example({summary: "Default"}, 
-                ConversationToolbar({video: {enabled: true}, 
+            React.createElement("h2", null, "Standalone"), 
+            React.createElement("div", {className: "standalone override-position"}, 
+              React.createElement(Example, {summary: "Default"}, 
+                React.createElement(ConversationToolbar, {video: {enabled: true}, 
                                      audio: {enabled: true}, 
                                      hangup: noop, 
                                      publishStream: noop})
               ), 
-              Example({summary: "Video muted"}, 
-                ConversationToolbar({video: {enabled: false}, 
+              React.createElement(Example, {summary: "Video muted"}, 
+                React.createElement(ConversationToolbar, {video: {enabled: false}, 
                                      audio: {enabled: true}, 
                                      hangup: noop, 
                                      publishStream: noop})
               ), 
-              Example({summary: "Audio muted"}, 
-                ConversationToolbar({video: {enabled: true}, 
+              React.createElement(Example, {summary: "Audio muted"}, 
+                React.createElement(ConversationToolbar, {video: {enabled: true}, 
                                      audio: {enabled: false}, 
                                      hangup: noop, 
                                      publishStream: noop})
@@ -324,84 +390,104 @@
             )
           ), 
 
-          Section({name: "PendingConversationView"}, 
-            Example({summary: "Pending conversation view (connecting)", dashed: "true"}, 
-              React.DOM.div({className: "standalone"}, 
-                PendingConversationView({websocket: mockWebSocket, 
+          React.createElement(Section, {name: "GumPromptConversationView"}, 
+            React.createElement(Example, {summary: "Gum Prompt conversation view", dashed: "true"}, 
+              React.createElement("div", {className: "standalone"}, 
+                React.createElement(GumPromptConversationView, null)
+              )
+            )
+          ), 
+
+          React.createElement(Section, {name: "WaitingConversationView"}, 
+            React.createElement(Example, {summary: "Waiting conversation view (connecting)", dashed: "true"}, 
+              React.createElement("div", {className: "standalone"}, 
+                React.createElement(WaitingConversationView, {websocket: mockWebSocket, 
                                          dispatcher: dispatcher})
               )
             ), 
-            Example({summary: "Pending conversation view (ringing)", dashed: "true"}, 
-              React.DOM.div({className: "standalone"}, 
-                PendingConversationView({websocket: mockWebSocket, 
+            React.createElement(Example, {summary: "Waiting conversation view (ringing)", dashed: "true"}, 
+              React.createElement("div", {className: "standalone"}, 
+                React.createElement(WaitingConversationView, {websocket: mockWebSocket, 
                                          dispatcher: dispatcher, 
                                          callState: "ringing"})
               )
             )
           ), 
 
-          Section({name: "PendingConversationView (Desktop)"}, 
-            Example({summary: "Connecting", dashed: "true", 
-                     style: {width: "260px", height: "265px"}}, 
-              React.DOM.div({className: "fx-embedded"}, 
-                DesktopPendingConversationView({callState: "gather", 
+          React.createElement(Section, {name: "PendingConversationView (Desktop)"}, 
+            React.createElement(Example, {summary: "Connecting", dashed: "true", 
+                     style: {width: "300px", height: "272px"}}, 
+              React.createElement("div", {className: "fx-embedded"}, 
+                React.createElement(DesktopPendingConversationView, {callState: "gather", 
                                                 contact: mockContact, 
                                                 dispatcher: dispatcher})
               )
             )
           ), 
 
-          Section({name: "CallFailedView"}, 
-            Example({summary: "Call Failed", dashed: "true", 
-                     style: {width: "260px", height: "265px"}}, 
-              React.DOM.div({className: "fx-embedded"}, 
-                CallFailedView({dispatcher: dispatcher})
+          React.createElement(Section, {name: "CallFailedView"}, 
+            React.createElement(Example, {summary: "Call Failed - Incoming", dashed: "true", 
+                     style: {width: "300px", height: "272px"}}, 
+              React.createElement("div", {className: "fx-embedded"}, 
+                React.createElement(CallFailedView, {dispatcher: dispatcher, 
+                                outgoing: false, 
+                                store: conversationStore})
               )
             ), 
-            Example({summary: "Call Failed — with call URL error", dashed: "true", 
-                     style: {width: "260px", height: "265px"}}, 
-              React.DOM.div({className: "fx-embedded"}, 
-                CallFailedView({dispatcher: dispatcher, emailLinkError: true})
+            React.createElement(Example, {summary: "Call Failed - Outgoing", dashed: "true", 
+                     style: {width: "300px", height: "272px"}}, 
+              React.createElement("div", {className: "fx-embedded"}, 
+                React.createElement(CallFailedView, {dispatcher: dispatcher, 
+                                outgoing: true, 
+                                store: conversationStore})
+              )
+            ), 
+            React.createElement(Example, {summary: "Call Failed — with call URL error", dashed: "true", 
+                     style: {width: "300px", height: "272px"}}, 
+              React.createElement("div", {className: "fx-embedded"}, 
+                React.createElement(CallFailedView, {dispatcher: dispatcher, emailLinkError: true, 
+                                outgoing: true, 
+                                store: conversationStore})
               )
             )
           ), 
 
-          Section({name: "StartConversationView"}, 
-            Example({summary: "Start conversation view", dashed: "true"}, 
-              React.DOM.div({className: "standalone"}, 
-                StartConversationView({conversation: mockConversationModel, 
+          React.createElement(Section, {name: "StartConversationView"}, 
+            React.createElement(Example, {summary: "Start conversation view", dashed: "true"}, 
+              React.createElement("div", {className: "standalone"}, 
+                React.createElement(StartConversationView, {conversation: mockConversationModel, 
                                        client: mockClient, 
                                        notifications: notifications})
               )
             )
           ), 
 
-          Section({name: "FailedConversationView"}, 
-            Example({summary: "Failed conversation view", dashed: "true"}, 
-              React.DOM.div({className: "standalone"}, 
-                FailedConversationView({conversation: mockConversationModel, 
+          React.createElement(Section, {name: "FailedConversationView"}, 
+            React.createElement(Example, {summary: "Failed conversation view", dashed: "true"}, 
+              React.createElement("div", {className: "standalone"}, 
+                React.createElement(FailedConversationView, {conversation: mockConversationModel, 
                                         client: mockClient, 
                                         notifications: notifications})
               )
             )
           ), 
 
-          Section({name: "ConversationView"}, 
-            Example({summary: "Desktop conversation window", dashed: "true", 
-                     style: {width: "260px", height: "265px"}}, 
-              React.DOM.div({className: "fx-embedded"}, 
-                ConversationView({sdk: mockSDK, 
+          React.createElement(Section, {name: "ConversationView"}, 
+            React.createElement(Example, {summary: "Desktop conversation window", dashed: "true", 
+                     style: {width: "300px", height: "272px"}}, 
+              React.createElement("div", {className: "fx-embedded"}, 
+                React.createElement(ConversationView, {sdk: mockSDK, 
                                   model: mockConversationModel, 
                                   video: {enabled: true}, 
                                   audio: {enabled: true}})
               )
             ), 
 
-            Example({summary: "Desktop conversation window large", dashed: "true"}, 
-              React.DOM.div({className: "breakpoint", 'data-breakpoint-width': "800px", 
-                'data-breakpoint-height': "600px"}, 
-                React.DOM.div({className: "fx-embedded"}, 
-                  ConversationView({sdk: mockSDK, 
+            React.createElement(Example, {summary: "Desktop conversation window large", dashed: "true"}, 
+              React.createElement("div", {className: "breakpoint", "data-breakpoint-width": "800px", 
+                "data-breakpoint-height": "600px"}, 
+                React.createElement("div", {className: "fx-embedded"}, 
+                  React.createElement(ConversationView, {sdk: mockSDK, 
                     video: {enabled: true}, 
                     audio: {enabled: true}, 
                     model: mockConversationModel})
@@ -409,19 +495,19 @@
               )
             ), 
 
-            Example({summary: "Desktop conversation window local audio stream", 
-                     dashed: "true", style: {width: "260px", height: "265px"}}, 
-              React.DOM.div({className: "fx-embedded"}, 
-                ConversationView({sdk: mockSDK, 
+            React.createElement(Example, {summary: "Desktop conversation window local audio stream", 
+                     dashed: "true", style: {width: "300px", height: "272px"}}, 
+              React.createElement("div", {className: "fx-embedded"}, 
+                React.createElement(ConversationView, {sdk: mockSDK, 
                                   video: {enabled: false}, 
                                   audio: {enabled: true}, 
                                   model: mockConversationModel})
               )
             ), 
 
-            Example({summary: "Standalone version"}, 
-              React.DOM.div({className: "standalone"}, 
-                ConversationView({sdk: mockSDK, 
+            React.createElement(Example, {summary: "Standalone version"}, 
+              React.createElement("div", {className: "standalone"}, 
+                React.createElement(ConversationView, {sdk: mockSDK, 
                                   video: {enabled: true}, 
                                   audio: {enabled: true}, 
                                   model: mockConversationModel})
@@ -429,14 +515,14 @@
             )
           ), 
 
-          Section({name: "ConversationView-640"}, 
-            Example({summary: "640px breakpoint for conversation view"}, 
-              React.DOM.div({className: "breakpoint", 
+          React.createElement(Section, {name: "ConversationView-640"}, 
+            React.createElement(Example, {summary: "640px breakpoint for conversation view"}, 
+              React.createElement("div", {className: "breakpoint", 
                    style: {"text-align":"center"}, 
-                   'data-breakpoint-width': "400px", 
-                   'data-breakpoint-height': "780px"}, 
-                React.DOM.div({className: "standalone"}, 
-                  ConversationView({sdk: mockSDK, 
+                   "data-breakpoint-width": "400px", 
+                   "data-breakpoint-height": "780px"}, 
+                React.createElement("div", {className: "standalone"}, 
+                  React.createElement(ConversationView, {sdk: mockSDK, 
                                     video: {enabled: true}, 
                                     audio: {enabled: true}, 
                                     model: mockConversationModel})
@@ -445,10 +531,10 @@
             )
           ), 
 
-          Section({name: "ConversationView-LocalAudio"}, 
-            Example({summary: "Local stream is audio only"}, 
-              React.DOM.div({className: "standalone"}, 
-                ConversationView({sdk: mockSDK, 
+          React.createElement(Section, {name: "ConversationView-LocalAudio"}, 
+            React.createElement(Example, {summary: "Local stream is audio only"}, 
+              React.createElement("div", {className: "standalone"}, 
+                React.createElement(ConversationView, {sdk: mockSDK, 
                                   video: {enabled: false}, 
                                   audio: {enabled: true}, 
                                   model: mockConversationModel})
@@ -456,174 +542,193 @@
             )
           ), 
 
-          Section({name: "FeedbackView"}, 
-            React.DOM.p({className: "note"}, 
-              React.DOM.strong(null, "Note:"), " For the useable demo, you can access submitted data at ", 
-              React.DOM.a({href: "https://input.allizom.org/"}, "input.allizom.org"), "."
+          React.createElement(Section, {name: "FeedbackView"}, 
+            React.createElement("p", {className: "note"}, 
+              React.createElement("strong", null, "Note:"), " For the useable demo, you can access submitted data at ", 
+              React.createElement("a", {href: "https://input.allizom.org/"}, "input.allizom.org"), "."
             ), 
-            Example({summary: "Default (useable demo)", dashed: "true", style: {width: "260px"}}, 
-              FeedbackView({feedbackApiClient: stageFeedbackApiClient})
+            React.createElement(Example, {summary: "Default (useable demo)", dashed: "true", style: {width: "300px", height: "272px"}}, 
+              React.createElement(FeedbackView, {feedbackStore: feedbackStore})
             ), 
-            Example({summary: "Detailed form", dashed: "true", style: {width: "260px"}}, 
-              FeedbackView({feedbackApiClient: stageFeedbackApiClient, step: "form"})
+            React.createElement(Example, {summary: "Detailed form", dashed: "true", style: {width: "300px", height: "272px"}}, 
+              React.createElement(FeedbackView, {feedbackStore: feedbackStore, feedbackState: FEEDBACK_STATES.DETAILS})
             ), 
-            Example({summary: "Thank you!", dashed: "true", style: {width: "260px"}}, 
-              FeedbackView({feedbackApiClient: stageFeedbackApiClient, step: "finished"})
+            React.createElement(Example, {summary: "Thank you!", dashed: "true", style: {width: "300px", height: "272px"}}, 
+              React.createElement(FeedbackView, {feedbackStore: feedbackStore, feedbackState: FEEDBACK_STATES.SENT})
             )
           ), 
 
-          Section({name: "CallUrlExpiredView"}, 
-            Example({summary: "Firefox User"}, 
-              CallUrlExpiredView({helper: {isFirefox: returnTrue}})
+          React.createElement(Section, {name: "CallUrlExpiredView"}, 
+            React.createElement(Example, {summary: "Firefox User"}, 
+              React.createElement(CallUrlExpiredView, {isFirefox: true})
             ), 
-            Example({summary: "Non-Firefox User"}, 
-              CallUrlExpiredView({helper: {isFirefox: returnFalse}})
+            React.createElement(Example, {summary: "Non-Firefox User"}, 
+              React.createElement(CallUrlExpiredView, {isFirefox: false})
             )
           ), 
 
-          Section({name: "EndedConversationView"}, 
-            Example({summary: "Displays the feedback form"}, 
-              React.DOM.div({className: "standalone"}, 
-                EndedConversationView({sdk: mockSDK, 
+          React.createElement(Section, {name: "EndedConversationView"}, 
+            React.createElement(Example, {summary: "Displays the feedback form"}, 
+              React.createElement("div", {className: "standalone"}, 
+                React.createElement(EndedConversationView, {sdk: mockSDK, 
                                        video: {enabled: true}, 
                                        audio: {enabled: true}, 
                                        conversation: mockConversationModel, 
-                                       feedbackApiClient: stageFeedbackApiClient, 
+                                       feedbackStore: feedbackStore, 
                                        onAfterFeedbackReceived: noop})
               )
             )
           ), 
 
-          Section({name: "AlertMessages"}, 
-            Example({summary: "Various alerts"}, 
-              React.DOM.div({className: "alert alert-warning"}, 
-                React.DOM.button({className: "close"}), 
-                React.DOM.p({className: "message"}, 
+          React.createElement(Section, {name: "AlertMessages"}, 
+            React.createElement(Example, {summary: "Various alerts"}, 
+              React.createElement("div", {className: "alert alert-warning"}, 
+                React.createElement("button", {className: "close"}), 
+                React.createElement("p", {className: "message"}, 
                   "The person you were calling has ended the conversation."
                 )
               ), 
-              React.DOM.br(null), 
-              React.DOM.div({className: "alert alert-error"}, 
-                React.DOM.button({className: "close"}), 
-                React.DOM.p({className: "message"}, 
+              React.createElement("br", null), 
+              React.createElement("div", {className: "alert alert-error"}, 
+                React.createElement("button", {className: "close"}), 
+                React.createElement("p", {className: "message"}, 
                   "The person you were calling has ended the conversation."
                 )
               )
             )
           ), 
 
-          Section({name: "HomeView"}, 
-            Example({summary: "Standalone Home View"}, 
-              React.DOM.div({className: "standalone"}, 
-                HomeView(null)
+          React.createElement(Section, {name: "HomeView"}, 
+            React.createElement(Example, {summary: "Standalone Home View"}, 
+              React.createElement("div", {className: "standalone"}, 
+                React.createElement(HomeView, null)
               )
             )
           ), 
 
 
-          Section({name: "UnsupportedBrowserView"}, 
-            Example({summary: "Standalone Unsupported Browser"}, 
-              React.DOM.div({className: "standalone"}, 
-                UnsupportedBrowserView(null)
+          React.createElement(Section, {name: "UnsupportedBrowserView"}, 
+            React.createElement(Example, {summary: "Standalone Unsupported Browser"}, 
+              React.createElement("div", {className: "standalone"}, 
+                React.createElement(UnsupportedBrowserView, {isFirefox: false})
               )
             )
           ), 
 
-          Section({name: "UnsupportedDeviceView"}, 
-            Example({summary: "Standalone Unsupported Device"}, 
-              React.DOM.div({className: "standalone"}, 
-                UnsupportedDeviceView(null)
+          React.createElement(Section, {name: "UnsupportedDeviceView"}, 
+            React.createElement(Example, {summary: "Standalone Unsupported Device"}, 
+              React.createElement("div", {className: "standalone"}, 
+                React.createElement(UnsupportedDeviceView, {platform: "ios"})
               )
             )
           ), 
 
-          Section({name: "DesktopRoomConversationView"}, 
-            Example({summary: "Desktop room conversation (invitation)", dashed: "true", 
+          React.createElement(Section, {name: "DesktopRoomConversationView"}, 
+            React.createElement(Example, {summary: "Desktop room conversation (invitation)", dashed: "true", 
                      style: {width: "260px", height: "265px"}}, 
-              React.DOM.div({className: "fx-embedded"}, 
-                DesktopRoomConversationView({
+              React.createElement("div", {className: "fx-embedded"}, 
+                React.createElement(DesktopRoomConversationView, {
                   roomStore: roomStore, 
                   dispatcher: dispatcher, 
+                  mozLoop: navigator.mozLoop, 
                   roomState: ROOM_STATES.INIT})
               )
             ), 
 
-            Example({summary: "Desktop room conversation", dashed: "true", 
+            React.createElement(Example, {summary: "Desktop room conversation", dashed: "true", 
                      style: {width: "260px", height: "265px"}}, 
-              React.DOM.div({className: "fx-embedded"}, 
-                DesktopRoomConversationView({
+              React.createElement("div", {className: "fx-embedded"}, 
+                React.createElement(DesktopRoomConversationView, {
                   roomStore: roomStore, 
                   dispatcher: dispatcher, 
+                  mozLoop: navigator.mozLoop, 
                   roomState: ROOM_STATES.HAS_PARTICIPANTS})
               )
             )
           ), 
 
-          Section({name: "StandaloneRoomView"}, 
-            Example({summary: "Standalone room conversation (ready)"}, 
-              React.DOM.div({className: "standalone"}, 
-                StandaloneRoomView({
+          React.createElement(Section, {name: "StandaloneRoomView"}, 
+            React.createElement(Example, {summary: "Standalone room conversation (ready)"}, 
+              React.createElement("div", {className: "standalone"}, 
+                React.createElement(StandaloneRoomView, {
                   dispatcher: dispatcher, 
                   activeRoomStore: activeRoomStore, 
                   roomState: ROOM_STATES.READY, 
-                  helper: {isFirefox: returnTrue}})
+                  isFirefox: true})
               )
             ), 
 
-            Example({summary: "Standalone room conversation (joined)"}, 
-              React.DOM.div({className: "standalone"}, 
-                StandaloneRoomView({
+            React.createElement(Example, {summary: "Standalone room conversation (joined)"}, 
+              React.createElement("div", {className: "standalone"}, 
+                React.createElement(StandaloneRoomView, {
                   dispatcher: dispatcher, 
                   activeRoomStore: activeRoomStore, 
                   roomState: ROOM_STATES.JOINED, 
-                  helper: {isFirefox: returnTrue}})
+                  isFirefox: true})
               )
             ), 
 
-            Example({summary: "Standalone room conversation (has-participants)"}, 
-              React.DOM.div({className: "standalone"}, 
-                StandaloneRoomView({
+            React.createElement(Example, {summary: "Standalone room conversation (has-participants)"}, 
+              React.createElement("div", {className: "standalone"}, 
+                React.createElement(StandaloneRoomView, {
                   dispatcher: dispatcher, 
                   activeRoomStore: activeRoomStore, 
                   roomState: ROOM_STATES.HAS_PARTICIPANTS, 
-                  helper: {isFirefox: returnTrue}})
+                  isFirefox: true})
               )
             ), 
 
-            Example({summary: "Standalone room conversation (full - FFx user)"}, 
-              React.DOM.div({className: "standalone"}, 
-                StandaloneRoomView({
+            React.createElement(Example, {summary: "Standalone room conversation (full - FFx user)"}, 
+              React.createElement("div", {className: "standalone"}, 
+                React.createElement(StandaloneRoomView, {
                   dispatcher: dispatcher, 
                   activeRoomStore: activeRoomStore, 
                   roomState: ROOM_STATES.FULL, 
-                  helper: {isFirefox: returnTrue}})
+                  isFirefox: true})
               )
             ), 
 
-            Example({summary: "Standalone room conversation (full - non FFx user)"}, 
-              React.DOM.div({className: "standalone"}, 
-                StandaloneRoomView({
+            React.createElement(Example, {summary: "Standalone room conversation (full - non FFx user)"}, 
+              React.createElement("div", {className: "standalone"}, 
+                React.createElement(StandaloneRoomView, {
                   dispatcher: dispatcher, 
                   activeRoomStore: activeRoomStore, 
                   roomState: ROOM_STATES.FULL, 
-                  helper: {isFirefox: returnFalse}})
+                  isFirefox: false})
               )
             ), 
 
-            Example({summary: "Standalone room conversation (failed)"}, 
-              React.DOM.div({className: "standalone"}, 
-                StandaloneRoomView({
+            React.createElement(Example, {summary: "Standalone room conversation (feedback)"}, 
+              React.createElement("div", {className: "standalone"}, 
+                React.createElement(StandaloneRoomView, {
+                  dispatcher: dispatcher, 
+                  activeRoomStore: activeRoomStore, 
+                  feedbackStore: feedbackStore, 
+                  roomState: ROOM_STATES.ENDED, 
+                  isFirefox: false})
+              )
+            ), 
+
+            React.createElement(Example, {summary: "Standalone room conversation (failed)"}, 
+              React.createElement("div", {className: "standalone"}, 
+                React.createElement(StandaloneRoomView, {
                   dispatcher: dispatcher, 
                   activeRoomStore: activeRoomStore, 
                   roomState: ROOM_STATES.FAILED, 
-                  helper: {isFirefox: returnFalse}})
+                  isFirefox: false})
               )
             )
           ), 
 
-          Section({name: "SVG icons preview"}, 
-            Example({summary: "16x16"}, 
-              SVGIcons(null)
+          React.createElement(Section, {name: "SVG icons preview", className: "svg-icons"}, 
+            React.createElement(Example, {summary: "10x10"}, 
+              React.createElement(SVGIcons, {size: "10x10"})
+            ), 
+            React.createElement(Example, {summary: "14x14"}, 
+              React.createElement(SVGIcons, {size: "14x14"})
+            ), 
+            React.createElement(Example, {summary: "16x16"}, 
+              React.createElement(SVGIcons, {size: "16x16"})
             )
           )
 
@@ -672,12 +777,34 @@
   }
 
   window.addEventListener("DOMContentLoaded", function() {
-    React.renderComponent(App(null), document.body);
+    try {
+      React.renderComponent(React.createElement(App, null), document.getElementById("main"));
+
+      for (var listener of visibilityListeners) {
+        listener({target: {hidden: false}});
+      }
+    } catch(err) {
+      console.error(err);
+      uncaughtError = err;
+    }
 
     _renderComponentsInIframes();
 
     // Put the title back, in case views changed it.
     document.title = "Loop UI Components Showcase";
+
+    // This simulates the mocha layout for errors which means we can run
+    // this alongside our other unit tests but use the same harness.
+    if (uncaughtError) {
+      $("#results").append("<div class='failures'><em>1</em></div>");
+      $("#results").append("<li class='test fail'>" +
+        "<h2>Errors rendering UI-Showcase</h2>" +
+        "<pre class='error'>" + uncaughtError + "\n" + uncaughtError.stack + "</pre>" +
+        "</li>");
+    } else {
+      $("#results").append("<div class='failures'><em>0</em></div>");
+    }
+    $("#results").append("<p id='complete'>Complete.</p>");
   });
 
 })();

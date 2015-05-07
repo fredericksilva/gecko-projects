@@ -14,10 +14,9 @@
 #include "nsIThread.h"
 #include "GMPDecryptorProxy.h"
 #include "mozilla/CDMCaps.h"
-#include "mp4_demuxer/DecoderData.h"
 
 namespace mozilla {
-
+class MediaRawData;
 class CDMCallbackProxy;
 
 namespace dom {
@@ -27,8 +26,8 @@ class MediaKeySession;
 class DecryptionClient {
 public:
   virtual ~DecryptionClient() {}
-  virtual void Decrypted(nsresult aResult,
-                         mp4_demuxer::MP4Sample* aSample) = 0;
+  virtual void Decrypted(GMPErr aResult,
+                         MediaRawData* aSample) = 0;
 };
 
 // Proxies calls GMP/CDM, and proxies calls back.
@@ -57,7 +56,8 @@ public:
   // Uses the CDM to create a key session.
   // Calls MediaKeys::OnSessionActivated() when session is created.
   // Assumes ownership of (Move()s) aInitData's contents.
-  void CreateSession(dom::SessionType aSessionType,
+  void CreateSession(uint32_t aCreateSessionToken,
+                     dom::SessionType aSessionType,
                      PromiseId aPromiseId,
                      const nsAString& aInitDataType,
                      nsTArray<uint8_t>& aInitData);
@@ -104,20 +104,23 @@ public:
   // Main thread only.
   void Shutdown();
 
+  // Main thread only.
+  void Terminated();
+
   // Threadsafe.
   const nsCString& GetNodeId() const;
 
   // Main thread only.
-  void OnResolveNewSessionPromise(uint32_t aPromiseId,
-                                  const nsAString& aSessionId);
+  void OnSetSessionId(uint32_t aCreateSessionToken,
+                      const nsAString& aSessionId);
 
   // Main thread only.
   void OnResolveLoadSessionPromise(uint32_t aPromiseId, bool aSuccess);
 
   // Main thread only.
   void OnSessionMessage(const nsAString& aSessionId,
-                        nsTArray<uint8_t>& aMessage,
-                        const nsAString& aDestinationURL);
+                        GMPSessionMessageType aMessageType,
+                        nsTArray<uint8_t>& aMessage);
 
   // Main thread only.
   void OnExpirationChange(const nsAString& aSessionId,
@@ -138,8 +141,9 @@ public:
                        const nsAString& aMsg);
 
   // Threadsafe.
-  void Decrypt(mp4_demuxer::MP4Sample* aSample,
-               DecryptionClient* aSink);
+  void Decrypt(MediaRawData* aSample,
+               DecryptionClient* aSink,
+               MediaTaskQueue* aTaskQueue);
 
   // Reject promise with DOMException corresponding to aExceptionCode.
   // Can be called from any thread.
@@ -157,19 +161,21 @@ public:
                      GMPErr aResult,
                      const nsTArray<uint8_t>& aDecryptedData);
 
-  // GMP thread only.
-  void gmp_Terminated();
-
   CDMCaps& Capabilites();
 
   // Main thread only.
-  void OnKeysChange(const nsAString& aSessionId);
+  void OnKeyStatusesChange(const nsAString& aSessionId);
+
+  void GetSessionIdsForKeyId(const nsTArray<uint8_t>& aKeyId,
+                             nsTArray<nsCString>& aSessionIds);
 
 #ifdef DEBUG
   bool IsOnGMPThread();
 #endif
 
 private:
+  friend class gmp_InitDoneCallback;
+  friend class gmp_InitGetGMPDecryptorCallback;
 
   struct InitData {
     uint32_t mPromiseId;
@@ -179,7 +185,11 @@ private:
   };
 
   // GMP thread only.
-  void gmp_Init(nsAutoPtr<InitData> aData);
+  void gmp_Init(nsAutoPtr<InitData>&& aData);
+  void gmp_InitDone(GMPDecryptorProxy* aCDM, nsAutoPtr<InitData>&& aData);
+  void gmp_InitGetGMPDecryptor(nsresult aResult,
+                               const nsACString& aNodeId,
+                               nsAutoPtr<InitData>&& aData);
 
   // GMP thread only.
   void gmp_Shutdown();
@@ -189,6 +199,7 @@ private:
 
   struct CreateSessionData {
     dom::SessionType mSessionType;
+    uint32_t mCreateSessionToken;
     PromiseId mPromiseId;
     nsAutoCString mInitDataType;
     nsTArray<uint8_t> mInitData;
@@ -224,19 +235,35 @@ private:
   // GMP thread only.
   void gmp_RemoveSession(nsAutoPtr<SessionOpData> aData);
 
-  struct DecryptJob {
-    DecryptJob(mp4_demuxer::MP4Sample* aSample,
-               DecryptionClient* aClient)
+  class DecryptJob : public nsRunnable {
+  public:
+    explicit DecryptJob(MediaRawData* aSample,
+                        DecryptionClient* aClient,
+                        MediaTaskQueue* aTaskQueue)
       : mId(0)
       , mSample(aSample)
       , mClient(aClient)
-    {}
+      , mResult(GMPGenericErr)
+      , mTaskQueue(aTaskQueue)
+    {
+      MOZ_ASSERT(mClient);
+      MOZ_ASSERT(mSample);
+    }
+
+    NS_METHOD Run() override;
+    void PostResult(GMPErr aResult, const nsTArray<uint8_t>& aDecryptedData);
+    void PostResult(GMPErr aResult);
+
     uint32_t mId;
-    nsAutoPtr<mp4_demuxer::MP4Sample> mSample;
+    nsRefPtr<MediaRawData> mSample;
+  private:
+    ~DecryptJob() {}
     nsAutoPtr<DecryptionClient> mClient;
+    GMPErr mResult;
+    nsRefPtr<MediaTaskQueue> mTaskQueue;
   };
   // GMP thread only.
-  void gmp_Decrypt(nsAutoPtr<DecryptJob> aJob);
+  void gmp_Decrypt(nsRefPtr<DecryptJob> aJob);
 
   class RejectPromiseTask : public nsRunnable {
   public:
@@ -280,7 +307,7 @@ private:
       mPtr = nullptr;
     }
 
-    Type* operator->() const {
+    Type* operator->() const MOZ_NO_ADDREF_RELEASE_ON_RETURN {
       MOZ_ASSERT(NS_IsMainThread());
       return mPtr;
     }
@@ -307,7 +334,7 @@ private:
 
   // Decryption jobs sent to CDM, awaiting result.
   // GMP thread only.
-  nsTArray<nsAutoPtr<DecryptJob>> mDecryptionJobs;
+  nsTArray<nsRefPtr<DecryptJob>> mDecryptionJobs;
 
   // Number of buffers we've decrypted. Used to uniquely identify
   // decryption jobs sent to CDM. Note we can't just use the length of
@@ -315,6 +342,10 @@ private:
   // from it.
   // GMP thread only.
   uint32_t mDecryptionJobCount;
+
+  // True if CDMProxy::gmp_Shutdown was called.
+  // GMP thread only.
+  bool mShutdownCalled;
 };
 
 

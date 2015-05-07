@@ -80,16 +80,15 @@ public :
    * track data in form of MediaSegment.
    */
   virtual void NotifyQueuedTrackChanges(MediaStreamGraph* aGraph, TrackID aID,
-                                        TrackRate aTrackRate,
-                                        TrackTicks aTrackOffset,
+                                        StreamTime aTrackOffset,
                                         uint32_t aTrackEvents,
-                                        const MediaSegment& aQueuedMedia) MOZ_OVERRIDE;
+                                        const MediaSegment& aQueuedMedia) override;
 
   /**
    * Notified the stream is being removed.
    */
   virtual void NotifyEvent(MediaStreamGraph* aGraph,
-                           MediaStreamListener::MediaStreamGraphEvent event) MOZ_OVERRIDE;
+                           MediaStreamListener::MediaStreamGraphEvent event) override;
 
   /**
    * Creates an encoder with a given MIME type. Returns null if we are unable

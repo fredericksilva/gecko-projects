@@ -13,12 +13,9 @@ import signal
 import subprocess
 import sys
 import tempfile
-import zipfile
 import mozinfo
 
 __all__ = [
-  "ZipFileReader",
-  "addCommonOptions",
   "dumpLeakLog",
   "processLeakLog",
   'systemMemory',
@@ -40,68 +37,6 @@ resetGlobalLog()
 def setAutomationLog(alt_logger):
   global log
   log = alt_logger
-
-class ZipFileReader(object):
-  """
-  Class to read zip files in Python 2.5 and later. Limited to only what we
-  actually use.
-  """
-
-  def __init__(self, filename):
-    self._zipfile = zipfile.ZipFile(filename, "r")
-
-  def __del__(self):
-    self._zipfile.close()
-
-  def _getnormalizedpath(self, path):
-    """
-    Gets a normalized path from 'path' (or the current working directory if
-    'path' is None). Also asserts that the path exists.
-    """
-    if path is None:
-      path = os.curdir
-    path = os.path.normpath(os.path.expanduser(path))
-    assert os.path.isdir(path)
-    return path
-
-  def _extractname(self, name, path):
-    """
-    Extracts a file with the given name from the zip file to the given path.
-    Also creates any directories needed along the way.
-    """
-    filename = os.path.normpath(os.path.join(path, name))
-    if name.endswith("/"):
-      os.makedirs(filename)
-    else:
-      path = os.path.split(filename)[0]
-      if not os.path.isdir(path):
-        os.makedirs(path)
-      with open(filename, "wb") as dest:
-        dest.write(self._zipfile.read(name))
-
-  def namelist(self):
-    return self._zipfile.namelist()
-
-  def read(self, name):
-    return self._zipfile.read(name)
-
-  def extract(self, name, path = None):
-    if hasattr(self._zipfile, "extract"):
-      return self._zipfile.extract(name, path)
-
-    # This will throw if name is not part of the zip file.
-    self._zipfile.getinfo(name)
-
-    self._extractname(name, self._getnormalizedpath(path))
-
-  def extractall(self, path = None):
-    if hasattr(self._zipfile, "extractall"):
-      return self._zipfile.extractall(path)
-
-    path = self._getnormalizedpath(path)
-
-    for name in self._zipfile.namelist():
-      self._extractname(name, path)
 
 # Python does not provide strsignal() even in the very latest 3.x.
 # This is a reasonable fake.
@@ -140,30 +75,6 @@ def printstatus(status, name = ""):
     # This is probably a can't-happen condition on Unix, but let's be defensive
     print "TEST-INFO | %s: undecodable exit status %04x\n" % (name, status)
 
-def addCommonOptions(parser, defaults={}):
-  parser.add_option("--xre-path",
-                    action = "store", type = "string", dest = "xrePath",
-                    # individual scripts will set a sane default
-                    default = None,
-                    help = "absolute path to directory containing XRE (probably xulrunner)")
-  if 'SYMBOLS_PATH' not in defaults:
-    defaults['SYMBOLS_PATH'] = None
-  parser.add_option("--symbols-path",
-                    action = "store", type = "string", dest = "symbolsPath",
-                    default = defaults['SYMBOLS_PATH'],
-                    help = "absolute path to directory containing breakpad symbols, or the URL of a zip file containing symbols")
-  parser.add_option("--debugger",
-                    action = "store", dest = "debugger",
-                    help = "use the given debugger to launch the application")
-  parser.add_option("--debugger-args",
-                    action = "store", dest = "debuggerArgs",
-                    help = "pass the given args to the debugger _before_ "
-                           "the application on the command line")
-  parser.add_option("--debugger-interactive",
-                    action = "store_true", dest = "debuggerInteractive",
-                    help = "prevents the test harness from redirecting "
-                        "stdout and stderr for interactive debuggers")
-
 def dumpLeakLog(leakLogFile, filter = False):
   """Process the leak log, without parsing it.
 
@@ -190,12 +101,15 @@ def processSingleLeakFile(leakLogFileName, processType, leakThreshold, ignoreMis
   """Process a single leak log.
   """
 
-  #                  Per-Inst  Leaked      Total  Rem ...
-  #   0 TOTAL              17     192  419115886    2 ...
-  # 833 nsTimerImpl        60     120      24726    2 ...
-  lineRe = re.compile(r"^\s*\d+\s+(?P<name>\S+)\s+"
-                      r"(?P<size>-?\d+)\s+(?P<bytesLeaked>-?\d+)\s+"
-                      r"-?\d+\s+(?P<numLeaked>-?\d+)")
+  #     |              |Per-Inst  Leaked|     Total  Rem|
+  #   0 |TOTAL         |      17     192| 419115886    2|
+  # 833 |nsTimerImpl   |      60     120|     24726    2|
+  # 930 |Foo<Bar, Bar> |      32       8|       100    1|
+  lineRe = re.compile(r"^\s*\d+ \|"
+                      r"(?P<name>[^|]+)\|"
+                      r"\s*(?P<size>-?\d+)\s+(?P<bytesLeaked>-?\d+)\s*\|"
+                      r"\s*-?\d+\s+(?P<numLeaked>-?\d+)")
+  # The class name can contain spaces. We remove trailing whitespace later.
 
   processString = "%s process:" % processType
   crashedOnPurpose = False
@@ -214,7 +128,7 @@ def processSingleLeakFile(leakLogFileName, processType, leakThreshold, ignoreMis
         # eg: the leak table header row
         log.info(line.rstrip())
         continue
-      name = matches.group("name")
+      name = matches.group("name").rstrip()
       size = int(matches.group("size"))
       bytesLeaked = int(matches.group("bytesLeaked"))
       numLeaked = int(matches.group("numLeaked"))
@@ -414,13 +328,11 @@ def environment(xrePath, env=None, crashreporter=True, debugger=False, dmdPath=N
     env[envVar] = os.path.pathsep.join([path for path in envValue if path])
 
   if dmdPath and dmdLibrary and preloadEnvVar:
-    env['DMD'] = '1'
     env[preloadEnvVar] = os.path.join(dmdPath, dmdLibrary)
 
   # crashreporter
   env['GNOME_DISABLE_CRASH_DIALOG'] = '1'
   env['XRE_NO_WINDOWS_CRASH_DIALOG'] = '1'
-  env['NS_TRACE_MALLOC_DISABLE_STACKS'] = '1'
 
   if crashreporter and not debugger:
     env['MOZ_CRASHREPORTER_NO_REPORT'] = '1'
@@ -435,7 +347,7 @@ def environment(xrePath, env=None, crashreporter=True, debugger=False, dmdPath=N
   env.setdefault('MOZ_DISABLE_NONLOCAL_CONNECTIONS', '1')
 
   # Set WebRTC logging in case it is not set yet
-  env.setdefault('NSPR_LOG_MODULES', 'signaling:5,mtransport:5,datachannel:5')
+  env.setdefault('NSPR_LOG_MODULES', 'signaling:5,mtransport:5,datachannel:5,jsep:5,MediaPipelineFactory:5')
   env.setdefault('R_LOG_LEVEL', '6')
   env.setdefault('R_LOG_DESTINATION', 'stderr')
   env.setdefault('R_LOG_VERBOSE', '1')
@@ -489,6 +401,16 @@ def environment(xrePath, env=None, crashreporter=True, debugger=False, dmdPath=N
     else:
       log.info(message)
 
+  tsan = bool(mozinfo.info.get("tsan"))
+  if tsan and mozinfo.isLinux:
+    # Symbolizer support.
+    llvmsym = os.path.join(xrePath, "llvm-symbolizer")
+    if os.path.isfile(llvmsym):
+      env["TSAN_OPTIONS"] = "external_symbolizer_path=%s" % llvmsym
+      log.info("INFO | runtests.py | TSan using symbolizer at %s" % llvmsym)
+    else:
+      log.info("TEST-UNEXPECTED-FAIL | runtests.py | Failed to find TSan symbolizer at %s" % llvmsym)
+
   return env
 
 def dumpScreen(utilityPath):
@@ -536,7 +458,7 @@ class ShutdownLeaks(object):
     self.leakedWindows = {}
     self.leakedDocShells = set()
     self.currentTest = None
-    self.seenShutdown = False
+    self.seenShutdown = set()
 
   def log(self, message):
     if message['action'] == 'log':
@@ -545,8 +467,9 @@ class ShutdownLeaks(object):
           self._logWindow(line)
         elif line[2:10] == "DOCSHELL":
           self._logDocShell(line)
-        elif line.startswith("TEST-START | Shutdown"):
-          self.seenShutdown = True
+        elif line.startswith("Completed ShutdownLeaks collections in process"):
+          pid = int(line.split()[-1])
+          self.seenShutdown.add(pid)
     elif message['action'] == 'test_start':
       fileName = message['test'].replace("chrome://mochitests/content/browser/", "")
       self.currentTest = {"fileName": fileName, "windows": set(), "docShells": set()}
@@ -564,8 +487,13 @@ class ShutdownLeaks(object):
       for url, count in self._zipLeakedWindows(test["leakedWindows"]):
         self.logger.warning("TEST-UNEXPECTED-FAIL | %s | leaked %d window(s) until shutdown [url = %s]" % (test["fileName"], count, url))
 
+      if test["leakedWindowsString"]:
+        self.logger.info("TEST-INFO | %s | windows(s) leaked: %s" % (test["fileName"], test["leakedWindowsString"]))
+
       if test["leakedDocShells"]:
         self.logger.warning("TEST-UNEXPECTED-FAIL | %s | leaked %d docShell(s) until shutdown" % (test["fileName"], len(test["leakedDocShells"])))
+        self.logger.info("TEST-INFO | %s | docShell(s) leaked: %s" % (test["fileName"],
+                                                                      ', '.join(["[pid = %s] [id = %s]" % x for x in test["leakedDocShells"]])))
 
   def _logWindow(self, line):
     created = line[:2] == "++"
@@ -577,7 +505,7 @@ class ShutdownLeaks(object):
       self.logger.warning("TEST-UNEXPECTED-FAIL | ShutdownLeaks | failed to parse line <%s>" % line)
       return
 
-    key = pid + "." + serial
+    key = (pid, serial)
 
     if self.currentTest:
       windows = self.currentTest["windows"]
@@ -585,7 +513,7 @@ class ShutdownLeaks(object):
         windows.add(key)
       else:
         windows.discard(key)
-    elif self.seenShutdown and not created:
+    elif int(pid) in self.seenShutdown and not created:
       self.leakedWindows[key] = self._parseValue(line, "url")
 
   def _logDocShell(self, line):
@@ -598,7 +526,7 @@ class ShutdownLeaks(object):
       self.logger.warning("TEST-UNEXPECTED-FAIL | ShutdownLeaks | failed to parse line <%s>" % line)
       return
 
-    key = pid + "." + id
+    key = (pid, id)
 
     if self.currentTest:
       docShells = self.currentTest["docShells"]
@@ -606,7 +534,7 @@ class ShutdownLeaks(object):
         docShells.add(key)
       else:
         docShells.discard(key)
-    elif self.seenShutdown and not created:
+    elif int(pid) in self.seenShutdown and not created:
       self.leakedDocShells.add(key)
 
   def _parseValue(self, line, name):
@@ -619,7 +547,9 @@ class ShutdownLeaks(object):
     leakingTests = []
 
     for test in self.tests:
-      test["leakedWindows"] = [self.leakedWindows[id] for id in test["windows"] if id in self.leakedWindows]
+      leakedWindows = [id for id in test["windows"] if id in self.leakedWindows]
+      test["leakedWindows"] = [self.leakedWindows[id] for id in leakedWindows]
+      test["leakedWindowsString"] = ', '.join(["[pid = %s] [serial = %s]" % x for x in leakedWindows])
       test["leakedDocShells"] = [id for id in test["docShells"] if id in self.leakedDocShells]
       test["leakCount"] = len(test["leakedWindows"]) + len(test["leakedDocShells"])
 
@@ -657,9 +587,9 @@ class LSANLeaks(object):
     # Don't various allocation-related stack frames, as they do not help much to
     # distinguish different leaks.
     unescapedSkipList = [
-      "malloc", "js_malloc", "malloc_", "__interceptor_malloc", "moz_malloc", "moz_xmalloc",
-      "calloc", "js_calloc", "calloc_", "__interceptor_calloc", "moz_calloc", "moz_xcalloc",
-      "realloc","js_realloc", "realloc_", "__interceptor_realloc", "moz_realloc", "moz_xrealloc",
+      "malloc", "js_malloc", "malloc_", "__interceptor_malloc", "moz_xmalloc",
+      "calloc", "js_calloc", "calloc_", "__interceptor_calloc", "moz_xcalloc",
+      "realloc","js_realloc", "realloc_", "__interceptor_realloc", "moz_xrealloc",
       "new",
       "js::MallocProvider",
     ]

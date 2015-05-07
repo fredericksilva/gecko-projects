@@ -57,6 +57,7 @@ loop.shared.models = (function(l10n) {
      * Constructor.
      *
      * Options:
+     * - {OT} mozLoop: browser mozLoop service object.
      *
      * Required:
      * - {OT} sdk: OT SDK object.
@@ -66,6 +67,7 @@ loop.shared.models = (function(l10n) {
      */
     initialize: function(attributes, options) {
       options = options || {};
+      this.mozLoop = options.mozLoop;
       if (!options.sdk) {
         throw new Error("missing required sdk");
       }
@@ -95,6 +97,13 @@ loop.shared.models = (function(l10n) {
       if (selectedCallType) {
         this.set("selectedCallType", selectedCallType);
       }
+      this.trigger("call:outgoing:get-media-privs");
+    },
+
+    /**
+     * Used to indicate that media privileges have been accepted.
+     */
+    gotMediaPrivs: function() {
       this.trigger("call:outgoing:setup");
     },
 
@@ -179,6 +188,13 @@ loop.shared.models = (function(l10n) {
                                   this._sessionDisconnected);
       this.session.connect(this.get("apiKey"), this.get("sessionToken"),
                            this._onConnectCompletion.bind(this));
+
+      // We store the call credentials for debugging purposes.
+      if (this.mozLoop) {
+        this.mozLoop.addConversationContext(this.get("windowId"),
+                                            this.get("sessionId"),
+                                            this.get("callId"));
+      }
     },
 
     /**
@@ -347,7 +363,7 @@ loop.shared.models = (function(l10n) {
         this._signalEnd("session:peer-hungup", event);
       }
       this.endSession();
-    },
+    }
   });
 
   /**
@@ -406,6 +422,27 @@ loop.shared.models = (function(l10n) {
      */
     errorL10n: function(messageId, l10nProps) {
       this.error(l10n.get(messageId, l10nProps));
+    },
+
+    /**
+     * Adds a success notification to the stack and renders it.
+     *
+     * @return {String} message
+     */
+    success: function(message) {
+      this.add({level: "success", message: message});
+    },
+
+    /**
+     * Adds a l10n success notification to the stack and renders it.
+     *
+     * @param  {String} messageId L10n message id
+     * @param  {Object} [l10nProps] An object with variables to be interpolated
+     *                  into the translation. All members' values must be
+     *                  strings or numbers.
+     */
+    successL10n: function(messageId, l10nProps) {
+      this.success(l10n.get(messageId, l10nProps));
     }
   });
 

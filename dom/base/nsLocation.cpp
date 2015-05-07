@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=2 sw=2 et tw=80: */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -114,6 +114,7 @@ nsLocation::CheckURL(nsIURI* aURI, nsIDocShellLoadInfo** aLoadInfo)
 
   nsCOMPtr<nsISupports> owner;
   nsCOMPtr<nsIURI> sourceURI;
+  net::ReferrerPolicy referrerPolicy = net::RP_Default;
 
   if (JSContext *cx = nsContentUtils::GetCurrentJSContext()) {
     // No cx means that there's no JS running, or at least no JS that
@@ -149,6 +150,7 @@ nsLocation::CheckURL(nsIURI* aURI, nsIDocShellLoadInfo** aLoadInfo)
       docCurrentURI = doc->GetDocumentURI();
       rv = doc->NodePrincipal()->GetURI(getter_AddRefs(principalURI));
       NS_ENSURE_SUCCESS(rv, rv);
+      referrerPolicy = doc->GetReferrerPolicy();
     }
 
     bool urisEqual = false;
@@ -186,6 +188,7 @@ nsLocation::CheckURL(nsIURI* aURI, nsIDocShellLoadInfo** aLoadInfo)
 
   if (sourceURI) {
     loadInfo->SetReferrer(sourceURI);
+    loadInfo->SetReferrerPolicy(referrerPolicy);
   }
 
   loadInfo.swap(*aLoadInfo);
@@ -295,28 +298,36 @@ nsLocation::GetHash(nsAString& aHash)
   nsAutoString unicodeRef;
 
   rv = uri->GetRef(ref);
-  if (NS_SUCCEEDED(rv)) {
-    nsCOMPtr<nsITextToSubURI> textToSubURI(
-        do_GetService(NS_ITEXTTOSUBURI_CONTRACTID, &rv));
 
+  if (nsContentUtils::EncodeDecodeURLHash()) {
     if (NS_SUCCEEDED(rv)) {
-      nsAutoCString charset;
-      uri->GetOriginCharset(charset);
-        
-      rv = textToSubURI->UnEscapeURIForUI(charset, ref, unicodeRef);
-    }
-      
-    if (NS_FAILED(rv)) {
-      // Oh, well.  No intl here!
-      NS_UnescapeURL(ref);
-      CopyASCIItoUTF16(ref, unicodeRef);
-      rv = NS_OK;
-    }
-  }
+      nsCOMPtr<nsITextToSubURI> textToSubURI(
+          do_GetService(NS_ITEXTTOSUBURI_CONTRACTID, &rv));
 
-  if (NS_SUCCEEDED(rv) && !unicodeRef.IsEmpty()) {
-    aHash.Assign(char16_t('#'));
-    aHash.Append(unicodeRef);
+      if (NS_SUCCEEDED(rv)) {
+        nsAutoCString charset;
+        uri->GetOriginCharset(charset);
+
+        rv = textToSubURI->UnEscapeURIForUI(charset, ref, unicodeRef);
+      }
+
+      if (NS_FAILED(rv)) {
+        // Oh, well.  No intl here!
+        NS_UnescapeURL(ref);
+        CopyASCIItoUTF16(ref, unicodeRef);
+        rv = NS_OK;
+      }
+    }
+
+    if (NS_SUCCEEDED(rv) && !unicodeRef.IsEmpty()) {
+      aHash.Assign(char16_t('#'));
+      aHash.Append(unicodeRef);
+    }
+  } else { // URL Hash should simply return the value of the Ref segment
+    if (NS_SUCCEEDED(rv) && !ref.IsEmpty()) {
+      aHash.Assign(char16_t('#'));
+      AppendUTF8toUTF16(ref, aHash);
+    }
   }
 
   if (aHash == mCachedHash) {
@@ -1042,9 +1053,9 @@ nsLocation::CallerSubsumes()
 }
 
 JSObject*
-nsLocation::WrapObject(JSContext* aCx)
+nsLocation::WrapObject(JSContext* aCx, JS::Handle<JSObject*> aGivenProto)
 {
-  return LocationBinding::Wrap(aCx, this);
+  return LocationBinding::Wrap(aCx, this, aGivenProto);
 }
 
 URLSearchParams*

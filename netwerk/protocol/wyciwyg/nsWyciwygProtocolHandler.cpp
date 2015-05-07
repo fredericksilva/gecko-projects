@@ -78,8 +78,7 @@ nsWyciwygProtocolHandler::NewURI(const nsACString &aSpec,
   rv = url->SetSpec(aSpec);
   NS_ENSURE_SUCCESS(rv, rv);
 
-  *result = url;
-  NS_ADDREF(*result);
+  url.forget(result);
 
   return rv;
 }
@@ -130,6 +129,12 @@ nsWyciwygProtocolHandler::NewChannel2(nsIURI* url,
 
   if (NS_FAILED(rv))
     return rv;
+
+  // set the loadInfo on the new channel
+  rv = channel->SetLoadInfo(aLoadInfo);
+  if (NS_FAILED(rv)) {
+      return rv;
+  }
 
   channel.forget(result);
   return NS_OK;

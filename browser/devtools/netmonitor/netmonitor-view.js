@@ -60,6 +60,7 @@ const GENERIC_VARIABLES_VIEW_SETTINGS = {
   eval: () => {}
 };
 const NETWORK_ANALYSIS_PIE_CHART_DIAMETER = 200; // px
+const FREETEXT_FILTER_SEARCH_DELAY = 200; // ms
 
 /**
  * Object defining the network monitor view components.
@@ -336,6 +337,7 @@ function RequestsMenuView() {
   this._byFile = this._byFile.bind(this);
   this._byDomain = this._byDomain.bind(this);
   this._byType = this._byType.bind(this);
+  this._onSecurityIconClick = this._onSecurityIconClick.bind(this);
 }
 
 RequestsMenuView.prototype = Heritage.extend(WidgetMethods, {
@@ -349,6 +351,7 @@ RequestsMenuView.prototype = Heritage.extend(WidgetMethods, {
     this._splitter = $("#network-inspector-view-splitter");
     this._summary = $("#requests-menu-network-summary-label");
     this._summary.setAttribute("value", L10N.getStr("networkMenu.empty"));
+    this.userInputTimer = Cc["@mozilla.org/timer;1"].createInstance(Ci.nsITimer);
 
     Prefs.filters.forEach(type => this.filterOn(type));
     this.sortContents(this._byTiming);
@@ -369,6 +372,7 @@ RequestsMenuView.prototype = Heritage.extend(WidgetMethods, {
     this._onContextNewTabCommand = this.openRequestInTab.bind(this);
     this._onContextCopyUrlCommand = this.copyUrl.bind(this);
     this._onContextCopyImageAsDataUriCommand = this.copyImageAsDataUri.bind(this);
+    this._onContextCopyResponseCommand = this.copyResponse.bind(this);
     this._onContextResendCommand = this.cloneSelectedRequest.bind(this);
     this._onContextToggleRawHeadersCommand = this.toggleRawHeaders.bind(this);
     this._onContextPerfCommand = () => NetMonitorView.toggleFrontendMode();
@@ -379,12 +383,20 @@ RequestsMenuView.prototype = Heritage.extend(WidgetMethods, {
     this.cloneSelectedRequestEvent = this.cloneSelectedRequest.bind(this);
     this.toggleRawHeadersEvent = this.toggleRawHeaders.bind(this);
 
+    this.requestsFreetextFilterEvent = this.requestsFreetextFilterEvent.bind(this);
+    this.reFilterRequests = this.reFilterRequests.bind(this);
+
+    this.freetextFilterBox = $("#requests-menu-filter-freetext-text");
+    this.freetextFilterBox.addEventListener("input", this.requestsFreetextFilterEvent, false);
+    this.freetextFilterBox.addEventListener("command", this.requestsFreetextFilterEvent, false);
+
     $("#toolbar-labels").addEventListener("click", this.requestsMenuSortEvent, false);
     $("#requests-menu-footer").addEventListener("click", this.requestsMenuFilterEvent, false);
     $("#requests-menu-clear-button").addEventListener("click", this.reqeustsMenuClearEvent, false);
     $("#network-request-popup").addEventListener("popupshowing", this._onContextShowing, false);
     $("#request-menu-context-newtab").addEventListener("command", this._onContextNewTabCommand, false);
     $("#request-menu-context-copy-url").addEventListener("command", this._onContextCopyUrlCommand, false);
+    $("#request-menu-context-copy-response").addEventListener("command", this._onContextCopyResponseCommand, false);
     $("#request-menu-context-copy-image-as-data-uri").addEventListener("command", this._onContextCopyImageAsDataUriCommand, false);
     $("#toggle-raw-headers").addEventListener("click", this.toggleRawHeadersEvent, false);
 
@@ -416,6 +428,11 @@ RequestsMenuView.prototype = Heritage.extend(WidgetMethods, {
       $("#requests-menu-network-summary-button").hidden = true;
       $("#requests-menu-network-summary-label").hidden = true;
     }
+
+    if (!NetMonitorController.supportsTransferredResponseSize) {
+      $("#requests-menu-transferred-header-box").hidden = true;
+      $("#requests-menu-item-template .requests-menu-transferred").hidden = true;
+    }
   },
 
   /**
@@ -434,9 +451,13 @@ RequestsMenuView.prototype = Heritage.extend(WidgetMethods, {
     $("#toolbar-labels").removeEventListener("click", this.requestsMenuSortEvent, false);
     $("#requests-menu-footer").removeEventListener("click", this.requestsMenuFilterEvent, false);
     $("#requests-menu-clear-button").removeEventListener("click", this.reqeustsMenuClearEvent, false);
+    this.freetextFilterBox.removeEventListener("input", this.requestsFreetextFilterEvent, false);
+    this.freetextFilterBox.removeEventListener("command", this.requestsFreetextFilterEvent, false);
+    this.userInputTimer.cancel();
     $("#network-request-popup").removeEventListener("popupshowing", this._onContextShowing, false);
     $("#request-menu-context-newtab").removeEventListener("command", this._onContextNewTabCommand, false);
     $("#request-menu-context-copy-url").removeEventListener("command", this._onContextCopyUrlCommand, false);
+    $("#request-menu-context-copy-response").removeEventListener("command", this._onContextCopyResponseCommand, false);
     $("#request-menu-context-copy-image-as-data-uri").removeEventListener("command", this._onContextCopyImageAsDataUriCommand, false);
     $("#request-menu-context-resend").removeEventListener("command", this._onContextResendCommand, false);
     $("#request-menu-context-perf").removeEventListener("command", this._onContextPerfCommand, false);
@@ -481,8 +502,10 @@ RequestsMenuView.prototype = Heritage.extend(WidgetMethods, {
    *        Specifies the request's url.
    * @param boolean aIsXHR
    *        True if this request was initiated via XHR.
+   * @param boolean aFromCache
+   *        Indicates if the result came from the browser cache
    */
-  addRequest: function(aId, aStartedDateTime, aMethod, aUrl, aIsXHR) {
+  addRequest: function(aId, aStartedDateTime, aMethod, aUrl, aIsXHR, aFromCache) {
     // Convert the received date/time string to a unix timestamp.
     let unixTime = Date.parse(aStartedDateTime);
 
@@ -500,7 +523,8 @@ RequestsMenuView.prototype = Heritage.extend(WidgetMethods, {
         startedMillis: unixTime,
         method: aMethod,
         url: aUrl,
-        isXHR: aIsXHR
+        isXHR: aIsXHR,
+        fromCache: aFromCache
       }
     });
 
@@ -575,6 +599,30 @@ RequestsMenuView.prototype = Heritage.extend(WidgetMethods, {
   },
 
   /**
+   * Copy the raw request headers from the currently selected item.
+   */
+  copyRequestHeaders: function() {
+    let selected = this.selectedItem.attachment;
+    let rawHeaders = selected.requestHeaders.rawHeaders.trim();
+    if (Services.appinfo.OS !== "WINNT") {
+      rawHeaders = rawHeaders.replace(/\r/g, "");
+    }
+    clipboardHelper.copyString(rawHeaders, document);
+  },
+
+  /**
+   * Copy the raw response headers from the currently selected item.
+   */
+  copyResponseHeaders: function() {
+    let selected = this.selectedItem.attachment;
+    let rawHeaders = selected.responseHeaders.rawHeaders.trim();
+    if (Services.appinfo.OS !== "WINNT") {
+      rawHeaders = rawHeaders.replace(/\r/g, "");
+    }
+    clipboardHelper.copyString(rawHeaders, document);
+  },
+
+  /**
    * Copy image as data uri.
    */
   copyImageAsDataUri: function() {
@@ -584,6 +632,18 @@ RequestsMenuView.prototype = Heritage.extend(WidgetMethods, {
     gNetwork.getString(text).then(aString => {
       let data = "data:" + mimeType + ";" + encoding + "," + aString;
       clipboardHelper.copyString(data, document);
+    });
+  },
+
+  /**
+   * Copy response data as a string.
+   */
+  copyResponse: function() {
+    let selected = this.selectedItem.attachment;
+    let text = selected.responseContent.content.text;
+
+    gNetwork.getString(text).then(aString => {
+      clipboardHelper.copyString(aString, document);
     });
   },
 
@@ -665,6 +725,31 @@ RequestsMenuView.prototype = Heritage.extend(WidgetMethods, {
   },
 
   /**
+   * Handles the timeout on the freetext filter textbox
+   */
+  requestsFreetextFilterEvent: function() {
+    this.userInputTimer.cancel();
+    this._currentFreetextFilter = this.freetextFilterBox.value || "";
+
+    if (this._currentFreetextFilter.length === 0) {
+      this.freetextFilterBox.removeAttribute("filled");
+    } else {
+      this.freetextFilterBox.setAttribute("filled", true);
+    }
+
+    this.userInputTimer.initWithCallback(this.reFilterRequests, FREETEXT_FILTER_SEARCH_DELAY, Ci.nsITimer.TYPE_ONE_SHOT);
+  },
+
+  /**
+   * Refreshes the view contents with the newly selected filters
+   */
+  reFilterRequests: function() {
+    this.filterContents(this._filterPredicate);
+    this.refreshSummary();
+    this.refreshZebra();
+  },
+
+  /**
    * Filters all network requests in this container by a specified type.
    *
    * @param string aType
@@ -694,9 +779,7 @@ RequestsMenuView.prototype = Heritage.extend(WidgetMethods, {
       this._disableFilter(aType);
     }
 
-    this.filterContents(this._filterPredicate);
-    this.refreshSummary();
-    this.refreshZebra();
+    this.reFilterRequests();
   },
 
   /**
@@ -765,18 +848,14 @@ RequestsMenuView.prototype = Heritage.extend(WidgetMethods, {
    */
   get _filterPredicate() {
     let filterPredicates = this._allFilterPredicates;
+    let currentFreetextFilter = this._currentFreetextFilter;
 
-     if (this._activeFilters.length === 1) {
-       // The simplest case: only one filter active.
-       return filterPredicates[this._activeFilters[0]].bind(this);
-     } else {
-       // Multiple filters active.
-       return requestItem => {
-         return this._activeFilters.some(filterName => {
-           return filterPredicates[filterName].call(this, requestItem);
-         });
-       };
-     }
+    return requestItem => {
+      return this._activeFilters.some(filterName => {
+        return filterPredicates[filterName].call(this, requestItem) &&
+                filterPredicates["freetext"].call(this, requestItem, currentFreetextFilter);
+      });
+    };
   },
 
   /**
@@ -792,15 +871,16 @@ RequestsMenuView.prototype = Heritage.extend(WidgetMethods, {
     images: this.isImage,
     media: this.isMedia,
     flash: this.isFlash,
-    other: this.isOther
+    other: this.isOther,
+    freetext: this.isFreetextMatch
   }),
 
   /**
    * Sorts all network requests in this container by a specified detail.
    *
    * @param string aType
-   *        Either "status", "method", "file", "domain", "type", "size" or
-   *        "waterfall".
+   *        Either "status", "method", "file", "domain", "type", "transferred",
+   *        "size" or "waterfall".
    */
   sortBy: function(aType = "waterfall") {
     let target = $("#requests-menu-" + aType + "-button");
@@ -861,6 +941,13 @@ RequestsMenuView.prototype = Heritage.extend(WidgetMethods, {
           this.sortContents((a, b) => !this._byType(a, b));
         }
         break;
+      case "transferred":
+        if (direction == "ascending") {
+          this.sortContents(this._byTransferred);
+        } else {
+          this.sortContents((a, b) => !this._byTransferred(a, b));
+        }
+        break;
       case "size":
         if (direction == "ascending") {
           this.sortContents(this._bySize);
@@ -901,48 +988,51 @@ RequestsMenuView.prototype = Heritage.extend(WidgetMethods, {
    *         True if the item should be visible, false otherwise.
    */
   isHtml: function({ attachment: { mimeType } })
-    mimeType && mimeType.contains("/html"),
+    mimeType && mimeType.includes("/html"),
 
   isCss: function({ attachment: { mimeType } })
-    mimeType && mimeType.contains("/css"),
+    mimeType && mimeType.includes("/css"),
 
   isJs: function({ attachment: { mimeType } })
     mimeType && (
-      mimeType.contains("/ecmascript") ||
-      mimeType.contains("/javascript") ||
-      mimeType.contains("/x-javascript")),
+      mimeType.includes("/ecmascript") ||
+      mimeType.includes("/javascript") ||
+      mimeType.includes("/x-javascript")),
 
   isXHR: function({ attachment: { isXHR } })
     isXHR,
 
   isFont: function({ attachment: { url, mimeType } }) // Fonts are a mess.
     (mimeType && (
-      mimeType.contains("font/") ||
-      mimeType.contains("/font"))) ||
-    url.contains(".eot") ||
-    url.contains(".ttf") ||
-    url.contains(".otf") ||
-    url.contains(".woff"),
+      mimeType.includes("font/") ||
+      mimeType.includes("/font"))) ||
+    url.includes(".eot") ||
+    url.includes(".ttf") ||
+    url.includes(".otf") ||
+    url.includes(".woff"),
 
   isImage: function({ attachment: { mimeType } })
-    mimeType && mimeType.contains("image/"),
+    mimeType && mimeType.includes("image/"),
 
   isMedia: function({ attachment: { mimeType } }) // Not including images.
     mimeType && (
-      mimeType.contains("audio/") ||
-      mimeType.contains("video/") ||
-      mimeType.contains("model/")),
+      mimeType.includes("audio/") ||
+      mimeType.includes("video/") ||
+      mimeType.includes("model/")),
 
   isFlash: function({ attachment: { url, mimeType } }) // Flash is a mess.
     (mimeType && (
-      mimeType.contains("/x-flv") ||
-      mimeType.contains("/x-shockwave-flash"))) ||
-    url.contains(".swf") ||
-    url.contains(".flv"),
+      mimeType.includes("/x-flv") ||
+      mimeType.includes("/x-shockwave-flash"))) ||
+    url.includes(".swf") ||
+    url.includes(".flv"),
 
   isOther: function(e)
     !this.isHtml(e) && !this.isCss(e) && !this.isJs(e) && !this.isXHR(e) &&
     !this.isFont(e) && !this.isImage(e) && !this.isMedia(e) && !this.isFlash(e),
+
+  isFreetextMatch: function({ attachment: { url } }, text) //no text is a positive match
+    !text || url.includes(text),
 
   /**
    * Predicates used when sorting items.
@@ -993,8 +1083,13 @@ RequestsMenuView.prototype = Heritage.extend(WidgetMethods, {
       : firstType > secondType;
   },
 
-  _bySize: function({ attachment: first }, { attachment: second })
-    first.contentSize > second.contentSize,
+  _byTransferred: function({ attachment: first }, { attachment: second }) {
+    return first.transferredSize > second.transferredSize;
+  },
+
+  _bySize: function({ attachment: first }, { attachment: second }) {
+    return first.contentSize > second.contentSize;
+  },
 
   /**
    * Refreshes the status displayed in this container's footer, providing
@@ -1053,6 +1148,17 @@ RequestsMenuView.prototype = Heritage.extend(WidgetMethods, {
     tooltip.hide();
     tooltip.startTogglingOnHover(aItem.target, this._onHover);
     tooltip.defaultPosition = REQUESTS_TOOLTIP_POSITION;
+  },
+
+  /**
+   * Attaches security icon click listener for the given request menu item.
+   *
+   * @param object item
+   *        The network request item to attach the listener to.
+   */
+  attachSecurityIconClickListener: function ({ target }) {
+    let icon = $(".requests-security-state-icon", target);
+    icon.addEventListener("click", this._onSecurityIconClick);
   },
 
   /**
@@ -1133,6 +1239,13 @@ RequestsMenuView.prototype = Heritage.extend(WidgetMethods, {
             requestItem.attachment.requestPostData = value;
             requestItem.attachment.requestHeadersFromUploadStream = currentStore;
             break;
+          case "securityState":
+            requestItem.attachment.securityState = value;
+            this.updateMenuView(requestItem, key, value);
+            break;
+          case "securityInfo":
+            requestItem.attachment.securityInfo = value;
+            break;
           case "responseHeaders":
             requestItem.attachment.responseHeaders = value;
             break;
@@ -1142,15 +1255,29 @@ RequestsMenuView.prototype = Heritage.extend(WidgetMethods, {
           case "httpVersion":
             requestItem.attachment.httpVersion = value;
             break;
+          case "remoteAddress":
+            requestItem.attachment.remoteAddress = value;
+            this.updateMenuView(requestItem, key, value);
+            break;
+          case "remotePort":
+            requestItem.attachment.remotePort = value;
+            break;
           case "status":
             requestItem.attachment.status = value;
-            this.updateMenuView(requestItem, key, value);
+            this.updateMenuView(requestItem, key, {
+              status: value,
+              cached: requestItem.attachment.fromCache
+            });
             break;
           case "statusText":
             requestItem.attachment.statusText = value;
-            this.updateMenuView(requestItem, key,
-              requestItem.attachment.status + " " +
-              requestItem.attachment.statusText);
+            let text = (requestItem.attachment.status + " " +
+                        requestItem.attachment.statusText);
+            if(requestItem.attachment.fromCache) {
+              text += " (cached)";
+            }
+
+            this.updateMenuView(requestItem, key, text);
             break;
           case "headersSize":
             requestItem.attachment.headersSize = value;
@@ -1158,6 +1285,16 @@ RequestsMenuView.prototype = Heritage.extend(WidgetMethods, {
           case "contentSize":
             requestItem.attachment.contentSize = value;
             this.updateMenuView(requestItem, key, value);
+            break;
+          case "transferredSize":
+            if(requestItem.attachment.fromCache) {
+              requestItem.attachment.transferredSize = 0;
+              this.updateMenuView(requestItem, key, 'cached');
+            }
+            else {
+              requestItem.attachment.transferredSize = value;
+              this.updateMenuView(requestItem, key, value);
+            }
             break;
           case "mimeType":
             requestItem.attachment.mimeType = value;
@@ -1181,7 +1318,9 @@ RequestsMenuView.prototype = Heritage.extend(WidgetMethods, {
             break;
           case "eventTimings":
             requestItem.attachment.eventTimings = value;
-            this._createWaterfallView(requestItem, value.timings);
+            this._createWaterfallView(
+              requestItem, value.timings, requestItem.attachment.fromCache
+            );
             break;
         }
       }
@@ -1286,11 +1425,26 @@ RequestsMenuView.prototype = Heritage.extend(WidgetMethods, {
         domain.setAttribute("tooltiptext", hostPort);
         break;
       }
+      case "remoteAddress":
+        let domain = $(".requests-menu-domain", target);
+        let tooltip = (domain.getAttribute("value") +
+                       (aValue ? " (" + aValue + ")" : ""));
+        domain.setAttribute("tooltiptext", tooltip);
+        break;
+      case "securityState": {
+        let tooltip = L10N.getStr("netmonitor.security.state." + aValue);
+        let icon = $(".requests-security-state-icon", target);
+        icon.classList.add("security-state-" + aValue);
+        icon.setAttribute("tooltiptext", tooltip);
+
+        this.attachSecurityIconClickListener(aItem);
+        break;
+      }
       case "status": {
         let node = $(".requests-menu-status", target);
+        node.setAttribute("code", aValue.cached ? "cached" : aValue.status);
         let codeNode = $(".requests-menu-status-code", target);
-        codeNode.setAttribute("value", aValue);
-        node.setAttribute("code", aValue);
+        codeNode.setAttribute("value", aValue.status);
         break;
       }
       case "statusText": {
@@ -1307,6 +1461,27 @@ RequestsMenuView.prototype = Heritage.extend(WidgetMethods, {
         node.setAttribute("tooltiptext", text);
         break;
       }
+      case "transferredSize": {
+        let node = $(".requests-menu-transferred", target);
+
+        let text;
+        if (aValue === null) {
+          text = L10N.getStr("networkMenu.sizeUnavailable");
+        }
+        else if(aValue === "cached") {
+          text = aValue;
+          node.classList.add('theme-comment');
+        }
+        else {
+          let kb = aValue / 1024;
+          let size = L10N.numberWithDecimals(kb, CONTENT_SIZE_DECIMALS);
+          text = L10N.getFormatStr("networkMenu.sizeKB", size);
+        }
+
+        node.setAttribute("value", text);
+        node.setAttribute("tooltiptext", text);
+        break;
+      }
       case "mimeType": {
         let type = this._getAbbreviatedMimeType(aValue);
         let node = $(".requests-menu-type", target);
@@ -1319,7 +1494,7 @@ RequestsMenuView.prototype = Heritage.extend(WidgetMethods, {
         let { mimeType } = aItem.attachment;
         let { text, encoding } = aValue.content;
 
-        if (mimeType.contains("image/")) {
+        if (mimeType.includes("image/")) {
           let responseBody = yield gNetwork.getString(text);
           let node = $(".requests-menu-icon", aItem.target);
           node.src = "data:" + mimeType + ";" + encoding + "," + responseBody;
@@ -1347,14 +1522,21 @@ RequestsMenuView.prototype = Heritage.extend(WidgetMethods, {
    *        The network request item in this container.
    * @param object aTimings
    *        An object containing timing information.
+   * @param boolean aFromCache
+   *        Indicates if the result came from the browser cache
    */
-  _createWaterfallView: function(aItem, aTimings) {
+  _createWaterfallView: function(aItem, aTimings, aFromCache) {
     let { target, attachment } = aItem;
     let sections = ["dns", "connect", "send", "wait", "receive"];
     // Skipping "blocked" because it doesn't work yet.
 
     let timingsNode = $(".requests-menu-timings", target);
     let timingsTotal = $(".requests-menu-timings-total", timingsNode);
+
+    if(aFromCache) {
+      timingsTotal.style.display = 'none';
+      return;
+    }
 
     // Add a set of boxes representing timing information.
     for (let key of sections) {
@@ -1575,6 +1757,11 @@ RequestsMenuView.prototype = Heritage.extend(WidgetMethods, {
     // in this container, so it's necessary to refresh the Tooltip instances.
     this.refreshTooltip(firstItem);
     this.refreshTooltip(secondItem);
+
+    // Reattach click listener to the security icons
+    this.attachSecurityIconClickListener(firstItem);
+    this.attachSecurityIconClickListener(secondItem);
+
   },
 
   /**
@@ -1596,7 +1783,7 @@ RequestsMenuView.prototype = Heritage.extend(WidgetMethods, {
     let { url } = hovered;
     let { mimeType, text, encoding } = hovered.responseContent.content;
 
-    if (mimeType && mimeType.contains("image/") && (
+    if (mimeType && mimeType.includes("image/") && (
       aTarget.classList.contains("requests-menu-icon") ||
       aTarget.classList.contains("requests-menu-file")))
     {
@@ -1606,6 +1793,18 @@ RequestsMenuView.prototype = Heritage.extend(WidgetMethods, {
         aTooltip.setImageContent(src, { maxDim: REQUESTS_TOOLTIP_IMAGE_MAX_DIM });
         return anchor;
       });
+    }
+  },
+
+  /**
+   * A handler that opens the security tab in the details view if secure or
+   * broken security indicator is clicked.
+   */
+  _onSecurityIconClick: function(e) {
+    let state = this.selectedItem.attachment.securityState;
+    if (state !== "insecure") {
+      // Choose the security tab.
+      NetMonitorView.NetworkDetails.widget.selectedIndex = 5;
     }
   },
 
@@ -1634,10 +1833,22 @@ RequestsMenuView.prototype = Heritage.extend(WidgetMethods, {
     let copyAsCurlElement = $("#request-menu-context-copy-as-curl");
     copyAsCurlElement.hidden = !selectedItem || !selectedItem.attachment.responseContent;
 
+    let copyRequestHeadersElement = $("#request-menu-context-copy-request-headers");
+    copyRequestHeadersElement.hidden = !selectedItem || !selectedItem.attachment.requestHeaders;
+
+    let copyResponseHeadersElement = $("#response-menu-context-copy-response-headers");
+    copyResponseHeadersElement.hidden = !selectedItem || !selectedItem.attachment.responseHeaders;
+
+    let copyResponse = $("#request-menu-context-copy-response");
+    copyResponse.hidden = !selectedItem ||
+      !selectedItem.attachment.responseContent ||
+      !selectedItem.attachment.responseContent.content.text ||
+      selectedItem.attachment.responseContent.content.text.length === 0;
+
     let copyImageAsDataUriElement = $("#request-menu-context-copy-image-as-data-uri");
     copyImageAsDataUriElement.hidden = !selectedItem ||
       !selectedItem.attachment.responseContent ||
-      !selectedItem.attachment.responseContent.content.mimeType.contains("image/");
+      !selectedItem.attachment.responseContent.content.mimeType.includes("image/");
 
     let separator = $("#request-menu-context-separator");
     separator.hidden = !selectedItem;
@@ -1779,7 +1990,8 @@ RequestsMenuView.prototype = Heritage.extend(WidgetMethods, {
   _updateQueue: [],
   _updateTimeout: null,
   _resizeTimeout: null,
-  _activeFilters: ["all"]
+  _activeFilters: ["all"],
+  _currentFreetextFilter: ""
 });
 
 /**
@@ -1956,6 +2168,9 @@ CustomRequestView.prototype = {
 function NetworkDetailsView() {
   dumpn("NetworkDetailsView was instantiated");
 
+  // The ToolSidebar requires the panel object to be able to emit events.
+  EventEmitter.decorate(this);
+
   this._onTabSelect = this._onTabSelect.bind(this);
 };
 
@@ -1980,6 +2195,10 @@ NetworkDetailsView.prototype = {
     dumpn("Initializing the NetworkDetailsView");
 
     this.widget = $("#event-details-pane");
+    this.sidebar = new ToolSidebar(this.widget, this, "netmonitor", {
+      disableTelemetry: true,
+      showAllTabsMenu: true
+    });
 
     this._headers = new VariablesView($("#all-headers"),
       Heritage.extend(GENERIC_VARIABLES_VIEW_SETTINGS, {
@@ -2020,7 +2239,7 @@ NetworkDetailsView.prototype = {
    */
   destroy: function() {
     dumpn("Destroying the NetworkDetailsView");
-
+    this.sidebar.destroy();
     $("tabpanels", this.widget).removeEventListener("select", this._onTabSelect);
   },
 
@@ -2045,12 +2264,21 @@ NetworkDetailsView.prototype = {
     let isHtml = RequestsMenuView.prototype.isHtml({ attachment: aData });
 
     // Show the "Preview" tabpanel only for plain HTML responses.
-    $("#preview-tab").hidden = !isHtml;
-    $("#preview-tabpanel").hidden = !isHtml;
+    this.sidebar.toggleTab(isHtml, "preview-tab", "preview-tabpanel");
+
+    // Show the "Security" tab only for requests that
+    //   1) are https (state != insecure)
+    //   2) come from a target that provides security information.
+    let hasSecurityInfo = aData.securityState &&
+                          aData.securityState !== "insecure";
+    this.sidebar.toggleTab(hasSecurityInfo, "security-tab", "security-tabpanel");
 
     // Switch to the "Headers" tabpanel if the "Preview" previously selected
-    // and this is not an HTML response.
-    if (!isHtml && this.widget.selectedIndex == 5) {
+    // and this is not an HTML response or "Security" was selected but this
+    // request has no security information.
+
+    if (!isHtml && this.widget.selectedPanel === $("#preview-tabpanel") ||
+        !hasSecurityInfo && this.widget.selectedPanel === $("#security-tabpanel")) {
       this.widget.selectedIndex = 0;
     }
 
@@ -2117,7 +2345,10 @@ NetworkDetailsView.prototype = {
         case 4: // "Timings"
           yield view._setTimingsInformation(src.eventTimings);
           break;
-        case 5: // "Preview"
+        case 5: // "Security"
+          yield view._setSecurityInfo(src.securityInfo, src.url);
+          break;
+        case 6: // "Preview"
           yield view._setHtmlPreview(src.responseContent);
           break;
       }
@@ -2172,8 +2403,23 @@ NetworkDetailsView.prototype = {
       $("#headers-summary-method").setAttribute("hidden", "true");
     }
 
+    if (aData.remoteAddress) {
+      let address = aData.remoteAddress;
+      if (address.indexOf(":") != -1) {
+        address = `[${address}]`;
+      }
+      if(aData.remotePort) {
+        address += `:${aData.remotePort}`;
+      }
+      $("#headers-summary-address-value").setAttribute("value", address);
+      $("#headers-summary-address-value").setAttribute("tooltiptext", address);
+      $("#headers-summary-address").removeAttribute("hidden");
+    } else {
+      $("#headers-summary-address").setAttribute("hidden", "true");
+    }
+
     if (aData.status) {
-      $("#headers-summary-status-circle").setAttribute("code", aData.status);
+      $("#headers-summary-status-circle").setAttribute("code", aData.fromCache ? "cached" : aData.status);
       $("#headers-summary-status-value").setAttribute("value", aData.status + " " + aData.statusText);
       $("#headers-summary-status").removeAttribute("hidden");
     } else {
@@ -2357,7 +2603,7 @@ NetworkDetailsView.prototype = {
     let contentType = yield gNetwork.getString(contentTypeLongString);
 
     // Handle query strings (e.g. "?foo=bar&baz=42").
-    if (contentType.contains("x-www-form-urlencoded")) {
+    if (contentType.includes("x-www-form-urlencoded")) {
       for (let section of postData.split(/\r\n|\r|\n/)) {
         // Before displaying it, make sure this section of the POST data
         // isn't a line containing upload stream headers.
@@ -2487,7 +2733,7 @@ NetworkDetailsView.prototype = {
       }
     }
     // Handle images.
-    else if (mimeType.contains("image/")) {
+    else if (mimeType.includes("image/")) {
       $("#response-content-image-box").setAttribute("align", "center");
       $("#response-content-image-box").setAttribute("pack", "center");
       $("#response-content-image-box").hidden = false;
@@ -2506,7 +2752,7 @@ NetworkDetailsView.prototype = {
         // in width and height attributes like the rest of the folk. Hack around
         // this by getting the bounding client rect and subtracting the margins.
         let { width, height } = e.target.getBoundingClientRect();
-        let dimensions = (width - 2) + " x " + (height - 2);
+        let dimensions = (width - 2) + " \u00D7 " + (height - 2);
         $("#response-content-image-dimensions-value").setAttribute("value", dimensions);
       };
     }
@@ -2520,7 +2766,7 @@ NetworkDetailsView.prototype = {
       // Maybe set a more appropriate mode in the Source Editor if possible,
       // but avoid doing this for very large files.
       if (responseBody.length < SOURCE_SYNTAX_HIGHLIGHT_MAX_FILE_SIZE) {
-        let mapping = Object.keys(CONTENT_MIME_TYPE_MAPPINGS).find(key => mimeType.contains(key));
+        let mapping = Object.keys(CONTENT_MIME_TYPE_MAPPINGS).find(key => mimeType.includes(key));
         if (mapping) {
           editor.setMode(CONTENT_MIME_TYPE_MAPPINGS[mapping]);
         }
@@ -2544,7 +2790,9 @@ NetworkDetailsView.prototype = {
 
     let tabboxWidth = $("#details-pane").getAttribute("width");
     let availableWidth = tabboxWidth / 2; // Other nodes also take some space.
-    let scale = Math.max(availableWidth / aResponse.totalTime, 0);
+    let scale = (aResponse.totalTime > 0 ?
+                 Math.max(availableWidth / aResponse.totalTime, 0) :
+                 0);
 
     $("#timings-summary-blocked .requests-menu-timings-box")
       .setAttribute("width", blocked * scale);
@@ -2620,6 +2868,108 @@ NetworkDetailsView.prototype = {
     iframe.contentDocument.documentElement.innerHTML = responseBody;
 
     window.emit(EVENTS.RESPONSE_HTML_PREVIEW_DISPLAYED);
+  }),
+
+  /**
+   * Sets the security information shown in this view.
+   *
+   * @param object securityInfo
+   *        The data received from server
+   * @param string url
+   *        The URL of this request
+   * @return object
+   *        A promise that is resolved when the security info is rendered.
+   */
+  _setSecurityInfo: Task.async(function* (securityInfo, url) {
+    if (!securityInfo) {
+      // We don't have security info. This could mean one of two things:
+      // 1) This connection is not secure and this tab is not visible and thus
+      //    we shouldn't be here.
+      // 2) We have already received securityState and the tab is visible BUT
+      //    the rest of the information is still on its way. Once it arrives
+      //    this method is called again.
+      return;
+    }
+
+    /**
+     * A helper that sets value and tooltiptext attributes of an element to
+     * specified value.
+     *
+     * @param string selector
+     *        A selector for the element.
+     * @param string value
+     *        The value to set. If this evaluates to false a placeholder string
+     *        <Not Available> is used instead.
+     */
+    function setValue(selector, value) {
+      let label = $(selector);
+      if (!value) {
+        label.setAttribute("value", L10N.getStr("netmonitor.security.notAvailable"));
+        label.setAttribute("tooltiptext", label.getAttribute("value"));
+      } else {
+        label.setAttribute("value", value);
+        label.setAttribute("tooltiptext", value);
+      }
+    }
+
+    let errorbox = $("#security-error");
+    let infobox = $("#security-information");
+
+    if (securityInfo.state === "secure" || securityInfo.state === "weak") {
+      infobox.hidden = false;
+      errorbox.hidden = true;
+
+      // Warning icons
+      let cipher = $("#security-warning-cipher");
+
+      if (securityInfo.state === "weak") {
+        cipher.hidden = securityInfo.weaknessReasons.indexOf("cipher") === -1;
+      } else {
+        cipher.hidden = true;
+      }
+
+      let enabledLabel = L10N.getStr("netmonitor.security.enabled");
+      let disabledLabel = L10N.getStr("netmonitor.security.disabled");
+
+      // Connection parameters
+      setValue("#security-protocol-version-value", securityInfo.protocolVersion);
+      setValue("#security-ciphersuite-value", securityInfo.cipherSuite);
+
+      // Host header
+      let domain = NetMonitorView.RequestsMenu._getUriHostPort(url);
+      let hostHeader = L10N.getFormatStr("netmonitor.security.hostHeader", domain);
+      setValue("#security-info-host-header", hostHeader);
+
+      // Parameters related to the domain
+      setValue("#security-http-strict-transport-security-value",
+                securityInfo.hsts ? enabledLabel : disabledLabel);
+
+      setValue("#security-public-key-pinning-value",
+                securityInfo.hpkp ? enabledLabel : disabledLabel);
+
+      // Certificate parameters
+      let cert = securityInfo.cert;
+      setValue("#security-cert-subject-cn", cert.subject.commonName);
+      setValue("#security-cert-subject-o", cert.subject.organization);
+      setValue("#security-cert-subject-ou", cert.subject.organizationalUnit);
+
+      setValue("#security-cert-issuer-cn", cert.issuer.commonName);
+      setValue("#security-cert-issuer-o", cert.issuer.organization);
+      setValue("#security-cert-issuer-ou", cert.issuer.organizationalUnit);
+
+      setValue("#security-cert-validity-begins", cert.validity.start);
+      setValue("#security-cert-validity-expires", cert.validity.end);
+
+      setValue("#security-cert-sha1-fingerprint", cert.fingerprint.sha1);
+      setValue("#security-cert-sha256-fingerprint", cert.fingerprint.sha256);
+    } else {
+      infobox.hidden = true;
+      errorbox.hidden = false;
+
+      // Strip any HTML from the message.
+      let plain = DOMParser.parseFromString(securityInfo.errorMessage, "text/html");
+      setValue("#security-error-message", plain.body.textContent);
+    }
   }),
 
   _dataSrc: null,
@@ -2853,11 +3203,12 @@ function parseQueryString(aQueryString) {
     return;
   }
   // Turn the params string into an array containing { name: value } tuples.
-  let paramsArray = aQueryString.replace(/^[?&]/, "").split("&").map(e =>
-    let (param = e.split("=")) {
+  let paramsArray = aQueryString.replace(/^[?&]/, "").split("&").map(e => {
+    let param = e.split("=");
+    return {
       name: param[0] ? NetworkHelper.convertToUnicode(unescape(param[0])) : "",
       value: param[1] ? NetworkHelper.convertToUnicode(unescape(param[1])) : ""
-    });
+    }});
   return paramsArray;
 }
 

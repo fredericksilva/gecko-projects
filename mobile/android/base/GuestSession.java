@@ -19,18 +19,6 @@ public class GuestSession {
     public static final String NOTIFICATION_INTENT = "org.mozilla.gecko.GUEST_SESSION_INPROGRESS";
     private static final String LOGTAG = "GeckoGuestSession";
 
-    // Returns true if the user is using a secure keyguard, and its currently locked.
-    static boolean isSecureKeyguardLocked(Context context) {
-        final KeyguardManager manager = (KeyguardManager) context.getSystemService(Context.KEYGUARD_SERVICE);
-
-        // The test machines return null for the KeyguardService, despite running Android 4.2.
-        if (AppConstants.Versions.preJB || manager == null) {
-            return false;
-        }
-
-        return manager.isKeyguardLocked() && manager.isKeyguardSecure();
-    }
-
     /* Returns true if you should be in guest mode. This can be because a secure keyguard
      * is locked, or because the user has explicitly started guest mode via a dialog. If the
      * user has explicitly started Fennec in guest mode, this will return true until they
@@ -39,12 +27,6 @@ public class GuestSession {
     public static boolean shouldUse(final Context context, final String args) {
         // Did the command line args request guest mode?
         if (args != null && args.contains(BrowserApp.GUEST_BROWSING_ARG)) {
-            return true;
-        }
-
-        // Otherwise, is the device locked?
-        final boolean keyguard = isSecureKeyguardLocked(context);
-        if (keyguard) {
             return true;
         }
 
@@ -57,19 +39,9 @@ public class GuestSession {
         return profile.locked();
     }
 
-    public static void configureWindow(Window window) {
-        // In guest sessions we allow showing over the keyguard.
-        window.addFlags(WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD | WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED);
-    }
-
-    public static void unconfigureWindow(Window window) {
-        // In guest sessions we allow showing over the keyguard.
-        window.clearFlags(WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD | WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED);
-    }
-
     private static PendingIntent getNotificationIntent(Context context) {
         Intent intent = new Intent(NOTIFICATION_INTENT);
-        intent.setClass(context, BrowserApp.class);
+        intent.setClassName(context, AppConstants.MOZ_ANDROID_BROWSER_INTENT_CLASS);
         return PendingIntent.getActivity(context, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT);
     }
 

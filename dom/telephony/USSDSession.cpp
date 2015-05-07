@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim:set ts=2 sw=2 sts=2 et cindent: */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -40,9 +40,31 @@ USSDSession::GetParentObject() const
 }
 
 JSObject*
-USSDSession::WrapObject(JSContext* aCx)
+USSDSession::WrapObject(JSContext* aCx, JS::Handle<JSObject*> aGivenProto)
 {
-  return USSDSessionBinding::Wrap(aCx, this);
+  return USSDSessionBinding::Wrap(aCx, this, aGivenProto);
+}
+
+already_AddRefed<Promise>
+USSDSession::CreatePromise(ErrorResult& aRv)
+{
+  if (!mService) {
+    aRv.Throw(NS_ERROR_FAILURE);
+    return nullptr;
+  }
+
+  nsCOMPtr<nsIGlobalObject> global = do_QueryInterface(mWindow);
+  if (!global) {
+    aRv.Throw(NS_ERROR_FAILURE);
+    return nullptr;
+  }
+
+  nsRefPtr<Promise> promise = Promise::Create(global, aRv);
+  if (aRv.Failed()) {
+    return nullptr;
+  }
+
+  return promise.forget();
 }
 
 // WebIDL
@@ -71,24 +93,32 @@ USSDSession::Constructor(const GlobalObject& aGlobal, uint32_t aServiceId,
 already_AddRefed<Promise>
 USSDSession::Send(const nsAString& aUssd, ErrorResult& aRv)
 {
-  if (!mService) {
-    aRv.Throw(NS_ERROR_FAILURE);
-    return nullptr;
-  }
-
-  nsCOMPtr<nsIGlobalObject> global = do_QueryInterface(mWindow);
-  if (!global) {
-    return nullptr;
-  }
-
-  nsRefPtr<Promise> promise = Promise::Create(global, aRv);
-  if (aRv.Failed()) {
+  nsRefPtr<Promise> promise = CreatePromise(aRv);
+  if (!promise) {
     return nullptr;
   }
 
   nsCOMPtr<nsITelephonyCallback> callback = new TelephonyCallback(promise);
 
   nsresult rv = mService->SendUSSD(mServiceId, aUssd, callback);
+  if (NS_FAILED(rv)) {
+    promise->MaybeReject(NS_ERROR_DOM_INVALID_STATE_ERR);
+  }
+
+  return promise.forget();
+}
+
+already_AddRefed<Promise>
+USSDSession::Cancel(ErrorResult& aRv)
+{
+  nsRefPtr<Promise> promise = CreatePromise(aRv);
+  if (!promise) {
+    return nullptr;
+  }
+
+  nsCOMPtr<nsITelephonyCallback> callback = new TelephonyCallback(promise);
+
+  nsresult rv = mService->CancelUSSD(mServiceId, callback);
   if (NS_FAILED(rv)) {
     promise->MaybeReject(NS_ERROR_DOM_INVALID_STATE_ERR);
   }

@@ -51,6 +51,8 @@ EXPORTS += [
     'gfxUtils.h',
     'GraphicsFilter.h',
     'RoundedRect.h',
+    'SoftwareVsyncSource.h',
+    'VsyncSource.h',
 ]
 
 if CONFIG['MOZ_WIDGET_TOOLKIT'] == 'android':
@@ -186,8 +188,6 @@ elif CONFIG['MOZ_WIDGET_TOOLKIT'] == 'windows':
             'gfxDWriteCommon.cpp',
             'gfxDWriteFonts.cpp',
         ]
-    if CONFIG['MOZ_ENABLE_DIRECT2D1_1']:
-        DEFINES['USE_D2D1_1'] = True
 
 # Are we targeting x86 or x64?  If so, build gfxAlphaRecoverySSE2.cpp.
 if CONFIG['INTEL_ARCHITECTURE']:
@@ -244,6 +244,8 @@ UNIFIED_SOURCES += [
     'gfxUserFontSet.cpp',
     'gfxUtils.cpp',
     'nsUnicodeRange.cpp',
+    'SoftwareVsyncSource.cpp',
+    'VsyncSource.cpp',
 ]
 
 if CONFIG['MOZ_WIDGET_TOOLKIT'] == 'cocoa':
@@ -252,8 +254,6 @@ if CONFIG['MOZ_WIDGET_TOOLKIT'] == 'cocoa':
     ]
 
 FAIL_ON_WARNINGS = not CONFIG['_MSC_VER']
-
-MSVC_ENABLE_PGO = True
 
 include('/ipc/chromium/chromium-config.mozbuild')
 
@@ -266,6 +266,9 @@ GENERATED_FILES = [
 LOCAL_INCLUDES += [
     '/dom/xml',
 ]
+
+if CONFIG['MOZ_WIDGET_TOOLKIT'] == 'gonk':
+  LOCAL_INCLUDES += ['/widget/gonk']
 
 if CONFIG['MOZ_WIDGET_TOOLKIT'] in ('android', 'gtk2', 'gtk3', 'gonk', 'qt'):
     DEFINES['MOZ_ENABLE_FREETYPE'] = True
@@ -295,3 +298,6 @@ DEFINES['GRAPHITE2_STATIC'] = True
 
 if CONFIG['GKMEDIAS_SHARED_LIBRARY']:
     DEFINES['OTS_DLL'] = True
+
+if CONFIG['OS_ARCH'] == 'WINNT':
+    del DEFINES['UNICODE']

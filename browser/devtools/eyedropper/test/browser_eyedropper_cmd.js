@@ -31,9 +31,10 @@ function spawnTest() {
 }
 
 function inspectAndWaitForCopy() {
-  return waitForClipboard(() => {
-    inspectPage(); // setup: inspect the page
-  }, DIV_COLOR);
+  let copied = waitForClipboard(() => {}, DIV_COLOR);
+  let ready = inspectPage(); // resolves once eyedropper is destroyed
+  
+  return Promise.all([copied, ready]);
 }
 
 function inspectPage() {
@@ -41,7 +42,7 @@ function inspectPage() {
   let win = window;
 
   // get location of the <div> in the content, offset from browser window
-  let box = gBrowser.selectedTab.linkedBrowser.getBoundingClientRect();
+  let box = gBrowser.selectedBrowser.getBoundingClientRect();
   let x = box.left + 100;
   let y = box.top + 100;
 
@@ -54,6 +55,7 @@ function inspectPage() {
       EventUtils.synthesizeMouse(target, x + 10, y + 10, { type: "mousemove" }, win);
 
       EventUtils.synthesizeMouse(target, x + 10, y + 10, {}, win);
+      return dropper.once("destroy");
     });
   })
 }

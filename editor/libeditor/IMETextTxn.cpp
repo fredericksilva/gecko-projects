@@ -13,6 +13,7 @@
 #include "nsError.h"                    // for NS_SUCCEEDED, NS_FAILED, etc
 #include "nsIPresShell.h"               // nsISelectionController constants
 #include "nsRange.h"                    // local var
+#include "nsQueryObject.h"              // for do_QueryObject
 
 using namespace mozilla;
 using namespace mozilla::dom;
@@ -42,7 +43,9 @@ NS_IMPL_CYCLE_COLLECTION_INHERITED(IMETextTxn, EditTxn,
 // mRangeList can't lead to cycles
 
 NS_INTERFACE_MAP_BEGIN_CYCLE_COLLECTION(IMETextTxn)
-  NS_INTERFACE_MAP_ENTRY_AMBIGUOUS(nsITransaction, IMETextTxn)
+  if (aIID.Equals(NS_GET_IID(IMETextTxn))) {
+    foundInterface = static_cast<nsITransaction*>(this);
+  } else
 NS_INTERFACE_MAP_END_INHERITING(EditTxn)
 
 NS_IMPL_ADDREF_INHERITED(IMETextTxn, EditTxn)

@@ -1,4 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -17,6 +18,7 @@
 
 #include "jsapi.h"
 #include "jsfriendapi.h"
+#include "js/Conversions.h"
 #include "nsString.h"
 
 class nsIScriptContext;
@@ -32,7 +34,9 @@ class Element;
 class nsJSUtils
 {
 public:
-  static bool GetCallingLocation(JSContext* aContext, const char* *aFilename,
+  static bool GetCallingLocation(JSContext* aContext, nsACString& aFilename,
+                                 uint32_t* aLineno);
+  static bool GetCallingLocation(JSContext* aContext, nsAString& aFilename,
                                  uint32_t* aLineno);
 
   static nsIScriptGlobalObject *GetStaticScriptGlobal(JSObject* aObj);
@@ -68,13 +72,11 @@ public:
   struct MOZ_STACK_CLASS EvaluateOptions {
     bool coerceToString;
     bool reportUncaught;
-    bool needResult;
     JS::AutoObjectVector scopeChain;
 
     explicit EvaluateOptions(JSContext* cx)
       : coerceToString(false)
       , reportUncaught(true)
-      , needResult(true)
       , scopeChain(cx)
     {}
 
@@ -87,11 +89,6 @@ public:
       reportUncaught = aReport;
       return *this;
     }
-
-    EvaluateOptions& setNeedResult(bool aNeedResult) {
-      needResult = aNeedResult;
-      return *this;
-    }
   };
 
   // aEvaluationGlobal is the global to evaluate in.  The return value
@@ -102,35 +99,41 @@ public:
                                  JS::Handle<JSObject*> aEvaluationGlobal,
                                  JS::CompileOptions &aCompileOptions,
                                  const EvaluateOptions& aEvaluateOptions,
-                                 JS::MutableHandle<JS::Value> aRetValue,
-                                 void **aOffThreadToken = nullptr);
+                                 JS::MutableHandle<JS::Value> aRetValue);
 
   static nsresult EvaluateString(JSContext* aCx,
                                  JS::SourceBufferHolder& aSrcBuf,
                                  JS::Handle<JSObject*> aEvaluationGlobal,
                                  JS::CompileOptions &aCompileOptions,
                                  const EvaluateOptions& aEvaluateOptions,
-                                 JS::MutableHandle<JS::Value> aRetValue,
-                                 void **aOffThreadToken = nullptr);
+                                 JS::MutableHandle<JS::Value> aRetValue);
 
 
   static nsresult EvaluateString(JSContext* aCx,
                                  const nsAString& aScript,
                                  JS::Handle<JSObject*> aEvaluationGlobal,
-                                 JS::CompileOptions &aCompileOptions,
-                                 void **aOffThreadToken = nullptr);
+                                 JS::CompileOptions &aCompileOptions);
 
   static nsresult EvaluateString(JSContext* aCx,
                                  JS::SourceBufferHolder& aSrcBuf,
                                  JS::Handle<JSObject*> aEvaluationGlobal,
                                  JS::CompileOptions &aCompileOptions,
-                                 void **aOffThreadToken = nullptr);
+                                 void **aOffThreadToken);
 
   // Returns false if an exception got thrown on aCx.  Passing a null
   // aElement is allowed; that wil produce an empty aScopeChain.
   static bool GetScopeChainForElement(JSContext* aCx,
                                       mozilla::dom::Element* aElement,
                                       JS::AutoObjectVector& aScopeChain);
+private:
+  // Implementation for our EvaluateString bits
+  static nsresult EvaluateString(JSContext* aCx,
+                                 JS::SourceBufferHolder& aSrcBuf,
+                                 JS::Handle<JSObject*> aEvaluationGlobal,
+                                 JS::CompileOptions& aCompileOptions,
+                                 const EvaluateOptions& aEvaluateOptions,
+                                 JS::MutableHandle<JS::Value> aRetValue,
+                                 void **aOffThreadToken);
 };
 
 class MOZ_STACK_CLASS AutoDontReportUncaught {
@@ -159,7 +162,7 @@ AssignJSString(JSContext *cx, T &dest, JSString *s)
   size_t len = js::GetStringLength(s);
   static_assert(js::MaxStringLength < (1 << 28),
                 "Shouldn't overflow here or in SetCapacity");
-  if (MOZ_UNLIKELY(!dest.SetLength(len, mozilla::fallible_t()))) {
+  if (MOZ_UNLIKELY(!dest.SetLength(len, mozilla::fallible))) {
     JS_ReportOutOfMemory(cx);
     return false;
   }
@@ -214,6 +217,8 @@ public:
     JS::Rooted<JS::Value> v(aContext);
     return JS_IdToValue(aContext, id, &v) && init(aContext, v);
   }
+
+  bool init(const JS::Value &v);
 
   ~nsAutoJSString() {}
 };

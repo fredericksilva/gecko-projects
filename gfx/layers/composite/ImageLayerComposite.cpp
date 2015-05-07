@@ -18,11 +18,9 @@
 #include "mozilla/layers/TextureHost.h"  // for TextureHost, etc
 #include "mozilla/mozalloc.h"           // for operator delete
 #include "nsAString.h"
-#include "nsAutoPtr.h"                  // for nsRefPtr
+#include "nsRefPtr.h"                   // for nsRefPtr
 #include "nsDebug.h"                    // for NS_ASSERTION
 #include "nsISupportsImpl.h"            // for MOZ_COUNT_CTOR, etc
-#include "nsPoint.h"                    // for nsIntPoint
-#include "nsRect.h"                     // for nsIntRect
 #include "nsString.h"                   // for nsAutoCString
 
 namespace mozilla {
@@ -51,8 +49,6 @@ bool
 ImageLayerComposite::SetCompositableHost(CompositableHost* aHost)
 {
   switch (aHost->GetType()) {
-    case CompositableType::BUFFER_IMAGE_SINGLE:
-    case CompositableType::BUFFER_IMAGE_BUFFERED:
     case CompositableType::IMAGE:
     case CompositableType::IMAGE_OVERLAY:
       mImageHost = aHost;
@@ -84,7 +80,7 @@ ImageLayerComposite::GetLayer()
 }
 
 void
-ImageLayerComposite::RenderLayer(const nsIntRect& aClipRect)
+ImageLayerComposite::RenderLayer(const IntRect& aClipRect)
 {
   if (!mImageHost || !mImageHost->IsAttached()) {
     return;
@@ -107,7 +103,7 @@ ImageLayerComposite::RenderLayer(const nsIntRect& aClipRect)
   mImageHost->SetCompositor(mCompositor);
   mImageHost->Composite(effectChain,
                         GetEffectiveOpacity(),
-                        GetEffectiveTransform(),
+                        GetEffectiveTransformForBuffer(),
                         GetEffectFilter(),
                         clipRect);
   mImageHost->BumpFlashCounter();
@@ -124,13 +120,6 @@ ImageLayerComposite::ComputeEffectiveTransforms(const gfx::Matrix4x4& aTransform
       mImageHost->IsAttached()) {
     IntSize size = mImageHost->GetImageSize();
     sourceRect.SizeTo(size.width, size.height);
-    if (mScaleMode != ScaleMode::SCALE_NONE &&
-        sourceRect.width != 0.0 && sourceRect.height != 0.0) {
-      NS_ASSERTION(mScaleMode == ScaleMode::STRETCH,
-                   "No other scalemodes than stretch and none supported yet.");
-      local.PreScale(mScaleToSize.width / sourceRect.width,
-                     mScaleToSize.height / sourceRect.height, 1.0);
-    }
   }
   // Snap our local transform first, and snap the inherited transform as well.
   // This makes our snapping equivalent to what would happen if our content
@@ -139,6 +128,21 @@ ImageLayerComposite::ComputeEffectiveTransforms(const gfx::Matrix4x4& aTransform
   mEffectiveTransform =
       SnapTransform(local, sourceRect, nullptr) *
       SnapTransformTranslation(aTransformToSurface, nullptr);
+
+  if (mScaleMode != ScaleMode::SCALE_NONE &&
+      sourceRect.width != 0.0 && sourceRect.height != 0.0) {
+    NS_ASSERTION(mScaleMode == ScaleMode::STRETCH,
+                 "No other scalemodes than stretch and none supported yet.");
+    local.PreScale(mScaleToSize.width / sourceRect.width,
+                   mScaleToSize.height / sourceRect.height, 1.0);
+
+    mEffectiveTransformForBuffer =
+        SnapTransform(local, sourceRect, nullptr) *
+        SnapTransformTranslation(aTransformToSurface, nullptr);
+  } else {
+    mEffectiveTransformForBuffer = mEffectiveTransform;
+  }
+
   ComputeEffectiveTransformForMaskLayer(aTransformToSurface);
 }
 

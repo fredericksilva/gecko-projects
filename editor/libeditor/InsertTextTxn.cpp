@@ -11,6 +11,7 @@
 #include "nsDebug.h"                    // for NS_ASSERTION, etc
 #include "nsEditor.h"                   // mEditor
 #include "nsError.h"                    // for NS_OK, etc
+#include "nsQueryObject.h"              // for do_QueryObject
 
 using namespace mozilla;
 using namespace mozilla::dom;
@@ -38,7 +39,9 @@ NS_IMPL_CYCLE_COLLECTION_INHERITED(InsertTextTxn, EditTxn,
 NS_IMPL_ADDREF_INHERITED(InsertTextTxn, EditTxn)
 NS_IMPL_RELEASE_INHERITED(InsertTextTxn, EditTxn)
 NS_INTERFACE_MAP_BEGIN_CYCLE_COLLECTION(InsertTextTxn)
-  NS_INTERFACE_MAP_ENTRY_AMBIGUOUS(nsITransaction, InsertTextTxn)
+  if (aIID.Equals(NS_GET_IID(InsertTextTxn))) {
+    foundInterface = static_cast<nsITransaction*>(this);
+  } else
 NS_INTERFACE_MAP_END_INHERITING(EditTxn)
 
 

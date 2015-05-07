@@ -11,8 +11,6 @@
 #include "mozilla/dom/ImageCaptureBinding.h"
 #include "prlog.h"
 
-class nsIDOMBlob;
-
 namespace mozilla {
 
 #ifdef PR_LOGGING
@@ -49,7 +47,7 @@ class VideoStreamTrack;
  *  to the MediaStreamGraph way.
  */
 
-class ImageCapture MOZ_FINAL : public DOMEventTargetHelper
+class ImageCapture final : public DOMEventTargetHelper
 {
 public:
   NS_DECL_ISUPPORTS_INHERITED
@@ -65,9 +63,9 @@ public:
   VideoStreamTrack* GetVideoStreamTrack() const;
 
   // nsWrapperCache member
-  virtual JSObject* WrapObject(JSContext* aCx) MOZ_OVERRIDE
+  virtual JSObject* WrapObject(JSContext* aCx, JS::Handle<JSObject*> aGivenProto) override
   {
-    return ImageCaptureBinding::Wrap(aCx, this);
+    return ImageCaptureBinding::Wrap(aCx, this, aGivenProto);
   }
 
   // ImageCapture class members

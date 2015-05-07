@@ -13,6 +13,7 @@
 #include "mozilla/net/WyciwygChannelParent.h"
 #include "mozilla/net/FTPChannelParent.h"
 #include "mozilla/net/WebSocketChannelParent.h"
+#include "mozilla/net/DataChannelParent.h"
 #ifdef NECKO_PROTOCOL_rtsp
 #include "mozilla/net/RtspControllerParent.h"
 #include "mozilla/net/RtspChannelParent.h"
@@ -21,6 +22,7 @@
 #include "mozilla/net/RemoteOpenFileParent.h"
 #include "mozilla/net/ChannelDiverterParent.h"
 #include "mozilla/dom/ContentParent.h"
+#include "mozilla/dom/TabContext.h"
 #include "mozilla/dom/TabParent.h"
 #include "mozilla/dom/network/TCPSocketParent.h"
 #include "mozilla/dom/network/TCPServerSocketParent.h"
@@ -39,8 +41,10 @@
 #include "nsPrincipal.h"
 #include "nsIOService.h"
 #include "mozilla/net/OfflineObserver.h"
+#include "nsISpeculativeConnect.h"
 
 using mozilla::dom::ContentParent;
+using mozilla::dom::TabContext;
 using mozilla::dom::TabParent;
 using mozilla::net::PTCPSocketParent;
 using mozilla::dom::TCPSocketParent;
@@ -113,22 +117,23 @@ NeckoParent::GetValidatedAppInfo(const SerializedLoadContext& aSerialized,
     }
   }
 
-  const InfallibleTArray<PBrowserParent*>& browsers = aContent->ManagedPBrowserParent();
-  for (uint32_t i = 0; i < browsers.Length(); i++) {
-    nsRefPtr<TabParent> tabParent = static_cast<TabParent*>(browsers[i]);
-    uint32_t appId = tabParent->OwnOrContainingAppId();
+  nsTArray<TabContext> contextArray =
+    static_cast<ContentParent*>(aContent)->GetManagedTabContext();
+  for (uint32_t i = 0; i < contextArray.Length(); i++) {
+    TabContext tabContext = contextArray[i];
+    uint32_t appId = tabContext.OwnOrContainingAppId();
     bool inBrowserElement = aSerialized.IsNotNull() ? aSerialized.mIsInBrowserElement
-                                                    : tabParent->IsBrowserElement();
+                                                    : tabContext.IsBrowserElement();
 
     if (appId == NECKO_UNKNOWN_APP_ID) {
       continue;
     }
     // We may get appID=NO_APP if child frame is neither a browser nor an app
     if (appId == NECKO_NO_APP_ID) {
-      if (tabParent->HasOwnApp()) {
+      if (tabContext.HasOwnApp()) {
         continue;
       }
-      if (UsingNeckoIPCSecurity() && tabParent->IsBrowserElement()) {
+      if (UsingNeckoIPCSecurity() && tabContext.IsBrowserElement()) {
         // <iframe mozbrowser> which doesn't have an <iframe mozapp> above it.
         // This is not supported now, and we'll need to do a code audit to make
         // sure we can handle it (i.e don't short-circuit using separate
@@ -141,7 +146,7 @@ NeckoParent::GetValidatedAppInfo(const SerializedLoadContext& aSerialized,
     return nullptr;
   }
 
-  if (browsers.Length() != 0) {
+  if (contextArray.Length() != 0) {
     return "App does not have permission";
   }
 
@@ -179,7 +184,7 @@ NeckoParent::CreateChannelLoadContext(const PBrowserOrId& aBrowser,
       case PBrowserOrId::TPBrowserParent:
       {
         nsRefPtr<TabParent> tabParent =
-          static_cast<TabParent*>(aBrowser.get_PBrowserParent());
+          TabParent::GetFrom(aBrowser.get_PBrowserParent());
         dom::Element* topFrameElement = nullptr;
         if (tabParent) {
           topFrameElement = tabParent->GetOwnerElement();
@@ -329,7 +334,7 @@ NeckoParent::AllocPWebSocketParent(const PBrowserOrId& browser,
     return nullptr;
   }
 
-  nsRefPtr<TabParent> tabParent = static_cast<TabParent*>(browser.get_PBrowserParent());
+  nsRefPtr<TabParent> tabParent = TabParent::GetFrom(browser.get_PBrowserParent());
   PBOverrideStatus overrideStatus = PBOverrideStatusFromLoadContext(serialized);
   WebSocketChannelParent* p = new WebSocketChannelParent(tabParent, loadContext,
                                                          overrideStatus);
@@ -342,6 +347,29 @@ NeckoParent::DeallocPWebSocketParent(PWebSocketParent* actor)
 {
   WebSocketChannelParent* p = static_cast<WebSocketChannelParent*>(actor);
   p->Release();
+  return true;
+}
+
+PDataChannelParent*
+NeckoParent::AllocPDataChannelParent(const uint32_t &channelId)
+{
+  nsRefPtr<DataChannelParent> p = new DataChannelParent();
+  return p.forget().take();
+}
+
+bool
+NeckoParent::DeallocPDataChannelParent(PDataChannelParent* actor)
+{
+  nsRefPtr<DataChannelParent> p = dont_AddRef(static_cast<DataChannelParent*>(actor));
+  return true;
+}
+
+bool
+NeckoParent::RecvPDataChannelConstructor(PDataChannelParent* actor,
+                                         const uint32_t& channelId)
+{
+  DataChannelParent* p = static_cast<DataChannelParent*>(actor);
+  p->Init(channelId);
   return true;
 }
 
@@ -452,7 +480,8 @@ NeckoParent::DeallocPTCPServerSocketParent(PTCPServerSocketParent* actor)
 }
 
 PUDPSocketParent*
-NeckoParent::AllocPUDPSocketParent(const nsCString& /* unused */)
+NeckoParent::AllocPUDPSocketParent(const Principal& /* unused */,
+                                   const nsCString& /* unused */)
 {
   nsRefPtr<UDPSocketParent> p = new UDPSocketParent();
 
@@ -461,9 +490,10 @@ NeckoParent::AllocPUDPSocketParent(const nsCString& /* unused */)
 
 bool
 NeckoParent::RecvPUDPSocketConstructor(PUDPSocketParent* aActor,
+                                       const Principal& aPrincipal,
                                        const nsCString& aFilter)
 {
-  return static_cast<UDPSocketParent*>(aActor)->Init(aFilter);
+  return static_cast<UDPSocketParent*>(aActor)->Init(aPrincipal, aFilter);
 }
 
 bool
@@ -476,7 +506,8 @@ NeckoParent::DeallocPUDPSocketParent(PUDPSocketParent* actor)
 
 PDNSRequestParent*
 NeckoParent::AllocPDNSRequestParent(const nsCString& aHost,
-                                    const uint32_t& aFlags)
+                                    const uint32_t& aFlags,
+                                    const nsCString& aNetworkInterface)
 {
   DNSRequestParent *p = new DNSRequestParent();
   p->AddRef();
@@ -486,9 +517,11 @@ NeckoParent::AllocPDNSRequestParent(const nsCString& aHost,
 bool
 NeckoParent::RecvPDNSRequestConstructor(PDNSRequestParent* aActor,
                                         const nsCString& aHost,
-                                        const uint32_t& aFlags)
+                                        const uint32_t& aFlags,
+                                        const nsCString& aNetworkInterface)
 {
-  static_cast<DNSRequestParent*>(aActor)->DoAsyncResolve(aHost, aFlags);
+  static_cast<DNSRequestParent*>(aActor)->DoAsyncResolve(aHost, aFlags,
+                                                         aNetworkInterface);
   return true;
 }
 
@@ -521,10 +554,11 @@ NeckoParent::AllocPRemoteOpenFileParent(const SerializedLoadContext& aSerialized
     bool haveValidBrowser = false;
     bool hasManage = false;
     nsCOMPtr<mozIApplication> mozApp;
-    for (uint32_t i = 0; i < Manager()->ManagedPBrowserParent().Length(); i++) {
-      nsRefPtr<TabParent> tabParent =
-        static_cast<TabParent*>(Manager()->ManagedPBrowserParent()[i]);
-      uint32_t appId = tabParent->OwnOrContainingAppId();
+    nsTArray<TabContext> contextArray =
+      static_cast<ContentParent*>(Manager())->GetManagedTabContext();
+    for (uint32_t i = 0; i < contextArray.Length(); i++) {
+      TabContext tabContext = contextArray[i];
+      uint32_t appId = tabContext.OwnOrContainingAppId();
       // Note: this enforces that SerializedLoadContext.appID is one of the apps
       // in the child process, but there's currently no way to verify the
       // request is not from a different app in that process.
@@ -658,6 +692,17 @@ bool
 NeckoParent::DeallocPRemoteOpenFileParent(PRemoteOpenFileParent* actor)
 {
   delete actor;
+  return true;
+}
+
+bool
+NeckoParent::RecvSpeculativeConnect(const URIParams &aURI)
+{
+  nsCOMPtr<nsISpeculativeConnect> speculator(gIOService);
+  nsCOMPtr<nsIURI> uri = DeserializeURI(aURI);
+  if (uri && speculator) {
+    speculator->SpeculativeConnect(uri, nullptr);
+  }
   return true;
 }
 
@@ -814,10 +859,11 @@ NeckoParent::OfflineNotification(nsISupports *aSubject)
   uint32_t targetAppId = NECKO_UNKNOWN_APP_ID;
   info->GetAppId(&targetAppId);
 
-  for (uint32_t i = 0; i < Manager()->ManagedPBrowserParent().Length(); ++i) {
-    nsRefPtr<TabParent> tabParent =
-      static_cast<TabParent*>(Manager()->ManagedPBrowserParent()[i]);
-    uint32_t appId = tabParent->OwnOrContainingAppId();
+  nsTArray<TabContext> contextArray =
+      static_cast<ContentParent*>(Manager())->GetManagedTabContext();
+  for (uint32_t i = 0; i < contextArray.Length(); ++i) {
+    TabContext tabContext = contextArray[i];
+    uint32_t appId = tabContext.OwnOrContainingAppId();
 
     if (appId == targetAppId) {
       if (gIOService) {

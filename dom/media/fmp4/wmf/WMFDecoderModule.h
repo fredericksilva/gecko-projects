@@ -17,28 +17,44 @@ public:
   virtual ~WMFDecoderModule();
 
   // Initializes the module, loads required dynamic libraries, etc.
-  nsresult Startup();
-
-  // Called when the decoders have shutdown.
-  virtual nsresult Shutdown() MOZ_OVERRIDE;
+  virtual nsresult Startup() override;
 
   virtual already_AddRefed<MediaDataDecoder>
-  CreateH264Decoder(const mp4_demuxer::VideoDecoderConfig& aConfig,
-                    layers::LayersBackend aLayersBackend,
-                    layers::ImageContainer* aImageContainer,
-                    MediaTaskQueue* aVideoTaskQueue,
-                    MediaDataDecoderCallback* aCallback) MOZ_OVERRIDE;
+  CreateVideoDecoder(const VideoInfo& aConfig,
+                     layers::LayersBackend aLayersBackend,
+                     layers::ImageContainer* aImageContainer,
+                     FlushableMediaTaskQueue* aVideoTaskQueue,
+                     MediaDataDecoderCallback* aCallback) override;
 
   virtual already_AddRefed<MediaDataDecoder>
-  CreateAudioDecoder(const mp4_demuxer::AudioDecoderConfig& aConfig,
-                     MediaTaskQueue* aAudioTaskQueue,
-                     MediaDataDecoderCallback* aCallback) MOZ_OVERRIDE;
+  CreateAudioDecoder(const AudioInfo& aConfig,
+                     FlushableMediaTaskQueue* aAudioTaskQueue,
+                     MediaDataDecoderCallback* aCallback) override;
 
-  bool SupportsAudioMimeType(const char* aMimeType) MOZ_OVERRIDE;
+  bool SupportsMimeType(const nsACString& aMimeType) override;
+
+  virtual void DisableHardwareAcceleration() override
+  {
+    sDXVAEnabled = false;
+  }
+
+  virtual bool SupportsSharedDecoders(const VideoInfo& aConfig) const override;
+
+  virtual ConversionRequired
+  DecoderNeedsConversion(const TrackInfo& aConfig) const override;
+
+  // Accessors that report whether we have the required MFTs available
+  // on the system to play various codecs. Windows Vista doesn't have the
+  // H.264/AAC decoders if the "Platform Update Supplement for Windows Vista"
+  // is not installed.
+  static bool HasAAC();
+  static bool HasH264();
 
   // Called on main thread.
   static void Init();
 private:
+  bool ShouldUseDXVA(const VideoInfo& aConfig) const;
+
   static bool sIsWMFEnabled;
   static bool sDXVAEnabled;
 };

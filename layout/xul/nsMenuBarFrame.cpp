@@ -37,7 +37,7 @@ using namespace mozilla;
 nsIFrame*
 NS_NewMenuBarFrame(nsIPresShell* aPresShell, nsStyleContext* aContext)
 {
-  return new (aPresShell) nsMenuBarFrame (aPresShell, aContext);
+  return new (aPresShell) nsMenuBarFrame(aContext);
 }
 
 NS_IMPL_FRAMEARENA_HELPERS(nsMenuBarFrame)
@@ -49,9 +49,8 @@ NS_QUERYFRAME_TAIL_INHERITING(nsBoxFrame)
 //
 // nsMenuBarFrame cntr
 //
-nsMenuBarFrame::nsMenuBarFrame(nsIPresShell* aShell, nsStyleContext* aContext):
-  nsBoxFrame(aShell, aContext),
-    mMenuBarListener(nullptr),
+nsMenuBarFrame::nsMenuBarFrame(nsStyleContext* aContext):
+  nsBoxFrame(aContext),
     mStayActive(false),
     mIsActive(false),
     mCurrentMenu(nullptr),
@@ -68,7 +67,6 @@ nsMenuBarFrame::Init(nsIContent*       aContent,
 
   // Create the menu bar listener.
   mMenuBarListener = new nsMenuBarListener(this);
-  NS_ADDREF(mMenuBarListener);
 
   // Hook up the menu bar as a key listener on the whole document.  It will see every
   // key press that occurs, but after everyone else does.
@@ -82,9 +80,9 @@ nsMenuBarFrame::Init(nsIContent*       aContent,
   mTarget->AddSystemEventListener(NS_LITERAL_STRING("keyup"), mMenuBarListener, false);
 
   // mousedown event should be handled in all phase
-  mTarget->AddSystemEventListener(NS_LITERAL_STRING("mousedown"), mMenuBarListener, true);
-  mTarget->AddSystemEventListener(NS_LITERAL_STRING("mousedown"), mMenuBarListener, false);
-  mTarget->AddSystemEventListener(NS_LITERAL_STRING("blur"), mMenuBarListener, true);
+  mTarget->AddEventListener(NS_LITERAL_STRING("mousedown"), mMenuBarListener, true);
+  mTarget->AddEventListener(NS_LITERAL_STRING("mousedown"), mMenuBarListener, false);
+  mTarget->AddEventListener(NS_LITERAL_STRING("blur"), mMenuBarListener, true);
 }
 
 NS_IMETHODIMP
@@ -177,8 +175,9 @@ nsMenuBarFrame::FindMenuWithShortcut(nsIDOMKeyEvent* aKeyEvent)
     return nullptr; // no character was pressed so just return
 
   // Enumerate over our list of frames.
-  nsIFrame* immediateParent = PresContext()->PresShell()->FrameConstructor()->
+  auto insertion = PresContext()->PresShell()->FrameConstructor()->
     GetInsertionPoint(GetContent(), nullptr);
+  nsContainerFrame* immediateParent = insertion.mParentFrame;
   if (!immediateParent)
     immediateParent = this;
 
@@ -280,7 +279,7 @@ public:
   {
   }
 
-  NS_IMETHOD Run() MOZ_OVERRIDE
+  NS_IMETHOD Run() override
   {
     nsXULPopupManager* pm = nsXULPopupManager::GetInstance();
     if (!pm)
@@ -415,11 +414,11 @@ nsMenuBarFrame::DestroyFrom(nsIFrame* aDestructRoot)
   mTarget->RemoveSystemEventListener(NS_LITERAL_STRING("keydown"), mMenuBarListener, false);
   mTarget->RemoveSystemEventListener(NS_LITERAL_STRING("keyup"), mMenuBarListener, false);
 
-  mTarget->RemoveSystemEventListener(NS_LITERAL_STRING("mousedown"), mMenuBarListener, true);
-  mTarget->RemoveSystemEventListener(NS_LITERAL_STRING("mousedown"), mMenuBarListener, false);
-  mTarget->RemoveSystemEventListener(NS_LITERAL_STRING("blur"), mMenuBarListener, true);
+  mTarget->RemoveEventListener(NS_LITERAL_STRING("mousedown"), mMenuBarListener, true);
+  mTarget->RemoveEventListener(NS_LITERAL_STRING("mousedown"), mMenuBarListener, false);
+  mTarget->RemoveEventListener(NS_LITERAL_STRING("blur"), mMenuBarListener, true);
 
-  NS_IF_RELEASE(mMenuBarListener);
+  mMenuBarListener = nullptr;
 
   nsBoxFrame::DestroyFrom(aDestructRoot);
 }

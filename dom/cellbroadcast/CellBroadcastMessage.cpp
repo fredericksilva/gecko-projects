@@ -1,4 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -83,12 +84,14 @@ CellBroadcastMessage::CellBroadcastMessage(nsPIDOMWindow* aWindow,
                                                        aEtwsPopup)
                            : nullptr)
 {
-  if (aGsmGeographicalScope < nsICellBroadcastService::GSM_GEOGRAPHICAL_SCOPE_INVALID) {
+  if (aGsmGeographicalScope <
+      static_cast<uint32_t>(CellBroadcastGsmGeographicalScope::EndGuard_)) {
     mGsmGeographicalScope.SetValue(
       ToWebidlEnum<CellBroadcastGsmGeographicalScope>(aGsmGeographicalScope));
   }
 
-  if (aMessageClass < nsICellBroadcastService::GSM_MESSAGE_CLASS_INVALID) {
+  if (aMessageClass <
+      static_cast<uint32_t>(CellBroadcastMessageClass::EndGuard_)) {
     mMessageClass.SetValue(
       ToWebidlEnum<CellBroadcastMessageClass>(aMessageClass));
   }
@@ -100,9 +103,9 @@ CellBroadcastMessage::CellBroadcastMessage(nsPIDOMWindow* aWindow,
 }
 
 JSObject*
-CellBroadcastMessage::WrapObject(JSContext* aCx)
+CellBroadcastMessage::WrapObject(JSContext* aCx, JS::Handle<JSObject*> aGivenProto)
 {
-  return MozCellBroadcastMessageBinding::Wrap(aCx, this);
+  return MozCellBroadcastMessageBinding::Wrap(aCx, this, aGivenProto);
 }
 
 already_AddRefed<CellBroadcastEtwsInfo>
@@ -134,16 +137,17 @@ CellBroadcastEtwsInfo::CellBroadcastEtwsInfo(nsPIDOMWindow* aWindow,
   , mEmergencyUserAlert(aEmergencyUserAlert)
   , mPopup(aPopup)
 {
-  if (aWarningType < nsICellBroadcastService::GSM_ETWS_WARNING_INVALID) {
+  if (aWarningType <
+      static_cast<uint32_t>(CellBroadcastEtwsWarningType::EndGuard_)) {
     mWarningType.SetValue(
       ToWebidlEnum<CellBroadcastEtwsWarningType>(aWarningType));
   }
 }
 
 JSObject*
-CellBroadcastEtwsInfo::WrapObject(JSContext* aCx)
+CellBroadcastEtwsInfo::WrapObject(JSContext* aCx, JS::Handle<JSObject*> aGivenProto)
 {
-  return MozCellBroadcastEtwsInfoBinding::Wrap(aCx, this);
+  return MozCellBroadcastEtwsInfoBinding::Wrap(aCx, this, aGivenProto);
 }
 
 } // namespace dom

@@ -24,9 +24,7 @@
 #include <utils/Mutex.h>
 #include <AudioTrack.h>
 
-#include "AudioSink.h"
-
-#define LOG_TAG "AudioOffloadPlayer"
+#include "GonkAudioSink.h"
 
 namespace mozilla {
 
@@ -36,7 +34,7 @@ namespace mozilla {
  * Android::AudioTrack
  * Similarly to ease handling offloaded tracks, part of AudioOutput is used here
  */
-class AudioOutput : public AudioSink
+class AudioOutput : public GonkAudioSink
 {
   typedef android::Mutex Mutex;
   typedef android::String8 String8;

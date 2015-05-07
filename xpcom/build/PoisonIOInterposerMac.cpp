@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
-/* vim:set ts=4 sw=4 sts=4 ci et: */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -31,6 +31,10 @@
 #include <aio.h>
 #include <dlfcn.h>
 #include <fcntl.h>
+
+#ifdef MOZ_REPLACE_MALLOC
+#include "replace_malloc_bridge.h"
+#endif
 
 namespace {
 
@@ -76,13 +80,13 @@ public:
   }
 
   // Custom implementation of IOInterposeObserver::Observation::Filename
-  const char16_t* Filename() MOZ_OVERRIDE;
+  const char16_t* Filename() override;
 
   ~MacIOAutoObservation()
   {
     Report();
     if (mFilename) {
-      NS_Free(mFilename);
+      free(mFilename);
       mFilename = nullptr;
     }
   }
@@ -341,6 +345,14 @@ InitPoisonIOInterposer()
   // stdout and stderr are OK.
   MozillaRegisterDebugFD(1);
   MozillaRegisterDebugFD(2);
+
+#ifdef MOZ_REPLACE_MALLOC
+  // The contract with InitDebugFd is that the given registry can be used
+  // at any moment, so the instance needs to persist longer than the scope
+  // of this functions.
+  static DebugFdRegistry registry;
+  ReplaceMalloc::InitDebugFd(registry);
+#endif
 
   for (int i = 0; i < NumFunctions; ++i) {
     FuncData* d = Functions[i];

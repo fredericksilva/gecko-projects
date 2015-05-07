@@ -1,5 +1,5 @@
 /* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=2 et sw=2 tw=80: */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -52,10 +52,10 @@ public:
 
   virtual nsresult
   GetSuccessResult(JSContext* aCx,
-                   JS::MutableHandle<JS::Value> aVal) MOZ_OVERRIDE;
+                   JS::MutableHandle<JS::Value> aVal) override;
 
   virtual void
-  ReleaseObjects() MOZ_OVERRIDE
+  ReleaseObjects() override
   {
     mMutableFile = nullptr;
     MetadataHelper::ReleaseObjects();
@@ -157,21 +157,19 @@ IDBMutableFile::Create(IDBDatabase* aDatabase,
     return nullptr;
   }
 
+  nsCString group;
+  nsCString origin;
+  if (NS_WARN_IF(NS_FAILED(QuotaManager::GetInfoFromPrincipal(principal,
+                                                              &group,
+                                                              &origin,
+                                                              nullptr)))) {
+    return nullptr;
+  }
+
   const DatabaseSpec* spec = aDatabase->Spec();
   MOZ_ASSERT(spec);
 
   PersistenceType persistenceType = spec->metadata().persistenceType();
-
-  nsCString group;
-  nsCString origin;
-  if (NS_WARN_IF(NS_FAILED(QuotaManager::GetInfoFromPrincipal(principal,
-                                                              persistenceType,
-                                                              &group,
-                                                              &origin,
-                                                              nullptr,
-                                                              nullptr)))) {
-    return nullptr;
-  }
 
   nsCString storageId;
   QuotaManager::GetStorageId(persistenceType,
@@ -277,30 +275,13 @@ IDBMutableFile::CreateStream(bool aReadOnly)
   return result.forget();
 }
 
-void
-IDBMutableFile::SetThreadLocals()
-{
-  MOZ_ASSERT(IndexedDatabaseManager::IsMainProcess());
-  MOZ_ASSERT(mDatabase->GetOwner(), "Should have owner!");
-
-  QuotaManager::SetCurrentWindow(mDatabase->GetOwner());
-}
-
-void
-IDBMutableFile::UnsetThreadLocals()
-{
-  MOZ_ASSERT(IndexedDatabaseManager::IsMainProcess());
-
-  QuotaManager::SetCurrentWindow(nullptr);
-}
-
 JSObject*
-IDBMutableFile::WrapObject(JSContext* aCx)
+IDBMutableFile::WrapObject(JSContext* aCx, JS::Handle<JSObject*> aGivenProto)
 {
   MOZ_ASSERT(IndexedDatabaseManager::IsMainProcess());
   MOZ_ASSERT(NS_IsMainThread());
 
-  return IDBMutableFileBinding::Wrap(aCx, this);
+  return IDBMutableFileBinding::Wrap(aCx, this, aGivenProto);
 }
 
 IDBDatabase*
@@ -321,10 +302,12 @@ IDBMutableFile::Open(FileMode aMode, ErrorResult& aError)
     return nullptr;
   }
 
-  if (mInvalidated) {
+  if (mDatabase->IsClosed()) {
     aError.Throw(NS_ERROR_DOM_FILEHANDLE_NOT_ALLOWED_ERR);
     return nullptr;
   }
+
+  MOZ_ASSERT(GetOwner());
 
   nsRefPtr<IDBFileHandle> fileHandle =
     IDBFileHandle::Create(aMode, FileHandleBase::NORMAL, this);
@@ -366,10 +349,17 @@ IDBMutableFile::GetFile(ErrorResult& aError)
 {
   MOZ_ASSERT(NS_IsMainThread());
 
-  // Do nothing if the window is closed
-  if (!GetOwner()) {
+  if (QuotaManager::IsShuttingDown() || FileService::IsShuttingDown()) {
+    aError.Throw(NS_ERROR_DOM_FILEHANDLE_UNKNOWN_ERR);
     return nullptr;
   }
+
+  if (mDatabase->IsClosed()) {
+    aError.Throw(NS_ERROR_DOM_FILEHANDLE_NOT_ALLOWED_ERR);
+    return nullptr;
+  }
+
+  MOZ_ASSERT(GetOwner());
 
   nsRefPtr<IDBFileHandle> fileHandle =
     IDBFileHandle::Create(FileMode::Readonly, FileHandleBase::PARALLEL, this);

@@ -68,6 +68,7 @@
 
 #include "jsapi.h"
 #include "jsfriendapi.h"
+#include "js/Conversions.h"
 
 #include "mozilla/Alignment.h"
 #include "mozilla/Assertions.h"
@@ -95,6 +96,7 @@
 #include "nsCCUncollectableMarker.h"
 #include "nsWrapperCacheInlines.h"
 #include "mozilla/dom/CanvasRenderingContext2DBinding.h"
+#include "mozilla/dom/CanvasPath.h"
 #include "mozilla/dom/HTMLImageElement.h"
 #include "mozilla/dom/HTMLVideoElement.h"
 #include "mozilla/dom/SVGMatrix.h"
@@ -111,6 +113,7 @@
 #include "nsSVGLength2.h"
 #include "nsDeviceContext.h"
 #include "nsFontMetrics.h"
+#include "Units.h"
 
 #undef free // apparently defined by some windows header, clashing with a free()
             // method in SkTypes.h
@@ -157,14 +160,14 @@ static int64_t gCanvasAzureMemoryUsed = 0;
 // This is KIND_OTHER because it's not always clear where in memory the pixels
 // of a canvas are stored.  Furthermore, this memory will be tracked by the
 // underlying surface implementations.  See bug 655638 for details.
-class Canvas2dPixelsReporter MOZ_FINAL : public nsIMemoryReporter
+class Canvas2dPixelsReporter final : public nsIMemoryReporter
 {
   ~Canvas2dPixelsReporter() {}
 public:
   NS_DECL_ISUPPORTS
 
   NS_IMETHOD CollectReports(nsIHandleReportCallback* aHandleReport,
-                            nsISupports* aData, bool aAnonymize)
+                            nsISupports* aData, bool aAnonymize) override
   {
     return MOZ_COLLECT_REPORT(
       "canvas-2d-pixels", KIND_OTHER, UNITS_BYTES,
@@ -305,12 +308,12 @@ public:
     nsIntRegion strokePaintNeededRegion;
 
     FilterSupport::ComputeSourceNeededRegions(
-      ctx->CurrentState().filter, mgfx::ThebesIntRect(mPostFilterBounds),
+      ctx->CurrentState().filter, mPostFilterBounds,
       sourceGraphicNeededRegion, fillPaintNeededRegion, strokePaintNeededRegion);
 
-    mSourceGraphicRect = mgfx::ToIntRect(sourceGraphicNeededRegion.GetBounds());
-    mFillPaintRect = mgfx::ToIntRect(fillPaintNeededRegion.GetBounds());
-    mStrokePaintRect = mgfx::ToIntRect(strokePaintNeededRegion.GetBounds());
+    mSourceGraphicRect = sourceGraphicNeededRegion.GetBounds();
+    mFillPaintRect = fillPaintNeededRegion.GetBounds();
+    mStrokePaintRect = strokePaintNeededRegion.GetBounds();
 
     mSourceGraphicRect = mSourceGraphicRect.Intersect(aPreFilterBounds);
 
@@ -578,7 +581,7 @@ public:
     return mTarget;
   }
 
-  DrawTarget* operator->()
+  DrawTarget* operator->() MOZ_NO_ADDREF_RELEASE_ON_RETURN
   {
     return mTarget;
   }
@@ -597,10 +600,10 @@ private:
     nsIntRegion strokePaintNeededRegion;
 
     FilterSupport::ComputeSourceNeededRegions(
-      ctx->CurrentState().filter, mgfx::ThebesIntRect(mgfx::RoundedToInt(aDestBounds)),
+      ctx->CurrentState().filter, mgfx::RoundedToInt(aDestBounds),
       sourceGraphicNeededRegion, fillPaintNeededRegion, strokePaintNeededRegion);
 
-    return mgfx::Rect(mgfx::ToIntRect(sourceGraphicNeededRegion.GetBounds()));
+    return mgfx::Rect(sourceGraphicNeededRegion.GetBounds());
   }
 
   mgfx::Rect
@@ -636,8 +639,8 @@ private:
 
     nsIntRegion extents =
       mgfx::FilterSupport::ComputePostFilterExtents(ctx->CurrentState().filter,
-                                                    mgfx::ThebesIntRect(intBounds));
-    return mgfx::Rect(mgfx::ToIntRect(extents.GetBounds()));
+                                                    intBounds);
+    return mgfx::Rect(extents.GetBounds());
   }
 
   RefPtr<DrawTarget> mTarget;
@@ -695,7 +698,7 @@ NS_IMPL_CYCLE_COLLECTION_WRAPPERCACHE(CanvasPattern, mContext)
 class CanvasDrawObserver
 {
 public:
-  CanvasDrawObserver(CanvasRenderingContext2D* aCanvasContext);
+  explicit CanvasDrawObserver(CanvasRenderingContext2D* aCanvasContext);
 
   // Only enumerate draw calls that could affect the heuristic
   enum DrawCallType {
@@ -977,9 +980,9 @@ CanvasRenderingContext2D::~CanvasRenderingContext2D()
 }
 
 JSObject*
-CanvasRenderingContext2D::WrapObject(JSContext *cx)
+CanvasRenderingContext2D::WrapObject(JSContext *cx, JS::Handle<JSObject*> aGivenProto)
 {
-  return CanvasRenderingContext2DBinding::Wrap(cx, this);
+  return CanvasRenderingContext2DBinding::Wrap(cx, this, aGivenProto);
 }
 
 bool
@@ -1331,7 +1334,8 @@ CanvasRenderingContext2D::EnsureTarget(RenderingMode aRenderingMode)
 
    // Check that the dimensions are sane
   IntSize size(mWidth, mHeight);
-  if (size.width <= 0xFFFF && size.height <= 0xFFFF &&
+  if (size.width <= gfxPrefs::MaxCanvasSize() &&
+      size.height <= gfxPrefs::MaxCanvasSize() &&
       size.width >= 0 && size.height >= 0) {
     SurfaceFormat format = GetSurfaceFormat();
     nsIDocument* ownerDoc = nullptr;
@@ -1347,12 +1351,14 @@ CanvasRenderingContext2D::EnsureTarget(RenderingMode aRenderingMode)
     }
 
      if (layerManager) {
-      if (mode == RenderingMode::OpenGLBackendMode && CheckSizeForSkiaGL(size)) {
+      if (mode == RenderingMode::OpenGLBackendMode &&
+          gfxPlatform::GetPlatform()->UseAcceleratedSkiaCanvas() &&
+          CheckSizeForSkiaGL(size)) {
         DemoteOldestContextIfNecessary();
 
+#if USE_SKIA_GPU
         SkiaGLGlue* glue = gfxPlatform::GetPlatform()->GetSkiaGLGlue();
 
-#if USE_SKIA_GPU
         if (glue && glue->GetGrContext() && glue->GetGLContext()) {
           mTarget = Factory::CreateDrawTargetSkiaWithGrContext(glue->GetGrContext(), size, format);
           if (mTarget) {
@@ -1469,6 +1475,25 @@ CanvasRenderingContext2D::ClearTarget()
   state->colorStyles[Style::FILL] = NS_RGB(0,0,0);
   state->colorStyles[Style::STROKE] = NS_RGB(0,0,0);
   state->shadowColor = NS_RGBA(0,0,0,0);
+
+  // For vertical writing-mode, unless text-orientation is sideways,
+  // we'll modify the initial value of textBaseline to 'middle'.
+  nsRefPtr<nsStyleContext> canvasStyle;
+  if (mCanvasElement && mCanvasElement->IsInDoc()) {
+    nsCOMPtr<nsIPresShell> presShell = GetPresShell();
+    if (presShell) {
+      canvasStyle =
+        nsComputedDOMStyle::GetStyleContextForElement(mCanvasElement,
+                                                      nullptr,
+                                                      presShell);
+      if (canvasStyle) {
+        WritingMode wm(canvasStyle);
+        if (wm.IsVertical() && !wm.IsSideways()) {
+          state->textBaseline = TextBaseline::MIDDLE;
+        }
+      }
+    }
+  }
 }
 
 NS_IMETHODIMP
@@ -1714,6 +1739,12 @@ CanvasRenderingContext2D::SetTransform(double m11, double m12,
 
   Matrix matrix(m11, m12, m21, m22, dx, dy);
   mTarget->SetTransform(matrix);
+}
+
+void
+CanvasRenderingContext2D::ResetTransform(ErrorResult& error)
+{
+  SetTransform(1.0, 0.0, 0.0, 1.0, 0.0, 0.0, error);
 }
 
 static void
@@ -2029,19 +2060,13 @@ CreateStyleRule(nsINode* aNode,
   }
 
   if (aProp1 != eCSSProperty_UNKNOWN) {
-    error = parser.ParseProperty(aProp1, aValue1, docURL, baseURL, principal,
-                                 rule->GetDeclaration(), aChanged1, false);
-    if (error.Failed()) {
-      return nullptr;
-    }
+    parser.ParseProperty(aProp1, aValue1, docURL, baseURL, principal,
+                         rule->GetDeclaration(), aChanged1, false);
   }
 
   if (aProp2 != eCSSProperty_UNKNOWN) {
-    error = parser.ParseProperty(aProp2, aValue2, docURL, baseURL, principal,
-                                 rule->GetDeclaration(), aChanged2, false);
-    if (error.Failed()) {
-      return nullptr;
-    }
+    parser.ParseProperty(aProp2, aValue2, docURL, baseURL, principal,
+                         rule->GetDeclaration(), aChanged2, false);
   }
 
   rule->RuleMatched();
@@ -2252,7 +2277,7 @@ public:
   {
   }
 
-  virtual void DoUpdate() MOZ_OVERRIDE
+  virtual void DoUpdate() override
   {
     // Refresh the cached FilterDescription in mContext->CurrentState().filter.
     // If this filter is not at the top of the state stack, we'll refresh the
@@ -2285,39 +2310,42 @@ class CanvasUserSpaceMetrics : public UserSpaceMetricsWithSize
 {
 public:
   CanvasUserSpaceMetrics(const gfx::IntSize& aSize, const nsFont& aFont,
-                         nsIAtom* aFontLanguage, nsPresContext* aPresContext)
+                         nsIAtom* aFontLanguage, bool aExplicitLanguage,
+                         nsPresContext* aPresContext)
     : mSize(aSize)
     , mFont(aFont)
     , mFontLanguage(aFontLanguage)
+    , mExplicitLanguage(aExplicitLanguage)
     , mPresContext(aPresContext)
   {
   }
 
-  virtual float GetEmLength() const MOZ_OVERRIDE
+  virtual float GetEmLength() const override
   {
     return NSAppUnitsToFloatPixels(mFont.size,
                                    nsPresContext::AppUnitsPerCSSPixel());
   }
 
-  virtual float GetExLength() const MOZ_OVERRIDE
+  virtual float GetExLength() const override
   {
     gfxTextPerfMetrics* tp = mPresContext->GetTextPerfMetrics();
     nsRefPtr<nsFontMetrics> fontMetrics;
     nsDeviceContext* dc = mPresContext->DeviceContext();
-    dc->GetMetricsFor(mFont, mFontLanguage, gfxFont::eHorizontal,
-                      nullptr, tp,
+    dc->GetMetricsFor(mFont, mFontLanguage, mExplicitLanguage,
+                      gfxFont::eHorizontal, nullptr, tp,
                       *getter_AddRefs(fontMetrics));
     return NSAppUnitsToFloatPixels(fontMetrics->XHeight(),
                                    nsPresContext::AppUnitsPerCSSPixel());
   }
 
-  virtual gfx::Size GetSize() const MOZ_OVERRIDE
+  virtual gfx::Size GetSize() const override
   { return Size(mSize); }
 
 private:
   gfx::IntSize mSize;
   const nsFont& mFont;
   nsIAtom* mFontLanguage;
+  bool mExplicitLanguage;
   nsPresContext* mPresContext;
 };
 
@@ -2335,6 +2363,7 @@ CanvasRenderingContext2D::UpdateFilter()
       CanvasUserSpaceMetrics(IntSize(mWidth, mHeight),
                              CurrentState().fontFont,
                              CurrentState().fontLanguage,
+                             CurrentState().fontExplicitLanguage,
                              presShell->GetPresContext()),
       gfxRect(0, 0, mWidth, mHeight),
       CurrentState().filterAdditionalImages);
@@ -2966,16 +2995,7 @@ CanvasRenderingContext2D::SetFont(const nsAString& font,
 
   const nsStyleFont* fontStyle = sc->StyleFont();
 
-  nsIAtom* language = sc->StyleFont()->mLanguage;
-  if (!language) {
-    language = presShell->GetPresContext()->GetLanguageFromCharset();
-  }
-
-  // use CSS pixels instead of dev pixels to avoid being affected by page zoom
-  const uint32_t aupcp = nsPresContext::AppUnitsPerCSSPixel();
-
-  bool printerFont = (presShell->GetPresContext()->Type() == nsPresContext::eContext_PrintPreview ||
-                      presShell->GetPresContext()->Type() == nsPresContext::eContext_Print);
+  nsPresContext *c = presShell->GetPresContext();
 
   // Purposely ignore the font size that respects the user's minimum
   // font preference (fontStyle->mFont.size) in favor of the computed
@@ -2983,31 +3003,33 @@ CanvasRenderingContext2D::SetFont(const nsAString& font,
   // https://bugzilla.mozilla.org/show_bug.cgi?id=698652.
   MOZ_ASSERT(!fontStyle->mAllowZoom,
              "expected text zoom to be disabled on this nsStyleFont");
-  gfxFontStyle style(fontStyle->mFont.style,
-                     fontStyle->mFont.weight,
-                     fontStyle->mFont.stretch,
-                     NSAppUnitsToFloatPixels(fontStyle->mSize, float(aupcp)),
-                     language,
-                     fontStyle->mFont.sizeAdjust,
-                     fontStyle->mFont.systemFont,
-                     printerFont,
-                     fontStyle->mFont.synthesis & NS_FONT_SYNTHESIS_WEIGHT,
-                     fontStyle->mFont.synthesis & NS_FONT_SYNTHESIS_STYLE,
-                     fontStyle->mFont.languageOverride);
+  nsFont resizedFont(fontStyle->mFont);
+  // Create a font group working in units of CSS pixels instead of the usual
+  // device pixels, to avoid being affected by page zoom. nsFontMetrics will
+  // convert nsFont size in app units to device pixels for the font group, so
+  // here we first apply to the size the equivalent of a conversion from device
+  // pixels to CSS pixels, to adjust for the difference in expectations from
+  // other nsFontMetrics clients.
+  resizedFont.size =
+    (fontStyle->mSize * c->AppUnitsPerDevPixel()) / c->AppUnitsPerCSSPixel();
 
-  fontStyle->mFont.AddFontFeaturesToStyle(&style);
+  nsRefPtr<nsFontMetrics> metrics;
+  c->DeviceContext()->GetMetricsFor(resizedFont,
+                                    fontStyle->mLanguage,
+                                    fontStyle->mExplicitLanguage,
+                                    gfxFont::eHorizontal,
+                                    c->GetUserFontSet(),
+                                    c->GetTextPerfMetrics(),
+                                    *getter_AddRefs(metrics));
 
-  nsPresContext *c = presShell->GetPresContext();
-  CurrentState().fontGroup =
-      gfxPlatform::GetPlatform()->CreateFontGroup(fontStyle->mFont.fontlist,
-                                                  &style,
-                                                  c->GetUserFontSet());
+  gfxFontGroup* newFontGroup = metrics->GetThebesFontGroup();
+  CurrentState().fontGroup = newFontGroup;
   NS_ASSERTION(CurrentState().fontGroup, "Could not get font group");
-  CurrentState().fontGroup->SetTextPerfMetrics(c->GetTextPerfMetrics());
   CurrentState().font = usedFont;
   CurrentState().fontFont = fontStyle->mFont;
   CurrentState().fontFont.size = fontStyle->mSize;
   CurrentState().fontLanguage = fontStyle->mLanguage;
+  CurrentState().fontExplicitLanguage = fontStyle->mExplicitLanguage;
 }
 
 void
@@ -3139,15 +3161,24 @@ CanvasRenderingContext2D::MeasureText(const nsAString& rawText,
 void
 CanvasRenderingContext2D::AddHitRegion(const HitRegionOptions& options, ErrorResult& error)
 {
-  // check if the path is valid
-  EnsureUserSpacePath(CanvasWindingRule::Nonzero);
-  if(!mPath) {
+  RefPtr<gfx::Path> path;
+  if (options.mPath) {
+    path = options.mPath->GetPath(CanvasWindingRule::Nonzero, mTarget);
+  }
+
+  if (!path) {
+    // check if the path is valid
+    EnsureUserSpacePath(CanvasWindingRule::Nonzero);
+    path = mPath;
+  }
+
+  if(!path) {
     error.Throw(NS_ERROR_DOM_NOT_SUPPORTED_ERR);
     return;
   }
 
   // get the bounds of the current path. They are relative to the canvas
-  mgfx::Rect bounds(mPath->GetBounds(mTarget->GetTransform()));
+  mgfx::Rect bounds(path->GetBounds(mTarget->GetTransform()));
   if ((bounds.width == 0) || (bounds.height == 0) || !bounds.IsFinite()) {
     // The specified region has no pixels.
     error.Throw(NS_ERROR_DOM_NOT_SUPPORTED_ERR);
@@ -3176,7 +3207,7 @@ CanvasRenderingContext2D::AddHitRegion(const HitRegionOptions& options, ErrorRes
   RegionInfo info;
   info.mId = options.mId;
   info.mElement = options.mControl;
-  RefPtr<PathBuilder> pathBuilder = mPath->TransformedCopyToBuilder(mTarget->GetTransform());
+  RefPtr<PathBuilder> pathBuilder = path->TransformedCopyToBuilder(mTarget->GetTransform());
   info.mPath = pathBuilder->Finish();
 
   mHitRegionsOptions.InsertElementAt(0, info);
@@ -3197,6 +3228,12 @@ CanvasRenderingContext2D::RemoveHitRegion(const nsAString& id)
       return;
     }
   }
+}
+
+void
+CanvasRenderingContext2D::ClearHitRegions()
+{
+  mHitRegionsOptions.Clear();
 }
 
 bool
@@ -3221,6 +3258,22 @@ CanvasRenderingContext2D::GetHitRegionRect(Element* aElement, nsRect& aRect)
  */
 struct MOZ_STACK_CLASS CanvasBidiProcessor : public nsBidiPresUtils::BidiProcessor
 {
+  CanvasBidiProcessor()
+    : nsBidiPresUtils::BidiProcessor()
+  {
+    if (Preferences::GetBool(GFX_MISSING_FONTS_NOTIFY_PREF)) {
+      mMissingFonts = new gfxMissingFontRecorder();
+    }
+  }
+
+  ~CanvasBidiProcessor()
+  {
+    // notify front-end code if we encountered missing glyphs in any script
+    if (mMissingFonts) {
+      mMissingFonts->Flush();
+    }
+  }
+
   typedef CanvasRenderingContext2D::ContextState ContextState;
 
   virtual void SetText(const char16_t* text, int32_t length, nsBidiDirection direction)
@@ -3228,7 +3281,7 @@ struct MOZ_STACK_CLASS CanvasBidiProcessor : public nsBidiPresUtils::BidiProcess
     mFontgrp->UpdateUserFonts(); // ensure user font generation is current
     // adjust flags for current direction run
     uint32_t flags = mTextRunFlags;
-    if (direction & 1) {
+    if (direction == NSBIDI_RTL) {
       flags |= gfxTextRunFactory::TEXT_IS_RTL;
     } else {
       flags &= ~gfxTextRunFactory::TEXT_IS_RTL;
@@ -3237,7 +3290,8 @@ struct MOZ_STACK_CLASS CanvasBidiProcessor : public nsBidiPresUtils::BidiProcess
                                      length,
                                      mThebes,
                                      mAppUnitsPerDevPixel,
-                                     flags);
+                                     flags,
+                                     mMissingFonts);
   }
 
   virtual nscoord GetWidth()
@@ -3265,6 +3319,7 @@ struct MOZ_STACK_CLASS CanvasBidiProcessor : public nsBidiPresUtils::BidiProcess
     gfxPoint point = mPt;
     bool rtl = mTextRun->IsRightToLeft();
     bool verticalRun = mTextRun->IsVertical();
+    bool centerBaseline = mTextRun->UseCenterBaseline();
 
     gfxFloat& inlineCoord = verticalRun ? point.y : point.x;
     inlineCoord += xOffset;
@@ -3333,20 +3388,27 @@ struct MOZ_STACK_CLASS CanvasBidiProcessor : public nsBidiPresUtils::BidiProcess
       if (runs[c].mOrientation ==
           gfxTextRunFactory::TEXT_ORIENT_VERTICAL_SIDEWAYS_RIGHT) {
         sidewaysRestore.Init(mCtx->mTarget);
-        // TODO: The baseline adjustment here is kinda ad-hoc; eventually
-        // perhaps we should check for horizontal and vertical baseline data
-        // in the font, and adjust accordingly.
-        // (The same will be true for HTML text layout.)
         const gfxFont::Metrics& metrics = mTextRun->GetFontGroup()->
           GetFirstValidFont()->GetMetrics(gfxFont::eHorizontal);
-        mCtx->mTarget->SetTransform(mCtx->mTarget->GetTransform().Copy().
+
+        gfx::Matrix mat = mCtx->mTarget->GetTransform().Copy().
           PreTranslate(baselineOrigin).      // translate origin for rotation
           PreRotate(gfx::Float(M_PI / 2.0)). // turn 90deg clockwise
-          PreTranslate(-baselineOrigin).     // undo the translation
-          PreTranslate(Point(0, (metrics.emAscent - metrics.emDescent) / 2)));
-                              // and offset the (alphabetic) baseline of the
+          PreTranslate(-baselineOrigin);     // undo the translation
+
+        if (centerBaseline) {
+          // TODO: The baseline adjustment here is kinda ad hoc; eventually
+          // perhaps we should check for horizontal and vertical baseline data
+          // in the font, and adjust accordingly.
+          // (The same will be true for HTML text layout.)
+          float offset = (metrics.emAscent - metrics.emDescent) / 2;
+          mat = mat.PreTranslate(Point(0, offset));
+                              // offset the (alphabetic) baseline of the
                               // horizontally-shaped text from the (centered)
                               // default baseline used for vertical
+        }
+
+        mCtx->mTarget->SetTransform(mat);
       }
 
       RefPtr<GlyphRenderingOptions> renderingOptions = font->GetGlyphRenderingOptions();
@@ -3387,7 +3449,7 @@ struct MOZ_STACK_CLASS CanvasBidiProcessor : public nsBidiPresUtils::BidiProcess
 
         const gfxTextRun::DetailedGlyph *d = mTextRun->GetDetailedGlyphs(i);
 
-        if (glyphs[i].IsMissing()) {
+        if (glyphs[i].IsMissing() && d->mAdvance > 0) {
           newGlyph.mIndex = 0;
           if (rtl) {
             inlinePos = baselineOriginInline - advanceSum -
@@ -3474,6 +3536,10 @@ struct MOZ_STACK_CLASS CanvasBidiProcessor : public nsBidiPresUtils::BidiProcess
 
   // current font
   gfxFontGroup* mFontgrp;
+
+  // to record any unsupported characters found in the text,
+  // and notify front-end if it is interested
+  nsAutoPtr<gfxMissingFontRecorder> mMissingFonts;
 
   // dev pixel conversion factor
   int32_t mAppUnitsPerDevPixel;
@@ -3638,39 +3704,50 @@ CanvasRenderingContext2D::DrawOrMeasureText(const nsAString& aRawText,
 
   processor.mPt.x -= anchorX * totalWidth;
 
-  // offset pt.y based on text baseline
+  // offset pt.y (or pt.x, for vertical text) based on text baseline
   processor.mFontgrp->UpdateUserFonts(); // ensure user font generation is current
   const gfxFont::Metrics& fontMetrics =
-    processor.mFontgrp->GetFirstValidFont()->GetMetrics(
-      ((processor.mTextRunFlags & gfxTextRunFactory::TEXT_ORIENT_MASK) ==
-        gfxTextRunFactory::TEXT_ORIENT_HORIZONTAL)
-      ? gfxFont::eHorizontal : gfxFont::eVertical);
+    processor.mFontgrp->GetFirstValidFont()->GetMetrics(gfxFont::eHorizontal);
 
-  gfxFloat anchorY;
+  gfxFloat baselineAnchor;
 
   switch (state.textBaseline)
   {
   case TextBaseline::HANGING:
       // fall through; best we can do with the information available
   case TextBaseline::TOP:
-    anchorY = fontMetrics.emAscent;
+    baselineAnchor = fontMetrics.emAscent;
     break;
   case TextBaseline::MIDDLE:
-    anchorY = (fontMetrics.emAscent - fontMetrics.emDescent) * .5f;
+    baselineAnchor = (fontMetrics.emAscent - fontMetrics.emDescent) * .5f;
     break;
   case TextBaseline::IDEOGRAPHIC:
     // fall through; best we can do with the information available
   case TextBaseline::ALPHABETIC:
-    anchorY = 0;
+    baselineAnchor = 0;
     break;
   case TextBaseline::BOTTOM:
-    anchorY = -fontMetrics.emDescent;
+    baselineAnchor = -fontMetrics.emDescent;
     break;
   default:
     MOZ_CRASH("unexpected TextBaseline");
   }
 
-  processor.mPt.y += anchorY;
+  // We can't query the textRun directly, as it may not have been created yet;
+  // so instead we check the flags that will be used to initialize it.
+  uint16_t runOrientation =
+    (processor.mTextRunFlags & gfxTextRunFactory::TEXT_ORIENT_MASK);
+  if (runOrientation != gfxTextRunFactory::TEXT_ORIENT_HORIZONTAL) {
+    if (runOrientation == gfxTextRunFactory::TEXT_ORIENT_VERTICAL_MIXED ||
+        runOrientation == gfxTextRunFactory::TEXT_ORIENT_VERTICAL_UPRIGHT) {
+      // Adjust to account for mTextRun being shaped using center baseline
+      // rather than alphabetic.
+      baselineAnchor -= (fontMetrics.emAscent - fontMetrics.emDescent) * .5f;
+    }
+    processor.mPt.x -= baselineAnchor;
+  } else {
+    processor.mPt.y += baselineAnchor;
+  }
 
   // correct bounding box to get it to be the correct size/position
   processor.mBoundingBox.width = totalWidth;
@@ -4060,7 +4137,7 @@ CanvasRenderingContext2D::CachedSurfaceFromElement(Element* aElement)
     res.mCORSUsed = corsmode != imgIRequest::CORS_NONE;
   }
 
-  res.mSize = ThebesIntSize(res.mSourceSurface->GetSize());
+  res.mSize = res.mSourceSurface->GetSize();
   res.mPrincipal = principal.forget();
   res.mIsWriteOnly = false;
   res.mImageRequest = imgRequest.forget();
@@ -4139,6 +4216,13 @@ CanvasRenderingContext2D::DrawImage(const HTMLImageOrCanvasOrVideoElement& image
       return;
     }
 
+#ifdef MOZ_EME
+    if (video->ContainsRestrictedContent()) {
+      error.Throw(NS_ERROR_NOT_AVAILABLE);
+      return;
+    }
+#endif
+
     uint16_t readyState;
     if (NS_SUCCEEDED(video->GetReadyState(&readyState)) &&
         readyState < nsIDOMHTMLMediaElement::HAVE_CURRENT_DATA) {
@@ -4186,7 +4270,10 @@ CanvasRenderingContext2D::DrawImage(const HTMLImageOrCanvasOrVideoElement& image
       gl->fTexParameteri(LOCAL_GL_TEXTURE_2D, LOCAL_GL_TEXTURE_MAG_FILTER, LOCAL_GL_LINEAR);
       gl->fTexParameteri(LOCAL_GL_TEXTURE_2D, LOCAL_GL_TEXTURE_MIN_FILTER, LOCAL_GL_LINEAR);
     }
-    bool ok = gl->BlitHelper()->BlitImageToTexture(srcImage.get(), srcImage->GetSize(), mVideoTexture, LOCAL_GL_TEXTURE_2D, 1);
+    const gl::OriginPos destOrigin = gl::OriginPos::TopLeft;
+    bool ok = gl->BlitHelper()->BlitImageToTexture(srcImage.get(), srcImage->GetSize(),
+                                                   mVideoTexture, LOCAL_GL_TEXTURE_2D,
+                                                   destOrigin);
     if (ok) {
       NativeSurface texSurf;
       texSurf.mType = NativeSurfaceType::OPENGL_TEXTURE;
@@ -4237,7 +4324,7 @@ CanvasRenderingContext2D::DrawImage(const HTMLImageOrCanvasOrVideoElement& image
       return;
     }
 
-    imgSize = gfx::ToIntSize(res.mSize);
+    imgSize = res.mSize;
 
     // Scale sw/sh based on aspect ratio
     if (image.IsHTMLVideoElement()) {
@@ -4257,7 +4344,7 @@ CanvasRenderingContext2D::DrawImage(const HTMLImageOrCanvasOrVideoElement& image
     if (res.mSourceSurface) {
       if (res.mImageRequest) {
         CanvasImageCache::NotifyDrawImage(element, mCanvasElement, res.mImageRequest,
-                                          res.mSourceSurface, ThebesIntSize(imgSize));
+                                          res.mSourceSurface, imgSize);
       }
 
       srcSurf = res.mSourceSurface;
@@ -4381,15 +4468,18 @@ CanvasRenderingContext2D::DrawDirectlyToCanvas(
   // FLAG_CLAMP is added for increased performance, since we never tile here.
   uint32_t modifiedFlags = image.mDrawingFlags | imgIContainer::FLAG_CLAMP;
 
-  SVGImageContext svgContext(scaledImageSize, Nothing(), CurrentState().globalAlpha);
+  CSSIntSize sz(scaledImageSize.width, scaledImageSize.height); // XXX hmm is scaledImageSize really in CSS pixels?
+  SVGImageContext svgContext(sz, Nothing(), CurrentState().globalAlpha);
 
-  nsresult rv = image.mImgContainer->
+  auto result = image.mImgContainer->
     Draw(context, scaledImageSize,
          ImageRegion::Create(gfxRect(src.x, src.y, src.width, src.height)),
          image.mWhichFrame, GraphicsFilter::FILTER_GOOD,
          Some(svgContext), modifiedFlags);
 
-  NS_ENSURE_SUCCESS_VOID(rv);
+  if (result != DrawResult::SUCCESS) {
+    NS_WARNING("imgIContainer::Draw failed");
+  }
 }
 
 void
@@ -4752,10 +4842,10 @@ CanvasRenderingContext2D::GetImageData(JSContext* aCx, double aSx,
     return nullptr;
   }
 
-  int32_t x = JS_DoubleToInt32(aSx);
-  int32_t y = JS_DoubleToInt32(aSy);
-  int32_t wi = JS_DoubleToInt32(aSw);
-  int32_t hi = JS_DoubleToInt32(aSh);
+  int32_t x = JS::ToInt32(aSx);
+  int32_t y = JS::ToInt32(aSy);
+  int32_t wi = JS::ToInt32(aSw);
+  int32_t hi = JS::ToInt32(aSh);
 
   // Handle negative width and height by flipping the rectangle over in the
   // relevant direction.
@@ -4948,7 +5038,7 @@ CanvasRenderingContext2D::PutImageData(ImageData& imageData, double dx,
   DebugOnly<bool> inited = arr.Init(imageData.GetDataObject());
   MOZ_ASSERT(inited);
 
-  error = PutImageData_explicit(JS_DoubleToInt32(dx), JS_DoubleToInt32(dy),
+  error = PutImageData_explicit(JS::ToInt32(dx), JS::ToInt32(dy),
                                 imageData.Width(), imageData.Height(),
                                 &arr, false, 0, 0, 0, 0);
 }
@@ -4964,13 +5054,13 @@ CanvasRenderingContext2D::PutImageData(ImageData& imageData, double dx,
   DebugOnly<bool> inited = arr.Init(imageData.GetDataObject());
   MOZ_ASSERT(inited);
 
-  error = PutImageData_explicit(JS_DoubleToInt32(dx), JS_DoubleToInt32(dy),
+  error = PutImageData_explicit(JS::ToInt32(dx), JS::ToInt32(dy),
                                 imageData.Width(), imageData.Height(),
                                 &arr, true,
-                                JS_DoubleToInt32(dirtyX),
-                                JS_DoubleToInt32(dirtyY),
-                                JS_DoubleToInt32(dirtyWidth),
-                                JS_DoubleToInt32(dirtyHeight));
+                                JS::ToInt32(dirtyX),
+                                JS::ToInt32(dirtyY),
+                                JS::ToInt32(dirtyWidth),
+                                JS::ToInt32(dirtyHeight));
 }
 
 // void putImageData (in ImageData d, in float x, in float y);
@@ -5138,8 +5228,8 @@ CanvasRenderingContext2D::CreateImageData(JSContext* cx, double sw,
     return nullptr;
   }
 
-  int32_t wi = JS_DoubleToInt32(sw);
-  int32_t hi = JS_DoubleToInt32(sh);
+  int32_t wi = JS::ToInt32(sw);
+  int32_t hi = JS::ToInt32(sh);
 
   uint32_t w = Abs(wi);
   uint32_t h = Abs(hi);
@@ -5312,9 +5402,9 @@ CanvasPath::CanvasPath(nsISupports* aParent, TemporaryRef<PathBuilder> aPathBuil
 }
 
 JSObject*
-CanvasPath::WrapObject(JSContext* aCx)
+CanvasPath::WrapObject(JSContext* aCx, JS::Handle<JSObject*> aGivenProto)
 {
-  return Path2DBinding::Wrap(aCx, this);
+  return Path2DBinding::Wrap(aCx, this, aGivenProto);
 }
 
 already_AddRefed<CanvasPath>

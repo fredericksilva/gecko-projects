@@ -8,8 +8,8 @@
 #include "nsString.h"
 
 #include "AndroidBridge.h"
+#include "AndroidContentController.h"
 #include "AndroidGraphicBuffer.h"
-#include "APZCCallbackHandler.h"
 
 #include <jni.h>
 #include <pthread.h>
@@ -48,6 +48,7 @@ using namespace mozilla;
 using namespace mozilla::dom;
 using namespace mozilla::dom::mobilemessage;
 using namespace mozilla::layers;
+using namespace mozilla::widget;
 using namespace mozilla::widget::android;
 
 /* Forward declare all the JNI methods as extern "C" */
@@ -64,9 +65,10 @@ Java_org_mozilla_gecko_GeckoAppShell_registerJavaUiThread(JNIEnv *jenv, jclass j
 }
 
 NS_EXPORT void JNICALL
-Java_org_mozilla_gecko_GeckoAppShell_nativeInit(JNIEnv *jenv, jclass jc)
+Java_org_mozilla_gecko_GeckoAppShell_nativeInit(JNIEnv *jenv, jclass, jobject clsLoader, jobject msgQueue)
 {
-    AndroidBridge::ConstructBridge(jenv);
+    AndroidBridge::ConstructBridge(
+            jenv, jni::Object::Ref::From(clsLoader), jni::Object::Ref::From(msgQueue));
 }
 
 NS_EXPORT void JNICALL
@@ -811,6 +813,27 @@ cleanup:
 }
 
 NS_EXPORT void JNICALL
+Java_org_mozilla_gecko_GeckoAppShell_addPresentationSurface(JNIEnv* jenv, jclass, jobject surface)
+{
+    if (surface != NULL) {
+        void* window = AndroidBridge::Bridge()->AcquireNativeWindow(jenv, surface);
+        if (window) {
+            AndroidBridge::Bridge()->SetPresentationWindow(window);
+        }
+    }
+}
+
+NS_EXPORT void JNICALL
+Java_org_mozilla_gecko_GeckoAppShell_removePresentationSurface(JNIEnv* jenv, jclass, jobject surface)
+{
+    void* window = AndroidBridge::Bridge()->GetPresentationWindow();
+    if (window) {
+        AndroidBridge::Bridge()->SetPresentationWindow(nullptr);
+        AndroidBridge::Bridge()->ReleaseNativeWindow(window);
+    }
+}
+
+NS_EXPORT void JNICALL
 Java_org_mozilla_gecko_GeckoAppShell_onFullScreenPluginHidden(JNIEnv* jenv, jclass, jobject view)
 {
   class ExitFullScreenRunnable : public nsRunnable {
@@ -830,33 +853,6 @@ Java_org_mozilla_gecko_GeckoAppShell_onFullScreenPluginHidden(JNIEnv* jenv, jcla
 
   nsCOMPtr<nsIRunnable> runnable = new ExitFullScreenRunnable(jenv->NewGlobalRef(view));
   NS_DispatchToMainThread(runnable);
-}
-
-NS_EXPORT jobject JNICALL
-Java_org_mozilla_gecko_GeckoAppShell_getNextMessageFromQueue(JNIEnv* jenv, jclass, jobject queue)
-{
-    static jclass jMessageQueueCls = nullptr;
-    static jfieldID jMessagesField;
-    static jmethodID jNextMethod;
-    if (!jMessageQueueCls) {
-        jMessageQueueCls = (jclass) jenv->NewGlobalRef(jenv->FindClass("android/os/MessageQueue"));
-        jNextMethod = jenv->GetMethodID(jMessageQueueCls, "next", "()Landroid/os/Message;");
-        jMessagesField = jenv->GetFieldID(jMessageQueueCls, "mMessages", "Landroid/os/Message;");
-    }
-
-    if (!jMessageQueueCls || !jNextMethod)
-        return nullptr;
-
-    if (jMessagesField) {
-        jobject msg = jenv->GetObjectField(queue, jMessagesField);
-        // if queue.mMessages is null, queue.next() will block, which we don't want
-        // It turns out to be an order of magnitude more performant to do this extra check here and
-        // block less vs. one fewer checks here and more blocking.
-        if (!msg) {
-            return nullptr;
-        }
-    }
-    return jenv->CallObjectMethod(queue, jNextMethod);
 }
 
 NS_EXPORT void JNICALL
@@ -900,11 +896,11 @@ Java_org_mozilla_gecko_gfx_NativePanZoomController_init(JNIEnv* env, jobject ins
         return;
     }
 
-    NativePanZoomController* oldRef = APZCCallbackHandler::GetInstance()->SetNativePanZoomController(instance);
-    if (oldRef && !oldRef->isNull()) {
-        MOZ_ASSERT(false, "Registering a new NPZC when we already have one");
-        delete oldRef;
-    }
+    const auto& newRef = NativePanZoomController::Ref::From(instance);
+    NativePanZoomController::LocalRef oldRef =
+            AndroidContentController::SetNativePanZoomController(newRef);
+
+    MOZ_ASSERT(!oldRef, "Registering a new NPZC when we already have one");
 }
 
 NS_EXPORT jboolean JNICALL
@@ -927,7 +923,7 @@ Java_org_mozilla_gecko_gfx_NativePanZoomController_handleTouchEvent(JNIEnv* env,
     uint64_t blockId;
     nsEventStatus status = controller->ReceiveInputEvent(input, &guid, &blockId);
     if (status != nsEventStatus_eConsumeNoDefault) {
-        nsAppShell::gAppShell->PostEvent(AndroidGeckoEvent::MakeApzInputEvent(input, guid, blockId));
+        nsAppShell::gAppShell->PostEvent(AndroidGeckoEvent::MakeApzInputEvent(input, guid, blockId, status));
     }
     return true;
 }
@@ -945,12 +941,10 @@ Java_org_mozilla_gecko_gfx_NativePanZoomController_destroy(JNIEnv* env, jobject 
         return;
     }
 
-    NativePanZoomController* oldRef = APZCCallbackHandler::GetInstance()->SetNativePanZoomController(nullptr);
-    if (!oldRef || oldRef->isNull()) {
-        MOZ_ASSERT(false, "Clearing a non-existent NPZC");
-    } else {
-        delete oldRef;
-    }
+    NativePanZoomController::LocalRef oldRef =
+            AndroidContentController::SetNativePanZoomController(nullptr);
+
+    MOZ_ASSERT(oldRef, "Clearing a non-existent NPZC");
 }
 
 NS_EXPORT jboolean JNICALL

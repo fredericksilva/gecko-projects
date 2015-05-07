@@ -125,8 +125,8 @@ public:
   PrefChangedFunc mCallback;
 };
 
-class ValueObserver MOZ_FINAL : public nsIObserver,
-                                public ValueObserverHashKey
+class ValueObserver final : public nsIObserver,
+                            public ValueObserverHashKey
 {
   ~ValueObserver() {
     Preferences::RemoveObserver(this, mPrefName.get());
@@ -235,7 +235,7 @@ Preferences::SizeOfIncludingThisAndOtherStuff(mozilla::MallocSizeOf aMallocSizeO
   NS_ENSURE_TRUE(InitStaticMembers(), 0);
 
   size_t n = aMallocSizeOf(sPreferences);
-  if (gHashTable.ops) {
+  if (gHashTable.IsInitialized()) {
     // pref keys are allocated in a private arena, which we count elsewhere.
     // pref stringvals are allocated out of the same private arena.
     n += PL_DHashTableSizeOfExcludingThis(&gHashTable, nullptr, aMallocSizeOf);
@@ -257,7 +257,7 @@ Preferences::SizeOfIncludingThisAndOtherStuff(mozilla::MallocSizeOf aMallocSizeO
   return n;
 }
 
-class PreferenceServiceReporter MOZ_FINAL : public nsIMemoryReporter
+class PreferenceServiceReporter final : public nsIMemoryReporter
 {
   ~PreferenceServiceReporter() {}
 
@@ -587,14 +587,7 @@ Preferences::Observe(nsISupports *aSubject, const char *aTopic,
   nsresult rv = NS_OK;
 
   if (!nsCRT::strcmp(aTopic, "profile-before-change")) {
-    if (!nsCRT::strcmp(someData, MOZ_UTF16("shutdown-cleanse"))) {
-      if (mCurrentFile) {
-        mCurrentFile->Remove(false);
-        mCurrentFile = nullptr;
-      }
-    } else {
-      rv = SavePrefFile(nullptr);
-    }
+    rv = SavePrefFile(nullptr);
   } else if (!strcmp(aTopic, "load-extension-defaults")) {
     pref_LoadPrefsInDirList(NS_EXT_PREFS_DEFAULTS_DIR_LIST);
   } else if (!nsCRT::strcmp(aTopic, "reload-default-prefs")) {
@@ -756,11 +749,9 @@ Preferences::GetBranch(const char *aPrefRoot, nsIPrefBranch **_retval)
 
   if ((nullptr != aPrefRoot) && (*aPrefRoot != '\0')) {
     // TODO: - cache this stuff and allow consumers to share branches (hold weak references I think)
-    nsPrefBranch* prefBranch = new nsPrefBranch(aPrefRoot, false);
-    if (!prefBranch)
-      return NS_ERROR_OUT_OF_MEMORY;
-
-    rv = CallQueryInterface(prefBranch, _retval);
+    nsRefPtr<nsPrefBranch> prefBranch = new nsPrefBranch(aPrefRoot, false);
+    prefBranch.forget(_retval);
+    rv = NS_OK;
   } else {
     // special case caching the default root
     nsCOMPtr<nsIPrefBranch> root(sRootBranch);
@@ -811,17 +802,8 @@ Preferences::NotifyServiceObservers(const char *aTopic)
 nsresult
 Preferences::UseDefaultPrefFile()
 {
-  nsresult rv;
   nsCOMPtr<nsIFile> aFile;
-
-#if defined(XP_WIN) && defined(MOZ_METRO)
-  if (XRE_GetWindowsEnvironment() == WindowsEnvironmentType_Metro) {
-    rv = NS_GetSpecialDirectory(NS_METRO_APP_PREFS_50_FILE, getter_AddRefs(aFile));
-  } else
-#endif
-  {
-    rv = NS_GetSpecialDirectory(NS_APP_PREFS_50_FILE, getter_AddRefs(aFile));
-  }
+  nsresult rv = NS_GetSpecialDirectory(NS_APP_PREFS_50_FILE, getter_AddRefs(aFile));
 
   if (NS_SUCCEEDED(rv)) {
     rv = ReadAndOwnUserPrefFile(aFile);
@@ -962,7 +944,7 @@ Preferences::WritePrefFile(nsIFile* aFile)
   uint32_t                  writeAmount;
   nsresult                  rv;
 
-  if (!gHashTable.ops)
+  if (!gHashTable.IsInitialized())
     return NS_ERROR_NOT_INITIALIZED;
 
   // execute a "safe" save by saving through a tempfile
@@ -996,7 +978,7 @@ Preferences::WritePrefFile(nsIFile* aFile)
     if (*walker) {
       outStream->Write(*walker, strlen(*walker), &writeAmount);
       outStream->Write(NS_LINEBREAK, NS_LINEBREAK_LEN, &writeAmount);
-      NS_Free(*walker);
+      free(*walker);
     }
   }
 

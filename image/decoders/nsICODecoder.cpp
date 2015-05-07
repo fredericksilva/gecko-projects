@@ -9,6 +9,7 @@
 #include <stdlib.h>
 
 #include "mozilla/Endian.h"
+#include "mozilla/Move.h"
 #include "nsICODecoder.h"
 
 #include "RasterImage.h"
@@ -57,7 +58,7 @@ nsICODecoder::GetNumColors()
 }
 
 
-nsICODecoder::nsICODecoder(RasterImage& aImage)
+nsICODecoder::nsICODecoder(RasterImage* aImage)
  : Decoder(aImage)
 {
   mPos = mImageOffset = mCurrIcon = mNumIcons = mBPP = mRowBytes = 0;
@@ -69,7 +70,7 @@ nsICODecoder::nsICODecoder(RasterImage& aImage)
 nsICODecoder::~nsICODecoder()
 {
   if (mRow) {
-    moz_free(mRow);
+    free(mRow);
   }
 }
 
@@ -77,13 +78,14 @@ void
 nsICODecoder::FinishInternal()
 {
   // We shouldn't be called in error cases
-  NS_ABORT_IF_FALSE(!HasError(), "Shouldn't call FinishInternal after error!");
+  MOZ_ASSERT(!HasError(), "Shouldn't call FinishInternal after error!");
 
   // Finish the internally used decoder as well
   if (mContainedDecoder) {
     mContainedDecoder->FinishSharedDecoder();
     mDecodeDone = mContainedDecoder->GetDecodeDone();
-    mProgress |= mContainedDecoder->GetProgress();
+    mProgress |= mContainedDecoder->TakeProgress();
+    mInvalidRect.UnionRect(mInvalidRect, mContainedDecoder->TakeInvalidRect());
   }
 }
 
@@ -212,14 +214,13 @@ nsICODecoder::SetHotSpotIfCursor()
 }
 
 void
-nsICODecoder::WriteInternal(const char* aBuffer, uint32_t aCount,
-                            DecodeStrategy aStrategy)
+nsICODecoder::WriteInternal(const char* aBuffer, uint32_t aCount)
 {
-  NS_ABORT_IF_FALSE(!HasError(), "Shouldn't call WriteInternal after error!");
+  MOZ_ASSERT(!HasError(), "Shouldn't call WriteInternal after error!");
 
   if (!aCount) {
     if (mContainedDecoder) {
-      WriteToContainedDecoder(aBuffer, aCount, aStrategy);
+      WriteToContainedDecoder(aBuffer, aCount);
     }
     return;
   }
@@ -248,7 +249,7 @@ nsICODecoder::WriteInternal(const char* aBuffer, uint32_t aCount,
   }
 
   uint16_t colorDepth = 0;
-  nsIntSize prefSize = mImage.GetRequestedResolution();
+  nsIntSize prefSize = mImage->GetRequestedResolution();
   if (prefSize.width == 0 && prefSize.height == 0) {
     prefSize.SizeTo(PREFICONSIZE, PREFICONSIZE);
   }
@@ -341,10 +342,11 @@ nsICODecoder::WriteInternal(const char* aBuffer, uint32_t aCount,
     if (mIsPNG) {
       mContainedDecoder = new nsPNGDecoder(mImage);
       mContainedDecoder->SetSizeDecode(IsSizeDecode());
+      mContainedDecoder->SetSendPartialInvalidations(mSendPartialInvalidations);
       mContainedDecoder->InitSharedDecoder(mImageData, mImageDataLength,
                                            mColormap, mColormapSize,
-                                           mCurrentFrame);
-      if (!WriteToContainedDecoder(mSignature, PNGSIGNATURESIZE, aStrategy)) {
+                                           Move(mRefForContainedDecoder));
+      if (!WriteToContainedDecoder(mSignature, PNGSIGNATURESIZE)) {
         return;
       }
     }
@@ -352,7 +354,7 @@ nsICODecoder::WriteInternal(const char* aBuffer, uint32_t aCount,
 
   // If we have a PNG, let the PNG decoder do all of the rest of the work
   if (mIsPNG && mContainedDecoder && mPos >= mImageOffset + PNGSIGNATURESIZE) {
-    if (!WriteToContainedDecoder(aBuffer, aCount, aStrategy)) {
+    if (!WriteToContainedDecoder(aBuffer, aCount)) {
       return;
     }
 
@@ -419,9 +421,10 @@ nsICODecoder::WriteInternal(const char* aBuffer, uint32_t aCount,
     mContainedDecoder = bmpDecoder;
     bmpDecoder->SetUseAlphaData(true);
     mContainedDecoder->SetSizeDecode(IsSizeDecode());
+    mContainedDecoder->SetSendPartialInvalidations(mSendPartialInvalidations);
     mContainedDecoder->InitSharedDecoder(mImageData, mImageDataLength,
                                          mColormap, mColormapSize,
-                                         mCurrentFrame);
+                                         Move(mRefForContainedDecoder));
 
     // The ICO format when containing a BMP does not include the 14 byte
     // bitmap file header. To use the code of the BMP decoder we need to
@@ -431,8 +434,7 @@ nsICODecoder::WriteInternal(const char* aBuffer, uint32_t aCount,
       PostDataError();
       return;
     }
-    if (!WriteToContainedDecoder((const char*)bfhBuffer, sizeof(bfhBuffer),
-                                  aStrategy)) {
+    if (!WriteToContainedDecoder((const char*)bfhBuffer, sizeof(bfhBuffer))) {
       return;
     }
 
@@ -453,7 +455,7 @@ nsICODecoder::WriteInternal(const char* aBuffer, uint32_t aCount,
     }
 
     // Write out the BMP's bitmap info header
-    if (!WriteToContainedDecoder(mBIHraw, sizeof(mBIHraw), aStrategy)) {
+    if (!WriteToContainedDecoder(mBIHraw, sizeof(mBIHraw))) {
       return;
     }
 
@@ -503,7 +505,7 @@ nsICODecoder::WriteInternal(const char* aBuffer, uint32_t aCount,
         toFeed = aCount;
       }
 
-      if (!WriteToContainedDecoder(aBuffer, toFeed, aStrategy)) {
+      if (!WriteToContainedDecoder(aBuffer, toFeed)) {
         return;
       }
 
@@ -528,7 +530,7 @@ nsICODecoder::WriteInternal(const char* aBuffer, uint32_t aCount,
           mPos++;
           mRowBytes = 0;
           mCurLine = GetRealHeight();
-          mRow = (uint8_t*)moz_realloc(mRow, rowSize);
+          mRow = (uint8_t*)realloc(mRow, rowSize);
           if (!mRow) {
             PostDecoderError(NS_ERROR_OUT_OF_MEMORY);
             return;
@@ -536,11 +538,13 @@ nsICODecoder::WriteInternal(const char* aBuffer, uint32_t aCount,
         }
 
         // Ensure memory has been allocated before decoding.
-        NS_ABORT_IF_FALSE(mRow, "mRow is null");
+        MOZ_ASSERT(mRow, "mRow is null");
         if (!mRow) {
           PostDataError();
           return;
         }
+
+        uint8_t sawTransparency = 0;
 
         while (mCurLine > 0 && aCount > 0) {
           uint32_t toCopy = std::min(rowSize - mRowBytes, aCount);
@@ -567,6 +571,7 @@ nsICODecoder::WriteInternal(const char* aBuffer, uint32_t aCount,
             uint8_t* p_end = mRow + rowSize;
             while (p < p_end) {
               uint8_t idx = *p++;
+              sawTransparency |= idx;
               for (uint8_t bit = 0x80; bit && decoded<decoded_end; bit >>= 1) {
                 // Clear pixel completely for transparency.
                 if (idx & bit) {
@@ -577,17 +582,23 @@ nsICODecoder::WriteInternal(const char* aBuffer, uint32_t aCount,
             }
           }
         }
+
+        // If any bits are set in sawTransparency, then we know at least one
+        // pixel was transparent.
+        if (sawTransparency) {
+            PostHasTransparency();
+        }
       }
     }
   }
 }
 
 bool
-nsICODecoder::WriteToContainedDecoder(const char* aBuffer, uint32_t aCount,
-                                      DecodeStrategy aStrategy)
+nsICODecoder::WriteToContainedDecoder(const char* aBuffer, uint32_t aCount)
 {
-  mContainedDecoder->Write(aBuffer, aCount, aStrategy);
-  mProgress |= mContainedDecoder->GetProgress();
+  mContainedDecoder->Write(aBuffer, aCount);
+  mProgress |= mContainedDecoder->TakeProgress();
+  mInvalidRect.UnionRect(mInvalidRect, mContainedDecoder->TakeInvalidRect());
   if (mContainedDecoder->HasDataError()) {
     mDataError = mContainedDecoder->HasDataError();
   }
@@ -627,16 +638,23 @@ nsICODecoder::NeedsNewFrame() const
 }
 
 nsresult
-nsICODecoder::AllocateFrame()
+nsICODecoder::AllocateFrame(const nsIntSize& aTargetSize /* = nsIntSize() */)
 {
+  nsresult rv;
+
   if (mContainedDecoder) {
-    nsresult rv = mContainedDecoder->AllocateFrame();
-    mCurrentFrame = mContainedDecoder->GetCurrentFrame();
-    mProgress |= mContainedDecoder->GetProgress();
+    rv = mContainedDecoder->AllocateFrame(aTargetSize);
+    mCurrentFrame = mContainedDecoder->GetCurrentFrameRef();
+    mProgress |= mContainedDecoder->TakeProgress();
+    mInvalidRect.UnionRect(mInvalidRect, mContainedDecoder->TakeInvalidRect());
     return rv;
   }
 
-  return Decoder::AllocateFrame();
+  // Grab a strong ref that we'll later hand over to the contained decoder. This
+  // lets us avoid creating a RawAccessFrameRef off-main-thread.
+  rv = Decoder::AllocateFrame(aTargetSize);
+  mRefForContainedDecoder = GetCurrentFrameRef();
+  return rv;
 }
 
 } // namespace image

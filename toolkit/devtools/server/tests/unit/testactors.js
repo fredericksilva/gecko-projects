@@ -5,6 +5,7 @@ const { ActorPool, appendExtraActors, createExtraActors } = require("devtools/se
 const { RootActor } = require("devtools/server/actors/root");
 const { ThreadActor } = require("devtools/server/actors/script");
 const { DebuggerServer } = require("devtools/server/main");
+const { TabSources } = require("devtools/server/actors/utils/TabSources");
 const promise = require("promise");
 const makeDebugger = require("devtools/server/actors/utils/make-debugger");
 
@@ -52,8 +53,11 @@ TestTabList.prototype = {
 
 function createRootActor(aConnection)
 {
-  let root = new RootActor(aConnection,
-                           { tabList: new TestTabList(aConnection) });
+  let root = new RootActor(aConnection, {
+    tabList: new TestTabList(aConnection),
+    globalActorFactories: DebuggerServer.globalActorFactories,
+  });
+
   root.applicationType = "xpcshell-tests";
   return root;
 }
@@ -86,6 +90,13 @@ TestTabActor.prototype = {
 
   get url() {
     return this._global.__name;
+  },
+
+  get sources() {
+    if (!this._sources) {
+      this._sources = new TabSources(this.threadActor);
+    }
+    return this._sources;
   },
 
   form: function() {
@@ -121,9 +132,18 @@ TestTabActor.prototype = {
   },
 
   onReload: function(aRequest) {
+    this.sources.reset({ sourceMaps: true });
     this.threadActor.clearDebuggees();
     this.threadActor.dbg.addDebuggees();
     return {};
+  },
+
+  removeActorByName: function(aName) {
+    const actor = this._extraActors[aName];
+    if (this._tabActorPool) {
+      this._tabActorPool.removeActor(actor);
+    }
+    delete this._extraActors[aName];
   },
 
   /* Support for DebuggerServer.addTabActor. */

@@ -106,7 +106,7 @@ NS_IMETHODIMP TreeWalker::SetCurrentNode(nsIDOMNode * aCurrentNode)
 
     ErrorResult rv;
     SetCurrentNode(*node, rv);
-    return rv.ErrorCode();
+    return rv.StealNSResult();
 }
 
 void
@@ -450,10 +450,10 @@ TreeWalker::NextSiblingInternal(bool aReversed, ErrorResult& aResult)
     }
 }
 
-JSObject*
-TreeWalker::WrapObject(JSContext *cx)
+bool
+TreeWalker::WrapObject(JSContext *aCx, JS::Handle<JSObject*> aGivenProto, JS::MutableHandle<JSObject*> aReflector)
 {
-    return TreeWalkerBinding::Wrap(cx, this);
+    return TreeWalkerBinding::Wrap(aCx, this, aGivenProto, aReflector);
 }
 
 } // namespace dom

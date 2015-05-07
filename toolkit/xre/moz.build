@@ -20,6 +20,8 @@ if CONFIG['OS_ARCH'] == 'WINNT':
 
 XPIDL_MODULE = 'xulapp'
 
+EXPORTS += ['nsAppRunner.h']
+
 if CONFIG['MOZ_INSTRUMENT_EVENT_LOOP']:
     EXPORTS += ['EventTracer.h']
 
@@ -103,11 +105,6 @@ if CONFIG['MOZ_UPDATER']:
             'nsUpdateDriver.cpp',
         ]
 
-MSVC_ENABLE_PGO = True
-
-if CONFIG['MOZ_BUILD_APP'] in ['browser']:
-      DEFINES['HAVE_SHIMS'] = True
-
 include('/ipc/chromium/chromium-config.mozbuild')
 
 FINAL_LIBRARY = 'xul'
@@ -158,6 +155,12 @@ LOCAL_INCLUDES += [
     '/xpcom/build',
 ]
 
+if CONFIG['MOZ_WIDGET_TOOLKIT'] == 'cocoa':
+    LOCAL_INCLUDES += [
+        '/widget',
+        '/widget/cocoa',
+    ]
+
 if CONFIG['MOZ_ENABLE_XREMOTE']:
     LOCAL_INCLUDES += [
         '/widget/xremoteclient',
@@ -165,9 +168,12 @@ if CONFIG['MOZ_ENABLE_XREMOTE']:
 
 if CONFIG['MOZ_B2G_LOADER']:
     DEFINES['OMNIJAR_NAME'] = CONFIG['OMNIJAR_NAME']
+
 CXXFLAGS += CONFIG['TK_CFLAGS']
 CXXFLAGS += CONFIG['MOZ_DBUS_CFLAGS']
 CXXFLAGS += CONFIG['MOZ_DBUS_GLIB_CFLAGS']
 
 if CONFIG['MOZ_WIDGET_GTK']:
     CXXFLAGS += CONFIG['MOZ_PANGO_CFLAGS']
+
+FAIL_ON_WARNINGS = True

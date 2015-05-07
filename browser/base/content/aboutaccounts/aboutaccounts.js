@@ -16,7 +16,7 @@ Cu.import("resource://gre/modules/FxAccountsCommon.js", fxAccountsCommon);
 Cu.import("resource://services-sync/util.js");
 
 const PREF_LAST_FXA_USER = "identity.fxaccounts.lastSignedInUserHash";
-const PREF_SYNC_SHOW_CUSTOMIZATION = "services.sync.ui.showCustomizationDialog";
+const PREF_SYNC_SHOW_CUSTOMIZATION = "services.sync-setup.ui.showCustomizationDialog";
 
 const ACTION_URL_PARAM = "action";
 
@@ -99,16 +99,6 @@ let wrapper = {
   iframe: null,
 
   init: function (url, urlParams) {
-    let weave = Cc["@mozilla.org/weave/service;1"]
-                  .getService(Ci.nsISupports)
-                  .wrappedJSObject;
-
-    // Don't show about:accounts with FxA disabled.
-    if (!weave.fxAccountsEnabled) {
-      document.body.remove();
-      return;
-    }
-
     // If a master-password is enabled, we want to encourage the user to
     // unlock it.  Things still work if not, but the user will probably need
     // to re-auth next startup (in which case we will get here again and
@@ -123,7 +113,7 @@ let wrapper = {
     // URLSearchParams implementation doesn't support iteration (bug 1085284).
     let urlParamStr = urlParams.toString();
     if (urlParamStr) {
-      url += (url.contains("?") ? "&" : "?") + urlParamStr;
+      url += (url.includes("?") ? "&" : "?") + urlParamStr;
     }
     iframe.src = url;
   },

@@ -12,8 +12,10 @@ using namespace gfx;
 
 namespace layers {
 
-DIBTextureClient::DIBTextureClient(gfx::SurfaceFormat aFormat, TextureFlags aFlags)
-  : TextureClient(aFlags)
+DIBTextureClient::DIBTextureClient(ISurfaceAllocator* aAllocator,
+                                   gfx::SurfaceFormat aFormat,
+                                   TextureFlags aFlags)
+  : TextureClient(aAllocator, aFlags)
   , mFormat(aFormat)
   , mIsLocked(false)
 {
@@ -29,7 +31,8 @@ TemporaryRef<TextureClient>
 DIBTextureClient::CreateSimilar(TextureFlags aFlags,
                                 TextureAllocationFlags aAllocFlags) const
 {
-  RefPtr<TextureClient> tex = new DIBTextureClient(mFormat, mFlags | aFlags);
+  RefPtr<TextureClient> tex = new DIBTextureClient(mAllocator, mFormat,
+                                                   mFlags | aFlags);
 
   if (!tex->AllocateForSurface(mSize, aAllocFlags)) {
     return nullptr;
@@ -123,24 +126,31 @@ DIBTextureHost::DIBTextureHost(TextureFlags aFlags,
     dont_AddRef(reinterpret_cast<gfxWindowsSurface*>(aDescriptor.surface()));
   MOZ_ASSERT(mSurface);
 
-  mSize = ToIntSize(mSurface->GetSize());
+  mSize = mSurface->GetSize();
   mFormat = ImageFormatToSurfaceFormat(
     gfxPlatform::GetPlatform()->OptimalFormatForContent(mSurface->GetContentType()));
 }
 
-TextureSource*
-DIBTextureHost::GetTextureSources()
+bool
+DIBTextureHost::BindTextureSource(CompositableTextureSourceRef& aTexture)
 {
   if (!mTextureSource) {
     Updated();
   }
 
-  return mTextureSource;
+  aTexture = mTextureSource;
+  return !!aTexture;
 }
 
 void
 DIBTextureHost::Updated(const nsIntRegion* aRegion)
 {
+  if (!mCompositor) {
+    // This can happen if we send textures to a compositable that isn't yet
+    // attached to a layer.
+    return;
+  }
+
   if (!mTextureSource) {
     mTextureSource = mCompositor->CreateDataTextureSource(mFlags);
   }

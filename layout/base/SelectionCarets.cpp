@@ -17,6 +17,7 @@
 #include "nsDOMTokenList.h"
 #include "nsFocusManager.h"
 #include "nsFrame.h"
+#include "nsGenericHTMLElement.h"
 #include "nsIDocument.h"
 #include "nsIDocShell.h"
 #include "nsIDOMDocument.h"
@@ -63,13 +64,6 @@ static const char* kSelectionCaretsLogModuleName = "SelectionCarets";
 static const int32_t kMoveStartTolerancePx = 5;
 // Time for trigger scroll end event, in miliseconds.
 static const int32_t kScrollEndTimerDelay = 300;
-// Read from preference "selectioncaret.noneditable". Indicate whether support
-// non-editable fields selection or not. We have stable state for editable
-// fields selection now. And we don't want to break this stable state when
-// enabling non-editable support. So I add a pref to control to support or
-// not. Once non-editable fields support is stable. We should remove this
-// pref.
-static bool kSupportNonEditableFields = false;
 
 NS_IMPL_ISUPPORTS(SelectionCarets,
                   nsIReflowObserver,
@@ -78,15 +72,18 @@ NS_IMPL_ISUPPORTS(SelectionCarets,
                   nsISupportsWeakReference)
 
 /*static*/ int32_t SelectionCarets::sSelectionCaretsInflateSize = 0;
+/*static*/ bool SelectionCarets::sSelectionCaretDetectsLongTap = true;
 
 SelectionCarets::SelectionCarets(nsIPresShell* aPresShell)
   : mPresShell(aPresShell)
   , mActiveTouchId(-1)
   , mCaretCenterToDownPointOffsetY(0)
   , mDragMode(NONE)
-  , mAsyncPanZoomEnabled(false)
+  , mUseAsyncPanZoom(false)
+  , mInAsyncPanZoomGesture(false)
   , mEndCaretVisible(false)
   , mStartCaretVisible(false)
+  , mSelectionVisibleInScrollFrames(true)
   , mVisible(false)
 {
   MOZ_ASSERT(NS_IsMainThread());
@@ -103,8 +100,8 @@ SelectionCarets::SelectionCarets(nsIPresShell* aPresShell)
   if (!addedPref) {
     Preferences::AddIntVarCache(&sSelectionCaretsInflateSize,
                                 "selectioncaret.inflatesize.threshold");
-    Preferences::AddBoolVarCache(&kSupportNonEditableFields,
-                                 "selectioncaret.noneditable");
+    Preferences::AddBoolVarCache(&sSelectionCaretDetectsLongTap,
+                                 "selectioncaret.detects.longtap", true);
     addedPref = true;
   }
 }
@@ -120,8 +117,9 @@ SelectionCarets::Init()
     return;
   }
 
-  docShell->GetAsyncPanZoomEnabled(&mAsyncPanZoomEnabled);
-  mAsyncPanZoomEnabled = mAsyncPanZoomEnabled && gfxPrefs::AsyncPanZoomEnabled();
+#if defined(MOZ_WIDGET_GONK)
+  mUseAsyncPanZoom = gfxPrefs::AsyncPanZoomEnabled();
+#endif
 
   docShell->AddWeakReflowObserver(this);
   docShell->AddWeakScrollObserver(this);
@@ -133,6 +131,18 @@ SelectionCarets::~SelectionCarets()
 {
   SELECTIONCARETS_LOG("Destructor");
   MOZ_ASSERT(NS_IsMainThread());
+
+  mPresShell = nullptr;
+}
+
+void
+SelectionCarets::Terminate()
+{
+  nsRefPtr<nsDocShell> docShell(mDocShell.get());
+  if (docShell) {
+    docShell->RemoveWeakReflowObserver(this);
+    docShell->RemoveWeakScrollObserver(this);
+  }
 
   if (mLongTapDetectorTimer) {
     mLongTapDetectorTimer->Cancel();
@@ -147,18 +157,6 @@ SelectionCarets::~SelectionCarets()
   mPresShell = nullptr;
 }
 
-void
-SelectionCarets::Terminate()
-{
-  nsRefPtr<nsDocShell> docShell(mDocShell.get());
-  if (docShell) {
-    docShell->RemoveWeakReflowObserver(this);
-    docShell->RemoveWeakScrollObserver(this);
-  }
-
-  mPresShell = nullptr;
-}
-
 nsEventStatus
 SelectionCarets::HandleEvent(WidgetEvent* aEvent)
 {
@@ -168,7 +166,7 @@ SelectionCarets::HandleEvent(WidgetEvent* aEvent)
   }
 
   WidgetTouchEvent *touchEvent = aEvent->AsTouchEvent();
-  nsIntPoint movePoint;
+  LayoutDeviceIntPoint movePoint;
   int32_t nowTouchId = -1;
   if (touchEvent && !touchEvent->touches.IsEmpty()) {
     // If touch happened, just grab event with same identifier
@@ -190,7 +188,13 @@ SelectionCarets::HandleEvent(WidgetEvent* aEvent)
       nowTouchId = touchEvent->touches[0]->Identifier();
     }
   } else if (mouseEvent) {
-    movePoint = LayoutDeviceIntPoint::ToUntyped(mouseEvent->AsGUIEvent()->refPoint);
+    movePoint = mouseEvent->AsGUIEvent()->refPoint;
+  }
+
+  // XUL has no SelectionCarets elements.
+  if (!mPresShell->GetSelectionCaretsStartElement() ||
+      !mPresShell->GetSelectionCaretsEndElement()) {
+    return nsEventStatus_eIgnore;
   }
 
   // Get event coordinate relative to root frame
@@ -214,19 +218,18 @@ SelectionCarets::HandleEvent(WidgetEvent* aEvent)
     if (IsOnStartFrameInner(ptInRoot)) {
       mDragMode = START_FRAME;
       mCaretCenterToDownPointOffsetY = GetCaretYCenterPosition() - ptInRoot.y;
-      SetSelectionDirection(false);
+      SetSelectionDirection(eDirPrevious);
       SetSelectionDragState(true);
       return nsEventStatus_eConsumeNoDefault;
     } else if (IsOnEndFrameInner(ptInRoot)) {
       mDragMode = END_FRAME;
       mCaretCenterToDownPointOffsetY = GetCaretYCenterPosition() - ptInRoot.y;
-      SetSelectionDirection(true);
+      SetSelectionDirection(eDirNext);
       SetSelectionDragState(true);
       return nsEventStatus_eConsumeNoDefault;
     } else {
       mDragMode = NONE;
       mActiveTouchId = -1;
-      SetVisibility(false);
       LaunchLongTapDetector();
     }
   } else if (aEvent->message == NS_TOUCH_END ||
@@ -247,6 +250,16 @@ SelectionCarets::HandleEvent(WidgetEvent* aEvent)
     if (mDragMode == START_FRAME || mDragMode == END_FRAME) {
       if (mActiveTouchId == nowTouchId) {
         ptInRoot.y += mCaretCenterToDownPointOffsetY;
+
+        if (mDragMode == START_FRAME) {
+          if (ptInRoot.y > mDragDownYBoundary) {
+            ptInRoot.y = mDragDownYBoundary;
+          }
+        } else if (mDragMode == END_FRAME) {
+          if (ptInRoot.y < mDragUpYBoundary) {
+            ptInRoot.y = mDragUpYBoundary;
+          }
+        }
         return DragSelection(ptInRoot);
       }
 
@@ -258,10 +271,19 @@ SelectionCarets::HandleEvent(WidgetEvent* aEvent)
           nsPresContext::AppUnitsPerCSSPixel() * kMoveStartTolerancePx) {
       CancelLongTapDetector();
     }
+
   } else if (aEvent->message == NS_MOUSE_MOZLONGTAP) {
-    if (!mVisible) {
-      SELECTIONCARETS_LOG("SelectWord from APZ");
-      SelectWord();
+    if (!mVisible || !sSelectionCaretDetectsLongTap) {
+      SELECTIONCARETS_LOG("SelectWord from NS_MOUSE_MOZLONGTAP");
+
+      mDownPoint = ptInRoot;
+      nsresult wordSelected = SelectWord();
+
+      if (NS_FAILED(wordSelected)) {
+        SELECTIONCARETS_LOG("SelectWord from NS_MOUSE_MOZLONGTAP failed!");
+        return nsEventStatus_eIgnore;
+      }
+
       return nsEventStatus_eConsumeNoDefault;
     }
   }
@@ -293,6 +315,10 @@ SelectionCarets::SetVisibility(bool aVisible)
     return;
   }
 
+  if (!aVisible) {
+    mSelectionVisibleInScrollFrames = false;
+  }
+
   mVisible = aVisible;
   SELECTIONCARETS_LOG("Set visibility %s", (mVisible ? "shown" : "hidden"));
 
@@ -301,12 +327,6 @@ SelectionCarets::SetVisibility(bool aVisible)
 
   dom::Element* endElement = mPresShell->GetSelectionCaretsEndElement();
   SetElementVisibility(endElement, mVisible && mEndCaretVisible);
-
-  // We must call SetHasTouchCaret() in order to get APZC to wait until the
-  // event has been round-tripped and check whether it has been handled,
-  // otherwise B2G will end up panning the document when the user tries to drag
-  // selection caret.
-  mPresShell->SetMayHaveTouchCaret(mVisible);
 }
 
 void
@@ -325,7 +345,7 @@ SelectionCarets::SetEndFrameVisibility(bool aVisible)
 {
   mEndCaretVisible = aVisible;
   SELECTIONCARETS_LOG("Set end frame visibility %s",
-                      (mStartCaretVisible ? "shown" : "hidden"));
+                      (mEndCaretVisible ? "shown" : "hidden"));
 
   dom::Element* element = mPresShell->GetSelectionCaretsEndElement();
   SetElementVisibility(element, mVisible && mEndCaretVisible);
@@ -445,20 +465,26 @@ SelectionCarets::UpdateSelectionCarets()
     return;
   }
 
-  int32_t rangeCount = selection->GetRangeCount();
+  int32_t rangeCount = selection->RangeCount();
   nsRefPtr<nsRange> firstRange = selection->GetRangeAt(0);
   nsRefPtr<nsRange> lastRange = selection->GetRangeAt(rangeCount - 1);
 
-  nsIFrame* canvasFrame = mPresShell->GetCanvasFrame();
+  mPresShell->FlushPendingNotifications(Flush_Layout);
+
   nsIFrame* rootFrame = mPresShell->GetRootFrame();
 
-  if (!canvasFrame || !rootFrame) {
+  if (!rootFrame) {
     SetVisibility(false);
     return;
   }
 
   // Check start and end frame is rtl or ltr text
   nsRefPtr<nsFrameSelection> fs = GetFrameSelection();
+  if (!fs) {
+    SetVisibility(false);
+    return;
+  }
+
   int32_t startOffset;
   nsIFrame* startFrame = FindFirstNodeWithFrame(mPresShell->GetDocument(),
                                                 firstRange, fs, false, startOffset);
@@ -472,62 +498,55 @@ SelectionCarets::UpdateSelectionCarets()
     return;
   }
 
-  // If frame isn't editable and we don't support non-editable fields, bail
-  // out.
-  if (!kSupportNonEditableFields &&
-      (!startFrame->GetContent()->IsEditable() ||
-       !endFrame->GetContent()->IsEditable())) {
-    return;
-  }
-
   // Check if startFrame is after endFrame.
   if (nsLayoutUtils::CompareTreePosition(startFrame, endFrame) > 0) {
     SetVisibility(false);
     return;
   }
 
-  mPresShell->FlushPendingNotifications(Flush_Layout);
-  nsRect firstRectInRootFrame =
+  // If the selection is not visible, we should dispatch a event.
+  nsIFrame* commonAncestorFrame =
+    nsLayoutUtils::FindNearestCommonAncestorFrame(startFrame, endFrame);
+
+  nsRect selectionRectInRootFrame = nsContentUtils::GetSelectionBoundingRect(selection);
+  nsRect selectionRectInCommonAncestorFrame = selectionRectInRootFrame;
+  nsLayoutUtils::TransformRect(rootFrame, commonAncestorFrame,
+                               selectionRectInCommonAncestorFrame);
+
+  mSelectionVisibleInScrollFrames =
+    nsLayoutUtils::IsRectVisibleInScrollFrames(commonAncestorFrame,
+                                               selectionRectInCommonAncestorFrame);
+  SELECTIONCARETS_LOG("Selection visibility %s",
+                      (mSelectionVisibleInScrollFrames ? "shown" : "hidden"));
+
+
+  nsRect firstRectInStartFrame =
     nsCaret::GetGeometryForFrame(startFrame, startOffset, nullptr);
-  nsRect lastRectInRootFrame =
+  nsRect lastRectInEndFrame =
     nsCaret::GetGeometryForFrame(endFrame, endOffset, nullptr);
 
-  // GetGeometryForFrame may return a rect that outside frame's rect. So
-  // constrain rect inside frame's rect.
-  firstRectInRootFrame = firstRectInRootFrame.ForceInside(startFrame->GetRectRelativeToSelf());
-  lastRectInRootFrame = lastRectInRootFrame.ForceInside(endFrame->GetRectRelativeToSelf());
-  nsRect firstRectInCanvasFrame = firstRectInRootFrame;
-  nsRect lastRectInCanvasFrame =lastRectInRootFrame;
+  bool startFrameVisible =
+    nsLayoutUtils::IsRectVisibleInScrollFrames(startFrame, firstRectInStartFrame);
+  bool endFrameVisible =
+    nsLayoutUtils::IsRectVisibleInScrollFrames(endFrame, lastRectInEndFrame);
+
+  nsRect firstRectInRootFrame = firstRectInStartFrame;
+  nsRect lastRectInRootFrame = lastRectInEndFrame;
   nsLayoutUtils::TransformRect(startFrame, rootFrame, firstRectInRootFrame);
   nsLayoutUtils::TransformRect(endFrame, rootFrame, lastRectInRootFrame);
-  nsLayoutUtils::TransformRect(startFrame, canvasFrame, firstRectInCanvasFrame);
-  nsLayoutUtils::TransformRect(endFrame, canvasFrame, lastRectInCanvasFrame);
 
-  firstRectInRootFrame.Inflate(AppUnitsPerCSSPixel(), 0);
-  lastRectInRootFrame.Inflate(AppUnitsPerCSSPixel(), 0);
+  SetStartFrameVisibility(startFrameVisible);
+  SetEndFrameVisibility(endFrameVisible);
 
-  nsAutoTArray<nsIFrame*, 16> hitFramesInFirstRect;
-  nsLayoutUtils::GetFramesForArea(rootFrame,
-    firstRectInRootFrame,
-    hitFramesInFirstRect,
-    nsLayoutUtils::IGNORE_PAINT_SUPPRESSION |
-      nsLayoutUtils::IGNORE_CROSS_DOC |
-      nsLayoutUtils::IGNORE_ROOT_SCROLL_FRAME);
-
-  nsAutoTArray<nsIFrame*, 16> hitFramesInLastRect;
-  nsLayoutUtils::GetFramesForArea(rootFrame,
-    lastRectInRootFrame,
-    hitFramesInLastRect,
-    nsLayoutUtils::IGNORE_PAINT_SUPPRESSION |
-      nsLayoutUtils::IGNORE_CROSS_DOC |
-      nsLayoutUtils::IGNORE_ROOT_SCROLL_FRAME);
-
-  SetStartFrameVisibility(hitFramesInFirstRect.Contains(startFrame));
-  SetEndFrameVisibility(hitFramesInLastRect.Contains(endFrame));
-
-  SetStartFramePos(firstRectInCanvasFrame.BottomLeft());
-  SetEndFramePos(lastRectInCanvasFrame.BottomRight());
+  SetStartFramePos(firstRectInRootFrame);
+  SetEndFramePos(lastRectInRootFrame);
   SetVisibility(true);
+
+  // Use half of the first(last) rect as the dragup(dragdown) boundary
+  mDragUpYBoundary =
+    (firstRectInRootFrame.BottomLeft().y + firstRectInRootFrame.TopLeft().y) / 2;
+  mDragDownYBoundary =
+    (lastRectInRootFrame.BottomRight().y + lastRectInRootFrame.TopRight().y) / 2;
 
   nsRect rectStart = GetStartFrameRect();
   nsRect rectEnd = GetEndFrameRect();
@@ -543,46 +562,77 @@ nsresult
 SelectionCarets::SelectWord()
 {
   if (!mPresShell) {
-    return NS_OK;
+    return NS_ERROR_UNEXPECTED;
   }
 
   nsIFrame* rootFrame = mPresShell->GetRootFrame();
   if (!rootFrame) {
-    return NS_OK;
+    return NS_ERROR_NOT_AVAILABLE;
   }
 
   // Find content offsets for mouse down point
   nsIFrame *ptFrame = nsLayoutUtils::GetFrameForPoint(rootFrame, mDownPoint,
     nsLayoutUtils::IGNORE_PAINT_SUPPRESSION | nsLayoutUtils::IGNORE_CROSS_DOC);
   if (!ptFrame) {
-    return NS_OK;
+    return NS_ERROR_FAILURE;
   }
 
-  // If frame isn't editable and we don't support non-editable fields, bail
-  // out.
-  if (!kSupportNonEditableFields && !ptFrame->GetContent()->IsEditable()) {
-    return NS_OK;
+  bool selectable;
+  ptFrame->IsSelectable(&selectable, nullptr);
+  if (!selectable) {
+    SELECTIONCARETS_LOG(" frame %p is not selectable", ptFrame);
+    return NS_ERROR_FAILURE;
   }
 
   nsPoint ptInFrame = mDownPoint;
   nsLayoutUtils::TransformPoint(rootFrame, ptFrame, ptInFrame);
 
-  // If target frame is editable, we should move focus to targe frame. If
-  // target frame isn't editable and our focus content is editable, we should
+  nsIFrame* currFrame = ptFrame;
+  nsIContent* newFocusContent = nullptr;
+  while (currFrame) {
+    int32_t tabIndexUnused = 0;
+    if (currFrame->IsFocusable(&tabIndexUnused, true)) {
+      newFocusContent = currFrame->GetContent();
+      nsCOMPtr<nsIDOMElement> domElement(do_QueryInterface(newFocusContent));
+      if (domElement)
+        break;
+    }
+    currFrame = currFrame->GetParent();
+  }
+
+
+  // If target frame is focusable, we should move focus to it. If target frame
+  // isn't focusable, and our previous focused content is editable, we should
   // clear focus.
   nsFocusManager* fm = nsFocusManager::GetFocusManager();
   nsIContent* editingHost = ptFrame->GetContent()->GetEditingHost();
-  if (editingHost) {
-    nsCOMPtr<nsIDOMElement> elt = do_QueryInterface(editingHost->GetParent());
-    if (elt) {
-      fm->SetFocus(elt, 0);
+  if (newFocusContent && currFrame) {
+    nsCOMPtr<nsIDOMElement> domElement(do_QueryInterface(newFocusContent));
+    fm->SetFocus(domElement,0);
+
+    if (editingHost && !nsContentUtils::HasNonEmptyTextContent(
+          editingHost, nsContentUtils::eRecurseIntoChildren)) {
+      SELECTIONCARETS_LOG("Select a editable content %p with empty text",
+                          editingHost);
+      // Long tap on the content with empty text, no action for
+      // selectioncarets but need to dispatch the taponcaret event
+      // to support the short cut mode
+      DispatchSelectionStateChangedEvent(GetSelection(),
+                                         SelectionState::Taponcaret);
+      return NS_OK;
     }
   } else {
     nsIContent* focusedContent = GetFocusedContent();
-    if (focusedContent && focusedContent->GetTextEditorRootContent()) {
-      nsIDOMWindow* win = mPresShell->GetDocument()->GetWindow();
-      if (win) {
-        fm->ClearFocus(win);
+    if (focusedContent) {
+      // Clear focus if content was editable element, or contentEditable.
+      nsGenericHTMLElement* focusedGeneric =
+        nsGenericHTMLElement::FromContent(focusedContent);
+      if (focusedContent->GetTextEditorRootContent() ||
+          (focusedGeneric && focusedGeneric->IsContentEditable())) {
+        nsIDOMWindow* win = mPresShell->GetDocument()->GetWindow();
+        if (win) {
+          fm->ClearFocus(win);
+        }
       }
     }
   }
@@ -603,7 +653,9 @@ SelectionCarets::SelectWord()
 
   // Clear maintain selection otherwise we cannot select less than a word
   nsRefPtr<nsFrameSelection> fs = GetFrameSelection();
-  fs->MaintainSelection();
+  if (fs) {
+    fs->MaintainSelection();
+  }
   return rs;
 }
 
@@ -651,9 +703,10 @@ CompareRangeWithContentOffset(nsRange* aRange,
   nsPeekOffsetStruct pos(eSelectCluster,
                          dir,
                          offset,
-                         0,
+                         nsPoint(0, 0),
                          true,
                          true,  //limit on scrolled views
+                         false,
                          false,
                          false);
   nsresult rv = theFrame->PeekOffset(&pos);
@@ -693,6 +746,9 @@ SelectionCarets::DragSelection(const nsPoint &movePoint)
   }
 
   nsRefPtr<nsFrameSelection> fs = GetFrameSelection();
+  if (!fs) {
+    return nsEventStatus_eConsumeNoDefault;
+  }
 
   nsresult result;
   nsIFrame *newFrame = nullptr;
@@ -717,13 +773,19 @@ SelectionCarets::DragSelection(const nsPoint &movePoint)
   }
 
   nsRefPtr<dom::Selection> selection = GetSelection();
-  int32_t rangeCount = selection->GetRangeCount();
+  if (!selection) {
+    return nsEventStatus_eConsumeNoDefault;
+  }
+
+  int32_t rangeCount = selection->RangeCount();
   if (rangeCount <= 0) {
     return nsEventStatus_eConsumeNoDefault;
   }
 
+  // Limit the drag behavior not to cross the end of last selection range
+  // when drag the start frame and vice versa
   nsRefPtr<nsRange> range = mDragMode == START_FRAME ?
-    selection->GetRangeAt(0) : selection->GetRangeAt(rangeCount - 1);
+    selection->GetRangeAt(rangeCount - 1) : selection->GetRangeAt(0);
   if (!CompareRangeWithContentOffset(range, fs, offsets, mDragMode)) {
     return nsEventStatus_eConsumeNoDefault;
   }
@@ -733,6 +795,9 @@ SelectionCarets::DragSelection(const nsPoint &movePoint)
   if (!anchorFrame) {
     return nsEventStatus_eConsumeNoDefault;
   }
+
+  // Clear maintain selection so that we can drag caret freely.
+  fs->MaintainSelection(eSelectNoAmount);
 
   // Move caret postion.
   nsIFrame *scrollable =
@@ -767,12 +832,19 @@ SelectionCarets::GetCaretYCenterPosition()
   }
 
   nsRefPtr<dom::Selection> selection = GetSelection();
-  int32_t rangeCount = selection->GetRangeCount();
+  if (!selection) {
+    return 0;
+  }
+
+  int32_t rangeCount = selection->RangeCount();
   if (rangeCount <= 0) {
     return 0;
   }
 
   nsRefPtr<nsFrameSelection> fs = GetFrameSelection();
+  if (!fs) {
+    return 0;
+  }
 
   MOZ_ASSERT(mDragMode != NONE);
   nsCOMPtr<nsIContent> node;
@@ -805,18 +877,22 @@ void
 SelectionCarets::SetSelectionDragState(bool aState)
 {
   nsRefPtr<nsFrameSelection> fs = GetFrameSelection();
-  fs->SetDragState(aState);
+  if (fs) {
+    fs->SetDragState(aState);
+  }
 }
 
 void
-SelectionCarets::SetSelectionDirection(bool aForward)
+SelectionCarets::SetSelectionDirection(nsDirection aDir)
 {
   nsRefPtr<dom::Selection> selection = GetSelection();
-  selection->SetDirection(aForward ? eDirNext : eDirPrevious);
+  if (selection) {
+    selection->AdjustAnchorFocusForMultiRange(aDir);
+  }
 }
 
 static void
-SetFramePos(dom::Element* aElement, const nsPoint& aPosition)
+SetFramePos(dom::Element* aElement, const nsRect& aCaretRect)
 {
   if (!aElement) {
     return;
@@ -824,9 +900,11 @@ SetFramePos(dom::Element* aElement, const nsPoint& aPosition)
 
   nsAutoString styleStr;
   styleStr.AppendLiteral("left: ");
-  styleStr.AppendFloat(nsPresContext::AppUnitsToFloatCSSPixels(aPosition.x));
+  styleStr.AppendFloat(nsPresContext::AppUnitsToFloatCSSPixels(aCaretRect.Center().x));
   styleStr.AppendLiteral("px; top: ");
-  styleStr.AppendFloat(nsPresContext::AppUnitsToFloatCSSPixels(aPosition.y));
+  styleStr.AppendFloat(nsPresContext::AppUnitsToFloatCSSPixels(aCaretRect.y));
+  styleStr.AppendLiteral("px; padding-top: ");
+  styleStr.AppendFloat(nsPresContext::AppUnitsToFloatCSSPixels(aCaretRect.height));
   styleStr.AppendLiteral("px;");
 
   SELECTIONCARETS_LOG_STATIC("Set style: %s",
@@ -836,17 +914,19 @@ SetFramePos(dom::Element* aElement, const nsPoint& aPosition)
 }
 
 void
-SelectionCarets::SetStartFramePos(const nsPoint& aPosition)
+SelectionCarets::SetStartFramePos(const nsRect& aCaretRect)
 {
-  SELECTIONCARETS_LOG("x=%d, y=%d", aPosition.x, aPosition.y);
-  SetFramePos(mPresShell->GetSelectionCaretsStartElement(), aPosition);
+  SELECTIONCARETS_LOG("x=%d, y=%d, w=%d, h=%d",
+    aCaretRect.x, aCaretRect.y, aCaretRect.width, aCaretRect.height);
+  SetFramePos(mPresShell->GetSelectionCaretsStartElement(), aCaretRect);
 }
 
 void
-SelectionCarets::SetEndFramePos(const nsPoint& aPosition)
+SelectionCarets::SetEndFramePos(const nsRect& aCaretRect)
 {
-  SELECTIONCARETS_LOG("x=%d, y=%d", aPosition.y, aPosition.y);
-  SetFramePos(mPresShell->GetSelectionCaretsEndElement(), aPosition);
+  SELECTIONCARETS_LOG("x=%d, y=%d, w=%d, h=%d",
+    aCaretRect.x, aCaretRect.y, aCaretRect.width, aCaretRect.height);
+  SetFramePos(mPresShell->GetSelectionCaretsEndElement(), aCaretRect);
 }
 
 bool
@@ -929,10 +1009,117 @@ SelectionCarets::GetFrameSelection()
     if (!focusFrame) {
       return nullptr;
     }
-    return focusFrame->GetFrameSelection();
+
+    // Prevent us from touching the nsFrameSelection associated to other
+    // PresShell.
+    nsRefPtr<nsFrameSelection> fs = focusFrame->GetFrameSelection();
+    if (!fs || fs->GetShell() != mPresShell) {
+      return nullptr;
+    }
+
+    return fs.forget();
   } else {
     return mPresShell->FrameSelection();
   }
+}
+
+static dom::Sequence<SelectionState>
+GetSelectionStates(int16_t aReason)
+{
+  dom::Sequence<SelectionState> states;
+  if (aReason & nsISelectionListener::DRAG_REASON) {
+    states.AppendElement(SelectionState::Drag);
+  }
+  if (aReason & nsISelectionListener::MOUSEDOWN_REASON) {
+    states.AppendElement(SelectionState::Mousedown);
+  }
+  if (aReason & nsISelectionListener::MOUSEUP_REASON) {
+    states.AppendElement(SelectionState::Mouseup);
+  }
+  if (aReason & nsISelectionListener::KEYPRESS_REASON) {
+    states.AppendElement(SelectionState::Keypress);
+  }
+  if (aReason & nsISelectionListener::SELECTALL_REASON) {
+    states.AppendElement(SelectionState::Selectall);
+  }
+  if (aReason & nsISelectionListener::COLLAPSETOSTART_REASON) {
+    states.AppendElement(SelectionState::Collapsetostart);
+  }
+  if (aReason & nsISelectionListener::COLLAPSETOEND_REASON) {
+    states.AppendElement(SelectionState::Collapsetoend);
+  }
+  return states;
+}
+
+void
+SelectionCarets::DispatchCustomEvent(const nsAString& aEvent)
+{
+  SELECTIONCARETS_LOG("dispatch %s event", NS_ConvertUTF16toUTF8(aEvent).get());
+  bool defaultActionEnabled = true;
+  nsIDocument* doc = mPresShell->GetDocument();
+  MOZ_ASSERT(doc);
+  nsContentUtils::DispatchTrustedEvent(doc,
+                                       ToSupports(doc),
+                                       aEvent,
+                                       true,
+                                       false,
+                                       &defaultActionEnabled);
+}
+
+void
+SelectionCarets::DispatchSelectionStateChangedEvent(Selection* aSelection,
+                                                    SelectionState aState)
+{
+  dom::Sequence<SelectionState> state;
+  state.AppendElement(aState);
+  DispatchSelectionStateChangedEvent(aSelection, state);
+}
+
+void
+SelectionCarets::DispatchSelectionStateChangedEvent(Selection* aSelection,
+                                                    const Sequence<SelectionState>& aStates)
+{
+  nsIDocument* doc = mPresShell->GetDocument();
+
+  MOZ_ASSERT(doc);
+
+  SelectionStateChangedEventInit init;
+  init.mBubbles = true;
+
+  if (aSelection) {
+    // XXX: Do we need to flush layout?
+    mPresShell->FlushPendingNotifications(Flush_Layout);
+    nsRect rect = nsContentUtils::GetSelectionBoundingRect(aSelection);
+    nsRefPtr<DOMRect>domRect = new DOMRect(ToSupports(doc));
+
+    domRect->SetLayoutRect(rect);
+    init.mBoundingClientRect = domRect;
+    init.mVisible = mSelectionVisibleInScrollFrames;
+
+    aSelection->Stringify(init.mSelectedText);
+  }
+  init.mStates = aStates;
+
+  nsRefPtr<SelectionStateChangedEvent> event =
+    SelectionStateChangedEvent::Constructor(doc, NS_LITERAL_STRING("mozselectionstatechanged"), init);
+
+  event->SetTrusted(true);
+  event->GetInternalNSEvent()->mFlags.mOnlyChromeDispatch = true;
+  bool ret;
+  doc->DispatchEvent(event, &ret);
+}
+
+void
+SelectionCarets::NotifyBlur(bool aIsLeavingDocument)
+{
+  SELECTIONCARETS_LOG("Send out the blur event");
+  SetVisibility(false);
+  if (aIsLeavingDocument) {
+    CancelLongTapDetector();
+  }
+  CancelScrollEndDetector();
+  mInAsyncPanZoomGesture = false;
+  DispatchSelectionStateChangedEvent(nullptr, SelectionState::Blur);
 }
 
 nsresult
@@ -941,18 +1128,27 @@ SelectionCarets::NotifySelectionChanged(nsIDOMDocument* aDoc,
                                         int16_t aReason)
 {
   SELECTIONCARETS_LOG("aSel (%p), Reason=%d", aSel, aReason);
+
+  if (aSel != GetSelection()) {
+    SELECTIONCARETS_LOG("Return for selection mismatch!");
+    return NS_OK;
+  }
+
   if (!aReason || (aReason & (nsISelectionListener::DRAG_REASON |
-                               nsISelectionListener::KEYPRESS_REASON |
-                               nsISelectionListener::MOUSEDOWN_REASON))) {
+                              nsISelectionListener::KEYPRESS_REASON |
+                              nsISelectionListener::MOUSEDOWN_REASON))) {
     SetVisibility(false);
   } else {
     UpdateSelectionCarets();
   }
+
+  DispatchSelectionStateChangedEvent(static_cast<Selection*>(aSel),
+                                     GetSelectionStates(aReason));
   return NS_OK;
 }
 
 static void
-DispatchScrollViewChangeEvent(nsIPresShell *aPresShell, const dom::ScrollState aState, const mozilla::CSSIntPoint aScrollPos)
+DispatchScrollViewChangeEvent(nsIPresShell *aPresShell, const dom::ScrollState aState)
 {
   nsCOMPtr<nsIDocument> doc = aPresShell->GetDocument();
   if (doc) {
@@ -961,8 +1157,6 @@ DispatchScrollViewChangeEvent(nsIPresShell *aPresShell, const dom::ScrollState a
     detail.mBubbles = true;
     detail.mCancelable = false;
     detail.mState = aState;
-    detail.mScrollX = aScrollPos.x;
-    detail.mScrollY = aScrollPos.y;
     nsRefPtr<ScrollViewChangeEvent> event =
       ScrollViewChangeEvent::Constructor(doc, NS_LITERAL_STRING("scrollviewchange"), detail);
 
@@ -973,41 +1167,75 @@ DispatchScrollViewChangeEvent(nsIPresShell *aPresShell, const dom::ScrollState a
 }
 
 void
-SelectionCarets::AsyncPanZoomStarted(const mozilla::CSSIntPoint aScrollPos)
+SelectionCarets::AsyncPanZoomStarted()
 {
-  SetVisibility(false);
+  if (mVisible) {
+    mInAsyncPanZoomGesture = true;
+    SetVisibility(false);
 
-  SELECTIONCARETS_LOG("Dispatch scroll started with position x=%d, y=%d",
-                      aScrollPos.x, aScrollPos.y);
-  DispatchScrollViewChangeEvent(mPresShell, dom::ScrollState::Started, aScrollPos);
+    SELECTIONCARETS_LOG("Dispatch scroll started");
+    DispatchScrollViewChangeEvent(mPresShell, dom::ScrollState::Started);
+  } else {
+    nsRefPtr<dom::Selection> selection = GetSelection();
+    if (selection && selection->RangeCount() && selection->IsCollapsed()) {
+      mInAsyncPanZoomGesture = true;
+      DispatchScrollViewChangeEvent(mPresShell, dom::ScrollState::Started);
+    }
+  }
 }
 
 void
-SelectionCarets::AsyncPanZoomStopped(const mozilla::CSSIntPoint aScrollPos)
+SelectionCarets::AsyncPanZoomStopped()
 {
-  UpdateSelectionCarets();
+  if (mInAsyncPanZoomGesture) {
+    mInAsyncPanZoomGesture = false;
+    SELECTIONCARETS_LOG("Update selection carets after APZ is stopped!");
+    UpdateSelectionCarets();
 
-  SELECTIONCARETS_LOG("Dispatch scroll stopped with position x=%d, y=%d",
-                      aScrollPos.x, aScrollPos.y);
-  DispatchScrollViewChangeEvent(mPresShell, dom::ScrollState::Stopped, aScrollPos);
+    // SelectionStateChangedEvent should be dispatched before ScrollViewChangeEvent.
+    DispatchSelectionStateChangedEvent(GetSelection(),
+                                       SelectionState::Updateposition);
+
+    SELECTIONCARETS_LOG("Dispatch scroll stopped");
+
+    DispatchScrollViewChangeEvent(mPresShell, dom::ScrollState::Stopped);
+  }
 }
 
 void
 SelectionCarets::ScrollPositionChanged()
 {
-  if (!mAsyncPanZoomEnabled && mVisible) {
-    SetVisibility(false);
-    //TODO: handling scrolling for selection bubble when APZ is off
+  if (mVisible) {
+    if (!mUseAsyncPanZoom) {
+      SetVisibility(false);
+      //TODO: handling scrolling for selection bubble when APZ is off
+      // Dispatch event to notify gaia to hide selection bubble.
+      // Positions will be updated when scroll is end, so no need to calculate
+      // and keep scroll positions here. An arbitrary (0, 0) is sent instead.
+      DispatchScrollViewChangeEvent(mPresShell, dom::ScrollState::Started);
 
-    SELECTIONCARETS_LOG("Launch scroll end detector");
-    LaunchScrollEndDetector();
+      SELECTIONCARETS_LOG("Launch scroll end detector");
+      LaunchScrollEndDetector();
+    } else {
+      if (!mInAsyncPanZoomGesture) {
+        UpdateSelectionCarets();
+        DispatchSelectionStateChangedEvent(GetSelection(),
+                                           SelectionState::Updateposition);
+      }
+    }
+  } else {
+    nsRefPtr<dom::Selection> selection = GetSelection();
+    if (selection && selection->RangeCount() && selection->IsCollapsed()) {
+      DispatchSelectionStateChangedEvent(selection,
+                                         SelectionState::Updateposition);
+    }
   }
 }
 
 void
 SelectionCarets::LaunchLongTapDetector()
 {
-  if (mAsyncPanZoomEnabled) {
+  if (!sSelectionCaretDetectsLongTap || mUseAsyncPanZoom) {
     return;
   }
 
@@ -1029,7 +1257,7 @@ SelectionCarets::LaunchLongTapDetector()
 void
 SelectionCarets::CancelLongTapDetector()
 {
-  if (mAsyncPanZoomEnabled) {
+  if (mUseAsyncPanZoom) {
     return;
   }
 
@@ -1049,7 +1277,11 @@ SelectionCarets::FireLongTap(nsITimer* aTimer, void* aSelectionCarets)
                   "Unexpected timer");
 
   SELECTIONCARETS_LOG_STATIC("SelectWord from non-APZ");
-  self->SelectWord();
+  nsresult wordSelected = self->SelectWord();
+
+  if (NS_FAILED(wordSelected)) {
+    SELECTIONCARETS_LOG_STATIC("SelectWord from non-APZ failed!");
+  }
 }
 
 void
@@ -1068,6 +1300,18 @@ SelectionCarets::LaunchScrollEndDetector()
                                                 nsITimer::TYPE_ONE_SHOT);
 }
 
+void
+SelectionCarets::CancelScrollEndDetector()
+{
+  if (!mScrollEndDetectorTimer) {
+    return;
+  }
+
+  SELECTIONCARETS_LOG("Cancel scroll end detector!");
+  mScrollEndDetectorTimer->Cancel();
+}
+
+
 /* static */void
 SelectionCarets::FireScrollEnd(nsITimer* aTimer, void* aSelectionCarets)
 {
@@ -1076,8 +1320,9 @@ SelectionCarets::FireScrollEnd(nsITimer* aTimer, void* aSelectionCarets)
                   "Unexpected timer");
 
   SELECTIONCARETS_LOG_STATIC("Update selection carets!");
-  self->SetVisibility(true);
   self->UpdateSelectionCarets();
+  self->DispatchSelectionStateChangedEvent(self->GetSelection(),
+                                           SelectionState::Updateposition);
 }
 
 NS_IMETHODIMP
@@ -1086,6 +1331,19 @@ SelectionCarets::Reflow(DOMHighResTimeStamp aStart, DOMHighResTimeStamp aEnd)
   if (mVisible) {
     SELECTIONCARETS_LOG("Update selection carets after reflow!");
     UpdateSelectionCarets();
+
+    // We don't care selection state when we're at drag mode. We always hide
+    // bubble in drag mode. So, don't dispatch event here.
+    if (mDragMode == NONE) {
+      DispatchSelectionStateChangedEvent(GetSelection(),
+                                         SelectionState::Updateposition);
+    }
+  } else {
+    nsRefPtr<dom::Selection> selection = GetSelection();
+    if (selection && selection->RangeCount() && selection->IsCollapsed()) {
+      DispatchSelectionStateChangedEvent(selection,
+                                         SelectionState::Updateposition);
+    }
   }
   return NS_OK;
 }

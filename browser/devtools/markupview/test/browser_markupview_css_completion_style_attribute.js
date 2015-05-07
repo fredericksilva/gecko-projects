@@ -63,7 +63,7 @@ const TEST_DATA = [
   ['VK_RETURN', 'style="display:  inherit; color :chartreuse !important;"', -1, -1, false]
 ];
 
-let test = asyncTest(function*() {
+add_task(function*() {
   info("Opening the inspector on the test URL");
   let {inspector} = yield addTab(TEST_URL).then(openInspector);
 
@@ -84,8 +84,6 @@ let test = asyncTest(function*() {
   while (inspector.markup.undo.canUndo()) {
     yield undoChange(inspector);
   }
-
-  yield inspector.once("inspector-updated");
 });
 
 function enterData(index, editor, inspector) {
@@ -140,7 +138,7 @@ function* checkData(index, editor, inspector) {
   } else {
     let nodeFront = yield getNodeFront("#node14", inspector);
     let editor = getContainerForNodeFront(nodeFront, inspector).editor;
-    let attr = editor.attrs["style"].querySelector(".editable");
+    let attr = editor.attrElements.get("style").querySelector(".editable");
     is(attr.textContent, completion, "Correct value is persisted after pressing Enter");
   }
 }

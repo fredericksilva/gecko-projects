@@ -37,8 +37,9 @@ namespace android {
 // ----------------------------------------------------------------------------
 
 class GonkBufferQueue : public BnGraphicBufferProducer,
-                    public BnGonkGraphicBufferConsumer,
-                    private IBinder::DeathRecipient {
+                        public BnGonkGraphicBufferConsumer,
+                        private IBinder::DeathRecipient
+{
     typedef mozilla::layers::TextureClient TextureClient;
 
 public:
@@ -321,7 +322,7 @@ public:
     virtual status_t setTransformHint(uint32_t hint);
 
     // dump our state in a String
-    virtual void dump(String8& result, const char* prefix) const;
+    virtual void dumpToString(String8& result, const char* prefix) const;
 
      mozilla::TemporaryRef<TextureClient> getTextureClientFromBuffer(ANativeWindowBuffer* buffer);
 
@@ -334,7 +335,6 @@ private:
 
     // freeAllBuffersLocked frees the GraphicBuffer and sync resources for
     // all slots.
-    //void freeAllBuffersLocked();
     void freeAllBuffersLocked();
 
     // setDefaultMaxBufferCountLocked sets the maximum number of buffer slots

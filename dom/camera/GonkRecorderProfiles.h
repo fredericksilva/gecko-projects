@@ -5,7 +5,12 @@
 #ifndef DOM_CAMERA_GONK_RECORDER_PROFILES_H
 #define DOM_CAMERA_GONK_RECORDER_PROFILES_H
 
+#ifdef MOZ_WIDGET_GONK
 #include <media/MediaProfiles.h>
+#else
+#include "FallbackCameraPlatform.h"
+#endif
+
 #include "ICameraControl.h"
 #include "nsClassHashtable.h"
 #include "nsRefPtrHashtable.h"
@@ -37,14 +42,14 @@ template<class A, class V>
 class GonkRecorderProfileBase : public ICameraControl::RecorderProfile
 {
 public:
-  GonkRecorderProfileBase(uint32_t aCameraId, uint32_t aProfileIndex, const nsAString& aName)
-    : RecorderProfile(aName)
-    , mAudio(aCameraId, aProfileIndex)
-    , mVideo(aCameraId, aProfileIndex)
+  GonkRecorderProfileBase(uint32_t aCameraId, int aQuality)
+    : RecorderProfile()
+    , mAudio(aCameraId, aQuality)
+    , mVideo(aCameraId, aQuality)
   { }
 
-  virtual const Audio& GetAudio() const MOZ_OVERRIDE { return mAudio; }
-  virtual const Video& GetVideo() const MOZ_OVERRIDE { return mVideo; }
+  virtual const Audio& GetAudio() const override { return mAudio; }
+  virtual const Video& GetVideo() const override { return mVideo; }
 
 protected:
   virtual ~GonkRecorderProfileBase() { }
@@ -58,7 +63,7 @@ protected:
 class GonkRecorderVideo : public ICameraControl::RecorderProfile::Video
 {
 public:
-  GonkRecorderVideo(uint32_t aCameraId, uint32_t aProfileIndex);
+  GonkRecorderVideo(uint32_t aCameraId, int aQuality);
   virtual ~GonkRecorderVideo() { }
 
   android::video_encoder GetPlatformEncoder() const { return mPlatformEncoder; }
@@ -69,7 +74,7 @@ protected:
   static bool Translate(android::video_encoder aCodec, nsAString& aCodecName);
 
   uint32_t mCameraId;
-  uint32_t mProfileIndex;
+  int mQuality;
   bool mIsValid;
   android::video_encoder mPlatformEncoder;
 };
@@ -80,7 +85,7 @@ protected:
 class GonkRecorderAudio : public ICameraControl::RecorderProfile::Audio
 {
 public:
-  GonkRecorderAudio(uint32_t aCameraId, uint32_t aProfileIndex);
+  GonkRecorderAudio(uint32_t aCameraId, int aQuality);
   virtual ~GonkRecorderAudio() { }
 
   android::audio_encoder GetPlatformEncoder() const { return mPlatformEncoder; }
@@ -91,7 +96,7 @@ protected:
   static bool Translate(android::audio_encoder aCodec, nsAString& aCodecName);
 
   uint32_t mCameraId;
-  uint32_t mProfileIndex;
+  int mQuality;
   bool mIsValid;
   android::audio_encoder mPlatformEncoder;
 };
@@ -109,6 +114,7 @@ public:
   static nsresult GetAll(uint32_t aCameraId,
                          nsTArray<nsRefPtr<ICameraControl::RecorderProfile>>& aProfiles);
 
+#ifdef MOZ_WIDGET_GONK
   // Configures the specified recorder using the specified profile.
   //
   // Return values:
@@ -118,11 +124,11 @@ public:
   static nsresult ConfigureRecorder(android::GonkRecorder& aRecorder,
                                     uint32_t aCameraId,
                                     const nsAString& aProfileName);
+#endif
 
 protected:
   GonkRecorderProfile(uint32_t aCameraId,
-                      uint32_t aProfileIndex,
-                      const nsAString& aName);
+                      int aQuality);
 
   int GetProfileParameter(const char* aParameter);
 
@@ -130,14 +136,18 @@ protected:
   bool GetMimeType(android::output_format aContainer, nsAString& aMimeType);
   bool IsValid() const { return mIsValid; };
 
+#ifdef MOZ_WIDGET_GONK
   nsresult ConfigureRecorder(android::GonkRecorder& aRecorder);
+#endif
+  static already_AddRefed<GonkRecorderProfile> CreateProfile(uint32_t aCameraId,
+                                                             int aQuality);
   static ProfileHashtable* GetProfileHashtable(uint32_t aCameraId);
   static PLDHashOperator Enumerate(const nsAString& aProfileName,
                                    GonkRecorderProfile* aProfile,
                                    void* aUserArg);
 
   uint32_t mCameraId;
-  uint32_t mProfileIndex;
+  int mQuality;
   bool mIsValid;
   android::output_format mOutputFormat;
 

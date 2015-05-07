@@ -145,27 +145,22 @@ gfxGraphiteShaper::ShapeText(gfxContext      *aContext,
         grLang = MakeGraphiteLangTag(style->languageOverride);
     } else if (entry->mLanguageOverride) {
         grLang = MakeGraphiteLangTag(entry->mLanguageOverride);
-    } else {
+    } else if (style->explicitLanguage) {
         nsAutoCString langString;
         style->language->ToUTF8String(langString);
         grLang = GetGraphiteTagForLang(langString);
     }
     gr_feature_val *grFeatures = gr_face_featureval_for_lang(mGrFace, grLang);
 
-    // if style contains font-specific features
-    nsDataHashtable<nsUint32HashKey,uint32_t> mergedFeatures;
-
-    if (MergeFontFeatures(style,
-                          mFont->GetFontEntry()->mFeatureSettings,
-                          aShapedText->DisableLigatures(),
-                          mFont->GetFontEntry()->FamilyName(),
-                          mFallbackToSmallCaps,
-                          mergedFeatures))
-    {
-        // enumerate result and insert into Graphite feature list
-        GrFontFeatures f = {mGrFace, grFeatures};
-        mergedFeatures.Enumerate(AddFeature, &f);
-    }
+    // insert any merged features into Graphite feature list
+    GrFontFeatures f = {mGrFace, grFeatures};
+    MergeFontFeatures(style,
+                      mFont->GetFontEntry()->mFeatureSettings,
+                      aShapedText->DisableLigatures(),
+                      mFont->GetFontEntry()->FamilyName(),
+                      mFallbackToSmallCaps,
+                      AddFeature,
+                      &f);
 
     size_t numChars = gr_count_unicode_characters(gr_utf16,
                                                   aText, aText + aLength,

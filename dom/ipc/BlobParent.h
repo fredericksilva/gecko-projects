@@ -1,3 +1,5 @@
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -14,7 +16,6 @@
 
 template <class, class> class nsDataHashtable;
 class nsIDHashKey;
-class nsIDOMBlob;
 class nsIEventTarget;
 class nsIRemoteBlob;
 template <class> class nsRevocableEventPtr;
@@ -37,7 +38,7 @@ class FileImpl;
 class nsIContentParent;
 class PBlobStreamParent;
 
-class BlobParent MOZ_FINAL
+class BlobParent final
   : public PBlobParent
 {
   typedef mozilla::ipc::PBackgroundParent PBackgroundParent;
@@ -203,36 +204,42 @@ private:
 
   // These methods are only called by the IPDL message machinery.
   virtual void
-  ActorDestroy(ActorDestroyReason aWhy) MOZ_OVERRIDE;
+  ActorDestroy(ActorDestroyReason aWhy) override;
 
   virtual PBlobStreamParent*
   AllocPBlobStreamParent(const uint64_t& aStart,
-                         const uint64_t& aLength) MOZ_OVERRIDE;
+                         const uint64_t& aLength) override;
 
   virtual bool
   RecvPBlobStreamConstructor(PBlobStreamParent* aActor,
                              const uint64_t& aStart,
-                             const uint64_t& aLength) MOZ_OVERRIDE;
+                             const uint64_t& aLength) override;
 
   virtual bool
-  DeallocPBlobStreamParent(PBlobStreamParent* aActor) MOZ_OVERRIDE;
+  DeallocPBlobStreamParent(PBlobStreamParent* aActor) override;
 
   virtual bool
-  RecvResolveMystery(const ResolveMysteryParams& aParams) MOZ_OVERRIDE;
+  RecvResolveMystery(const ResolveMysteryParams& aParams) override;
 
   virtual bool
-  RecvWaitForSliceCreation() MOZ_OVERRIDE;
+  RecvBlobStreamSync(const uint64_t& aStart,
+                     const uint64_t& aLength,
+                     InputStreamParams* aParams,
+                     OptionalFileDescriptorSet* aFDs) override;
 
   virtual bool
-  RecvGetFileId(int64_t* aFileId) MOZ_OVERRIDE;
+  RecvWaitForSliceCreation() override;
 
   virtual bool
-  RecvGetFilePath(nsString* aFilePath) MOZ_OVERRIDE;
+  RecvGetFileId(int64_t* aFileId) override;
+
+  virtual bool
+  RecvGetFilePath(nsString* aFilePath) override;
 };
 
 // Only let ContentParent call BlobParent::Startup() and ensure that
 // ContentParent can't access any other BlobParent internals.
-class BlobParent::FriendKey MOZ_FINAL
+class BlobParent::FriendKey final
 {
   friend class ContentParent;
 

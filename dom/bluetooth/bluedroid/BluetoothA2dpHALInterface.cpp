@@ -1,5 +1,5 @@
-/* -*- Mode: c++; c-basic-offset: 2; indent-tabs-mode: nil; tab-width: 40 -*- */
-/* vim: set ts=2 et sw=2 tw=80: */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -26,7 +26,7 @@ DispatchBluetoothA2dpHALResult(
 {
   MOZ_ASSERT(aRes);
 
-  nsRunnable* runnable;
+  nsRefPtr<nsRunnable> runnable;
 
   if (aStatus == STATUS_SUCCESS) {
     runnable = new BluetoothA2dpHALResultRunnable(aRes, aMethod);
@@ -75,6 +75,12 @@ struct BluetoothA2dpHALCallback
     BluetoothA2dpAudioState, const nsAString&>
     AudioStateNotification;
 
+  typedef BluetoothNotificationHALRunnable3<
+    A2dpNotificationHandlerWrapper, void,
+    nsString, uint32_t, uint8_t,
+    const nsAString&, uint32_t, uint8_t>
+    AudioConfigNotification;
+
   // Bluedroid A2DP callbacks
 
   static void
@@ -92,6 +98,16 @@ struct BluetoothA2dpHALCallback
       &BluetoothA2dpNotificationHandler::AudioStateNotification,
       aState, aBdAddr);
   }
+
+#if ANDROID_VERSION >= 21
+  static void
+  AudioConfig(bt_bdaddr_t *aBdAddr, uint32_t aSampleRate, uint8_t aChannelCount)
+  {
+    AudioConfigNotification::Dispatch(
+      &BluetoothA2dpNotificationHandler::AudioConfigNotification,
+      aBdAddr, aSampleRate, aChannelCount);
+  }
+#endif
 };
 
 // Interface
@@ -115,7 +131,10 @@ BluetoothA2dpHALInterface::Init(
   static btav_callbacks_t sCallbacks = {
     sizeof(sCallbacks),
     BluetoothA2dpHALCallback::ConnectionState,
-    BluetoothA2dpHALCallback::AudioState
+    BluetoothA2dpHALCallback::AudioState,
+#if ANDROID_VERSION >= 21
+    BluetoothA2dpHALCallback::AudioConfig
+#endif
   };
 
   sA2dpNotificationHandler = aNotificationHandler;

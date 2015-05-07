@@ -49,8 +49,7 @@ CreateSharedRGBImage(ImageContainer *aImageContainer,
   }
 
   nsRefPtr<SharedRGBImage> rgbImage = static_cast<SharedRGBImage*>(image.get());
-  if (!rgbImage->Allocate(gfx::ToIntSize(aSize),
-                          gfx::ImageFormatToSurfaceFormat(aImageFormat))) {
+  if (!rgbImage->Allocate(aSize, gfx::ImageFormatToSurfaceFormat(aImageFormat))) {
     NS_WARNING("Failed to allocate a shared image");
     return nullptr;
   }
@@ -70,8 +69,8 @@ SharedRGBImage::~SharedRGBImage()
 
   if (mCompositable->GetAsyncID() != 0 &&
       !InImageBridgeChildThread()) {
-    ImageBridgeChild::DispatchReleaseTextureClient(mTextureClient.forget().drop());
-    ImageBridgeChild::DispatchReleaseImageClient(mCompositable.forget().drop());
+    ImageBridgeChild::DispatchReleaseTextureClient(mTextureClient.forget().take());
+    ImageBridgeChild::DispatchReleaseImageClient(mCompositable.forget().take());
   }
 }
 

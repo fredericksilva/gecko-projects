@@ -50,7 +50,7 @@ let gTests = [
   setup: function () { },
   run: function ()
   {
-    let doc = gBrowser.selectedTab.linkedBrowser.contentDocument;
+    let doc = gBrowser.selectedBrowser.contentDocument;
     let snippetsElt = doc.getElementById("snippets");
     ok(snippetsElt, "Found snippets element")
     is(snippetsElt.getElementsByTagName("span").length, 1,
@@ -67,7 +67,7 @@ let gTests = [
   },
   run: function (aSnippetsMap)
   {
-    let doc = gBrowser.selectedTab.linkedBrowser.contentDocument;
+    let doc = gBrowser.selectedBrowser.contentDocument;
 
     let snippetsElt = doc.getElementById("snippets");
     ok(snippetsElt, "Found snippets element");
@@ -75,25 +75,6 @@ let gTests = [
        "A default snippet is present.");
 
     aSnippetsMap.delete("snippets");
-  }
-},
-
-{
-  desc: "Check that search engine logo has alt text",
-  setup: function () { },
-  run: function ()
-  {
-    let doc = gBrowser.selectedTab.linkedBrowser.contentDocument;
-
-    let searchEngineLogoElt = doc.getElementById("searchEngineLogo");
-    ok(searchEngineLogoElt, "Found search engine logo");
-
-    let altText = searchEngineLogoElt.alt;
-    ok(typeof altText == "string" && altText.length > 0,
-       "Search engine logo's alt text is a nonempty string");
-
-    isnot(altText, "undefined",
-          "Search engine logo's alt text shouldn't be the string 'undefined'");
   }
 },
 
@@ -129,7 +110,7 @@ let gTests = [
     let doc = gBrowser.contentDocument;
     let engineName = doc.documentElement.getAttribute("searchEngineName");
     is(engine.name, engineName, "Engine name in DOM should match engine we just added");
-    let mm = gBrowser.selectedTab.linkedBrowser.messageManager;
+    let mm = gBrowser.selectedBrowser.messageManager;
 
     mm.loadFrameScript(TEST_CONTENT_HELPER, false);
 
@@ -194,7 +175,7 @@ let gTests = [
   },
   run: function (aSnippetsMap)
   {
-    let doc = gBrowser.selectedTab.linkedBrowser.contentDocument;
+    let doc = gBrowser.selectedBrowser.contentDocument;
 
     let snippetsElt = doc.getElementById("snippets");
     ok(snippetsElt, "Found snippets element");
@@ -217,7 +198,7 @@ let gTests = [
   setup: function () { },
   run: function (aSnippetsMap)
   {
-    let doc = gBrowser.selectedTab.linkedBrowser.contentDocument;
+    let doc = gBrowser.selectedBrowser.contentDocument;
     let showRights = AboutHomeUtils.showKnowYourRights;
 
     ok(showRights, "AboutHomeUtils.showKnowYourRights should be TRUE");
@@ -239,7 +220,7 @@ let gTests = [
   setup: function () { },
   run: function (aSnippetsMap)
   {
-    let doc = gBrowser.selectedTab.linkedBrowser.contentDocument;
+    let doc = gBrowser.selectedBrowser.contentDocument;
     let rightsData = AboutHomeUtils.knowYourRightsData;
 
     ok(!rightsData, "AboutHomeUtils.knowYourRightsData should be FALSE");
@@ -249,52 +230,6 @@ let gTests = [
     ok(snippetsElt.getElementsByTagName("a")[0].href != "about:rights", "Snippet link should not point to about:rights.");
 
     Services.prefs.clearUserPref("browser.rights.override");
-  }
-},
-
-{
-  desc: "Check that the search UI/ action is updated when the search engine is changed",
-  setup: function() {},
-  run: function()
-  {
-    let currEngine = Services.search.currentEngine;
-    let unusedEngines = [].concat(Services.search.getVisibleEngines()).filter(x => x != currEngine);
-    let searchbar = document.getElementById("searchbar");
-
-    function checkSearchUI(engine) {
-      let doc = gBrowser.selectedTab.linkedBrowser.contentDocument;
-      let searchText = doc.getElementById("searchText");
-      let logoElt = doc.getElementById("searchEngineLogo");
-      let engineName = doc.documentElement.getAttribute("searchEngineName");
-
-      is(engineName, engine.name, "Engine name should've been updated");
-
-      if (!logoElt.parentNode.hidden) {
-        is(logoElt.alt, engineName, "Alt text of logo image should match search engine name")
-      } else {
-        is(searchText.placeholder, engineName, "Placeholder text should match search engine name");
-      }
-    }
-    // Do a sanity check that all attributes are correctly set to begin with
-    checkSearchUI(currEngine);
-
-    let deferred = Promise.defer();
-    promiseBrowserAttributes(gBrowser.selectedTab).then(function() {
-      // Test if the update propagated
-      checkSearchUI(unusedEngines[0]);
-      searchbar.currentEngine = currEngine;
-      deferred.resolve();
-    });
-
-    // The following cleanup function will set currentEngine back to the previous
-    // engine if we fail to do so above.
-    registerCleanupFunction(function() {
-      searchbar.currentEngine = currEngine;
-    });
-    // Set the current search engine to an unused one
-    searchbar.currentEngine = unusedEngines[0];
-    searchbar.select();
-    return deferred.promise;
   }
 },
 
@@ -317,7 +252,7 @@ let gTests = [
 
       // Ready to execute the tests!
       let needle = "Search for something awesome.";
-      let document = gBrowser.selectedTab.linkedBrowser.contentDocument;
+      let document = gBrowser.selectedBrowser.contentDocument;
       let searchText = document.getElementById("searchText");
 
       // We're about to change the search engine. Once the change has
@@ -369,7 +304,7 @@ let gTests = [
   {
     let deferred = Promise.defer();
 
-    let browser = gBrowser.selectedTab.linkedBrowser;
+    let browser = gBrowser.selectedBrowser;
     waitForLoad(() => {
       let button = browser.contentDocument.getElementById("settings");
       ok(button, "Found settings button in test page");
@@ -446,13 +381,63 @@ let gTests = [
   }
 },
 {
+  desc: "Clicking suggestion list while composing",
+  setup: function() {},
+  run: function()
+  {
+    return Task.spawn(function* () {
+      // Start composition and type "x"
+      let input = gBrowser.contentDocument.getElementById("searchText");
+      input.focus();
+      EventUtils.synthesizeComposition({ type: "compositionstart", data: "" },
+                                       gBrowser.contentWindow);
+      EventUtils.synthesizeCompositionChange({
+        composition: {
+          string: "x",
+          clauses: [
+            { length: 1, attr: EventUtils.COMPOSITION_ATTR_RAW_CLAUSE }
+          ]
+        },
+        caret: { start: 1, length: 0 }
+      }, gBrowser.contentWindow);
+
+      // Wait for the search suggestions to become visible.
+      let table =
+        gBrowser.contentDocument.getElementById("searchSuggestionTable");
+      let deferred = Promise.defer();
+      let observer = new MutationObserver(() => {
+        if (input.getAttribute("aria-expanded") == "true") {
+          observer.disconnect();
+          ok(!table.hidden, "Search suggestion table unhidden");
+          deferred.resolve();
+        }
+      });
+      observer.observe(input, {
+        attributes: true,
+        attributeFilter: ["aria-expanded"],
+      });
+      yield deferred.promise;
+
+      // Click the second suggestion.
+      let expectedURL = Services.search.currentEngine.
+                        getSubmission("xbar", null, "homepage").
+                        uri.spec;
+      let loadPromise = waitForDocLoadAndStopIt(expectedURL);
+      let row = table.children[1];
+      EventUtils.sendMouseEvent({ type: "mousedown" }, row, gBrowser.contentWindow);
+      yield loadPromise;
+      ok(input.value == "xbar", "Suggestion is selected");
+    });
+  }
+},
+{
   desc: "Cmd+k should focus the search box in the page when the search box in the toolbar is absent",
   setup: function () {
     // Remove the search bar from toolbar
     CustomizableUI.removeWidgetFromArea("search-container");
   },
   run: Task.async(function* () {
-    let doc = gBrowser.selectedTab.linkedBrowser.contentDocument;
+    let doc = gBrowser.selectedBrowser.contentDocument;
     let logo = doc.getElementById("brandLogo");
     let searchInput = doc.getElementById("searchText");
 
@@ -469,7 +454,7 @@ let gTests = [
   desc: "Cmd+k should focus the search box in the toolbar when it's present",
   setup: function () {},
   run: Task.async(function* () {
-    let logo = gBrowser.selectedTab.linkedBrowser.contentDocument.getElementById("brandLogo");
+    let logo = gBrowser.selectedBrowser.contentDocument.getElementById("brandLogo");
     let doc = window.document;
     let searchInput = doc.getElementById("searchbar").textbox.inputField;
 
@@ -485,12 +470,32 @@ let gTests = [
   desc: "Sync button should open about:accounts page with `abouthome` entrypoint",
   setup: function () {},
   run: Task.async(function* () {
-    let syncButton = gBrowser.selectedTab.linkedBrowser.contentDocument.getElementById("sync");
+    let syncButton = gBrowser.selectedBrowser.contentDocument.getElementById("sync");
     yield EventUtils.synthesizeMouseAtCenter(syncButton, {}, gBrowser.contentWindow);
 
     yield promiseTabLoadEvent(gBrowser.selectedTab, null, "load");
     is(gBrowser.currentURI.spec, "about:accounts?entrypoint=abouthome",
       "Entry point should be `abouthome`.");
+  })
+},
+{
+  desc: "Clicking the icon should open the popup",
+  setup: function () {},
+  run: Task.async(function* () {
+    let doc = gBrowser.selectedBrowser.contentDocument;
+    let searchIcon = doc.getElementById("searchIcon");
+    let panel = window.document.getElementById("abouthome-search-panel");
+
+    info("Waiting for popup to open");
+    EventUtils.synthesizeMouseAtCenter(searchIcon, {}, gBrowser.selectedBrowser.contentWindow);
+    yield promiseWaitForEvent(panel, "popupshown");
+    info("Saw popup open");
+
+    let promise = promisePrefsOpen();
+    let item = window.document.getElementById("abouthome-search-panel-manage");
+    EventUtils.synthesizeMouseAtCenter(item, {});
+
+    yield promise;
   })
 }
 
@@ -666,6 +671,45 @@ function waitForLoad(cb) {
     cb();
   }, true);
 }
+
+function promiseWaitForEvent(node, type, capturing) {
+  return new Promise((resolve) => {
+    node.addEventListener(type, function listener(event) {
+      node.removeEventListener(type, listener, capturing);
+      resolve(event);
+    }, capturing);
+  });
+}
+
+let promisePrefsOpen = Task.async(function*() {
+  if (Services.prefs.getBoolPref("browser.preferences.inContent")) {
+    info("Waiting for the preferences tab to open...");
+    let event = yield promiseWaitForEvent(gBrowser.tabContainer, "TabOpen", true);
+    let tab = event.target;
+    yield promiseTabLoadEvent(tab);
+    is(tab.linkedBrowser.currentURI.spec, "about:preferences#search", "Should have seen the prefs tab");
+    gBrowser.removeTab(tab);
+  } else {
+    info("Waiting for the preferences window to open...");
+    yield new Promise(resolve => {
+      let winWatcher = Cc["@mozilla.org/embedcomp/window-watcher;1"].
+                       getService(Ci.nsIWindowWatcher);
+      winWatcher.registerNotification(function onWin(subj, topic, data) {
+        if (topic == "domwindowopened" && subj instanceof Ci.nsIDOMWindow) {
+          subj.addEventListener("load", function onLoad() {
+            subj.removeEventListener("load", onLoad);
+            is(subj.document.documentURI, "chrome://browser/content/preferences/preferences.xul", "Should have seen the prefs window");
+            winWatcher.unregisterNotification(onWin);
+            executeSoon(() => {
+              subj.close();
+              resolve();
+            });
+          });
+        }
+      });
+    });
+  }
+});
 
 function promiseNewEngine(basename) {
   info("Waiting for engine to be added: " + basename);

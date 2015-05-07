@@ -7,7 +7,7 @@
 #include <cstdarg>
 
 #ifdef _WIN32
-#include <io.h>
+#include <windows.h>
 #else
 #include <unistd.h>
 #endif
@@ -46,9 +46,9 @@ private:
 };
 
 void
-FdPrintf(int aFd, const char* aFormat, ...)
+FdPrintf(intptr_t aFd, const char* aFormat, ...)
 {
-  if (aFd == -1) {
+  if (aFd == 0) {
     return;
   }
   char buf[256];
@@ -120,6 +120,12 @@ FdPrintf(int aFd, const char* aFormat, ...)
     f++;
   }
 out:
+#ifdef _WIN32
+  // See comment in FdPrintf.h as to why WriteFile is used.
+  DWORD written;
+  WriteFile(reinterpret_cast<HANDLE>(aFd), buf, b - buf, &written, nullptr);
+#else
   write(aFd, buf, b - buf);
+#endif
   va_end(ap);
 }

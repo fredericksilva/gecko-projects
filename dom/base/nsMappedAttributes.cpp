@@ -1,4 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -187,20 +188,23 @@ nsMappedAttributes::MapRuleInfoInto(nsRuleData* aRuleData)
 /* virtual */ void
 nsMappedAttributes::List(FILE* out, int32_t aIndent) const
 {
-  nsAutoString buffer;
+  nsAutoCString str;
+  nsAutoString tmp;
   uint32_t i;
 
   for (i = 0; i < mAttrCount; ++i) {
     int32_t indent;
-    for (indent = aIndent; indent > 0; --indent)
-      fputs("  ", out);
+    for (indent = aIndent; indent > 0; --indent) {
+      str.AppendLiteral("  ");
+    }
 
-    Attrs()[i].mName.GetQualifiedName(buffer);
-    fputs(NS_LossyConvertUTF16toASCII(buffer).get(), out);
+    Attrs()[i].mName.GetQualifiedName(tmp);
+    LossyAppendUTF16toASCII(tmp, str);
 
-    Attrs()[i].mValue.ToString(buffer);
-    fputs(NS_LossyConvertUTF16toASCII(buffer).get(), out);
-    fputs("\n", out);
+    Attrs()[i].mValue.ToString(tmp);
+    LossyAppendUTF16toASCII(tmp, str);
+    str.Append('\n');
+    fprintf_stderr(out, "%s", str.get());
   }
 }
 #endif

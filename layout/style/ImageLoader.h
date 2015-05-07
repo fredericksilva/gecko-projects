@@ -28,8 +28,9 @@ namespace css {
 
 struct ImageValue;
 
-class ImageLoader MOZ_FINAL : public imgINotificationObserver,
-                              public imgIOnloadBlocker {
+class ImageLoader final : public imgINotificationObserver,
+                          public imgIOnloadBlocker
+{
 public:
   typedef mozilla::css::ImageValue Image;
 
@@ -100,13 +101,10 @@ private:
   DeregisterRequestEnumerator(nsISupports* aKey, FrameSet* aValue,
                               void* aClosure);
 
-  nsresult OnStartContainer(imgIRequest *aRequest, imgIContainer* aImage);
-  nsresult OnStopFrame(imgIRequest *aRequest);
-  nsresult OnImageIsAnimated(imgIRequest *aRequest);
-  nsresult FrameChanged(imgIRequest* aRequest);
-  // Do not override OnDataAvailable since background images are not
-  // displayed incrementally; they are displayed after the entire image
-  // has been loaded.
+  nsresult OnSizeAvailable(imgIRequest* aRequest, imgIContainer* aImage);
+  nsresult OnFrameComplete(imgIRequest* aRequest);
+  nsresult OnImageIsAnimated(imgIRequest* aRequest);
+  nsresult OnFrameUpdate(imgIRequest* aRequest);
 
   // A map of imgIRequests to the nsIFrames that are using them.
   RequestToFrameMap mRequestToFrameMap;

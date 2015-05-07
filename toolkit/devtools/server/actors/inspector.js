@@ -56,15 +56,16 @@ const protocol = require("devtools/server/protocol");
 const {Arg, Option, method, RetVal, types} = protocol;
 const {LongStringActor, ShortLongString} = require("devtools/server/actors/string");
 const {Promise: promise} = Cu.import("resource://gre/modules/Promise.jsm", {});
+const {Task} = Cu.import("resource://gre/modules/Task.jsm", {});
 const object = require("sdk/util/object");
 const events = require("sdk/event/core");
 const {Unknown} = require("sdk/platform/xpcom");
 const {Class} = require("sdk/core/heritage");
-const {PageStyleActor} = require("devtools/server/actors/styles");
+const {PageStyleActor, getFontPreviewData} = require("devtools/server/actors/styles");
 const {
   HighlighterActor,
   CustomHighlighterActor,
-  HIGHLIGHTER_CLASSES
+  isTypeRegistered,
 } = require("devtools/server/actors/highlighter");
 const {getLayoutChangesObserver, releaseLayoutChangesObserver} =
   require("devtools/server/actors/layout");
@@ -216,7 +217,7 @@ var NodeActor = exports.NodeActor = protocol.ActorClass({
 
   isDocumentElement: function() {
     return this.rawNode.ownerDocument &&
-        this.rawNode.ownerDocument.documentElement === this.rawNode;
+           this.rawNode.ownerDocument.documentElement === this.rawNode;
   },
 
   // Returns the JSON representation of this object over the wire.
@@ -284,7 +285,6 @@ var NodeActor = exports.NodeActor = protocol.ActorClass({
   // Estimate the number of children that the walker will return without making
   // a call to children() if possible.
   get numChildren() {
-
     // For pseudo elements, childNodes.length returns 1, but the walker
     // will return 0.
     if (this.isBeforePseudoElement || this.isAfterPseudoElement) {
@@ -323,9 +323,16 @@ var NodeActor = exports.NodeActor = protocol.ActorClass({
    * Is the node's display computed style value other than "none"
    */
   get isDisplayed() {
+    // Consider all non-element nodes as displayed.
+    if (isNodeDead(this) ||
+        this.rawNode.nodeType !== Ci.nsIDOMNode.ELEMENT_NODE ||
+        this.isAfterPseudoElement ||
+        this.isBeforePseudoElement) {
+      return true;
+    }
+
     let style = this.computedStyle;
     if (!style) {
-      // Consider all non-element nodes as displayed
       return true;
     } else {
       return style.display !== "none";
@@ -405,6 +412,10 @@ var NodeActor = exports.NodeActor = protocol.ActorClass({
         // do nothing.
       }
     }
+
+    events.sort((a, b) => {
+      return a.type.localeCompare(b.type);
+    });
 
     return events;
   },
@@ -575,6 +586,16 @@ var NodeActor = exports.NodeActor = protocol.ActorClass({
   }),
 
   /**
+   * Scroll the selected node into view.
+   */
+  scrollIntoView: method(function() {
+    this.rawNode.scrollIntoView(true);
+  }, {
+    request: {},
+    response: {}
+  }),
+
+  /**
    * Get the node's image data if any (for canvas and img nodes).
    * Returns an imageData object with the actual data being a LongStringActor
    * and a size json object.
@@ -662,28 +683,14 @@ var NodeActor = exports.NodeActor = protocol.ActorClass({
    */
   getFontFamilyDataURL: method(function(font, fillStyle="black") {
     let doc = this.rawNode.ownerDocument;
-    let canvas = doc.createElementNS(XHTML_NS, "canvas");
-    let ctx = canvas.getContext("2d");
-    let fontValue = FONT_FAMILY_PREVIEW_TEXT_SIZE + "px " + font + ", serif";
+    let options = {
+      previewText: FONT_FAMILY_PREVIEW_TEXT,
+      previewFontSize: FONT_FAMILY_PREVIEW_TEXT_SIZE,
+      fillStyle: fillStyle
+    }
+    let { dataURL, size } = getFontPreviewData(font, doc, options);
 
-    // Get the correct preview text measurements and set the canvas dimensions
-    ctx.font = fontValue;
-    let textWidth = ctx.measureText(FONT_FAMILY_PREVIEW_TEXT).width;
-    canvas.width = textWidth * 2;
-    canvas.height = FONT_FAMILY_PREVIEW_TEXT_SIZE * 3;
-
-    ctx.font = fontValue;
-    ctx.fillStyle = fillStyle;
-
-    // Align the text to be vertically center in the tooltip and
-    // oversample the canvas for better text quality
-    ctx.textBaseline = "top";
-    ctx.scale(2, 2);
-    ctx.fillText(FONT_FAMILY_PREVIEW_TEXT, 0, Math.round(FONT_FAMILY_PREVIEW_TEXT_SIZE / 3));
-
-    let dataURL = canvas.toDataURL("image/png");
-
-    return { data: LongStringActor(this.conn, dataURL), size: textWidth };
+    return { data: LongStringActor(this.conn, dataURL), size: size };
   }, {
     request: {font: Arg(0, "string"), fillStyle: Arg(1, "nullable:string")},
     response: RetVal("imageData")
@@ -1022,7 +1029,7 @@ var NodeListActor = exports.NodeListActor = protocol.ActorClass({
   form: function() {
     return {
       actor: this.actorID,
-      length: this.nodeList.length
+      length: this.nodeList ? this.nodeList.length : 0
     }
   },
 
@@ -1041,14 +1048,7 @@ var NodeListActor = exports.NodeListActor = protocol.ActorClass({
    */
   items: method(function(start=0, end=this.nodeList.length) {
     let items = [this.walker._ref(item) for (item of Array.prototype.slice.call(this.nodeList, start, end))];
-    let newParents = new Set();
-    for (let item of items) {
-      this.walker.ensurePathToRoot(item, newParents);
-    }
-    return {
-      nodes: items,
-      newParents: [node for (node of newParents)]
-    }
+    return this.walker.attachElements(items);
   }, {
     request: {
       start: Arg(0, "nullable:number"),
@@ -1141,6 +1141,9 @@ var WalkerActor = protocol.ActorClass({
       type: "pickerNodeHovered",
       node: Arg(0, "disconnectedNode")
     },
+    "picker-node-canceled" : {
+      type: "pickerNodeCanceled"
+    },
     "highlighter-ready" : {
       type: "highlighter-ready"
     },
@@ -1166,6 +1169,7 @@ var WalkerActor = protocol.ActorClass({
     this._refMap = new Map();
     this._pendingMutations = [];
     this._activePseudoClassLocks = new Set();
+    this.showAllAnonymousContent = options.showAllAnonymousContent;
 
     this.layoutHelpers = new LayoutHelpers(this.rootWin);
 
@@ -1207,20 +1211,30 @@ var WalkerActor = protocol.ActorClass({
     return "[WalkerActor " + this.actorID + "]";
   },
 
+  getDocumentWalker: function(node, whatToShow) {
+    // Allow native anon content (like <video> controls) if preffed on
+    let nodeFilter = this.showAllAnonymousContent ? allAnonymousContentTreeWalkerFilter : standardTreeWalkerFilter;
+    return new DocumentWalker(node, this.rootWin, whatToShow, nodeFilter);
+  },
+
   destroy: function() {
-    this._destroyed = true;
+    try {
+      this._destroyed = true;
 
-    this.clearPseudoClassLocks();
-    this._activePseudoClassLocks = null;
+      this.clearPseudoClassLocks();
+      this._activePseudoClassLocks = null;
 
-    this._hoveredNode = null;
-    this.rootDoc = null;
+      this._hoveredNode = null;
+      this.rootDoc = null;
 
-    this.reflowObserver.off("reflows", this._onReflows);
-    this.reflowObserver = null;
-    releaseLayoutChangesObserver(this.tabActor);
+      this.reflowObserver.off("reflows", this._onReflows);
+      this.reflowObserver = null;
+      releaseLayoutChangesObserver(this.tabActor);
 
-    events.emit(this, "destroyed");
+      events.emit(this, "destroyed");
+    } catch(e) {
+      console.error(e);
+    }
     protocol.Actor.prototype.destroy.call(this);
   },
 
@@ -1298,12 +1312,43 @@ var WalkerActor = protocol.ActorClass({
   cancelPick: method(function() {}),
   highlight: method(function(node) {}, {request: {node: Arg(0, "nullable:domnode")}}),
 
+  /**
+   * Ensures that the node is attached and it can be accessed from the root.
+   *
+   * @param {(Node|NodeActor)} nodes The nodes
+   * @return {Object} An object compatible with the disconnectedNode type.
+   */
   attachElement: function(node) {
-    node = this._ref(node);
-    let newParents = this.ensurePathToRoot(node);
+    let { nodes, newParents } = this.attachElements([node]);
     return {
-      node: node,
-      newParents: [parent for (parent of newParents)]
+      node: nodes[0],
+      newParents: newParents
+    };
+  },
+
+  /**
+   * Ensures that the nodes are attached and they can be accessed from the root.
+   *
+   * @param {(Node[]|NodeActor[])} nodes The nodes
+   * @return {Object} An object compatible with the disconnectedNodeArray type.
+   */
+  attachElements: function(nodes) {
+    let nodeActors = [];
+    let newParents = new Set();
+    for (let node of nodes) {
+      // Be sure we deal with NodeActor only.
+      if (!(node instanceof NodeActor))
+        node = this._ref(node);
+
+      this.ensurePathToRoot(node, newParents);
+      // If nodes may be an array of raw nodes, we're sure to only have
+      // NodeActors with the following array.
+      nodeActors.push(node);
+    }
+
+    return {
+      nodes: nodeActors,
+      newParents: [...newParents]
     };
   },
 
@@ -1332,7 +1377,7 @@ var WalkerActor = protocol.ActorClass({
    *        return the root.
    */
   document: method(function(node) {
-    let doc = node ? nodeDocument(node.rawNode) : this.rootDoc;
+    let doc = isNodeDead(node) ? this.rootDoc : nodeDocument(node.rawNode);
     return this._ref(doc);
   }, {
     request: { node: Arg(0, "nullable:domnode") },
@@ -1347,7 +1392,9 @@ var WalkerActor = protocol.ActorClass({
    *        to use the root document.
    */
   documentElement: method(function(node) {
-    let elt = node ? nodeDocument(node.rawNode).documentElement : this.rootDoc.documentElement;
+    let elt = isNodeDead(node)
+              ? this.rootDoc.documentElement
+              : nodeDocument(node.rawNode).documentElement;
     return this._ref(elt);
   }, {
     request: { node: Arg(0, "nullable:domnode") },
@@ -1363,22 +1410,35 @@ var WalkerActor = protocol.ActorClass({
    *    Named options, including:
    *    `sameDocument`: If true, parents will be restricted to the same
    *      document as the node.
+   *    `sameTypeRootTreeItem`: If true, this will not traverse across
+   *     different types of docshells.
    */
   parents: method(function(node, options={}) {
-    let walker = DocumentWalker(node.rawNode, this.rootWin);
+    if (isNodeDead(node)) {
+      return [];
+    }
+
+    let walker = this.getDocumentWalker(node.rawNode);
     let parents = [];
     let cur;
     while((cur = walker.parentNode())) {
-      if (options.sameDocument && cur.ownerDocument != node.rawNode.ownerDocument) {
+      if (options.sameDocument && nodeDocument(cur) != nodeDocument(node.rawNode)) {
         break;
       }
+
+      if (options.sameTypeRootTreeItem &&
+          nodeDocshell(cur).sameTypeRootTreeItem != nodeDocshell(node.rawNode).sameTypeRootTreeItem) {
+        break;
+      }
+
       parents.push(this._ref(cur));
     }
     return parents;
   }, {
     request: {
       node: Arg(0, "domnode"),
-      sameDocument: Option(1)
+      sameDocument: Option(1),
+      sameTypeRootTreeItem: Option(1)
     },
     response: {
       nodes: RetVal("array:domnode")
@@ -1386,7 +1446,7 @@ var WalkerActor = protocol.ActorClass({
   }),
 
   parentNode: function(node) {
-    let walker = DocumentWalker(node.rawNode, this.rootWin);
+    let walker = this.getDocumentWalker(node.rawNode);
     let parent = walker.parentNode();
     if (parent) {
       return this._ref(parent);
@@ -1437,6 +1497,10 @@ var WalkerActor = protocol.ActorClass({
    * Release actors for a node and all child nodes.
    */
   releaseNode: method(function(node, options={}) {
+    if (isNodeDead(node)) {
+      return;
+    }
+
     if (node.retained && !options.force) {
       this._retainedOrphans.add(node);
       return;
@@ -1447,7 +1511,7 @@ var WalkerActor = protocol.ActorClass({
       this._retainedOrphans.delete(node);
     }
 
-    let walker = DocumentWalker(node.rawNode, this.rootWin);
+    let walker = this.getDocumentWalker(node.rawNode);
 
     let child = walker.firstChild();
     while (child) {
@@ -1474,7 +1538,7 @@ var WalkerActor = protocol.ActorClass({
     if (!node) {
       return newParents;
     }
-    let walker = DocumentWalker(node.rawNode, this.rootWin);
+    let walker = this.getDocumentWalker(node.rawNode);
     let cur;
     while ((cur = walker.parentNode())) {
       let parent = this._refMap.get(cur);
@@ -1514,6 +1578,10 @@ var WalkerActor = protocol.ActorClass({
    *    nodes: Child nodes returned by the request.
    */
   children: method(function(node, options={}) {
+    if (isNodeDead(node)) {
+      return { hasFirst: true, hasLast: true, nodes: [] };
+    }
+
     if (options.center && options.start) {
       throw Error("Can't specify both 'center' and 'start' options.");
     }
@@ -1525,7 +1593,7 @@ var WalkerActor = protocol.ActorClass({
     // We're going to create a few document walkers with the same filter,
     // make it easier.
     let getFilteredWalker = (node) => {
-      return new DocumentWalker(node, this.rootWin, options.whatToShow);
+      return this.getDocumentWalker(node, options.whatToShow);
     }
 
     // Need to know the first and last child.
@@ -1608,7 +1676,11 @@ var WalkerActor = protocol.ActorClass({
    *    nodes: Child nodes returned by the request.
    */
   siblings: method(function(node, options={}) {
-    let parentNode = DocumentWalker(node.rawNode, this.rootWin).parentNode();
+    if (isNodeDead(node)) {
+      return { hasFirst: true, hasLast: true, nodes: [] };
+    }
+
+    let parentNode = this.getDocumentWalker(node.rawNode, options.whatToShow).parentNode();
     if (!parentNode) {
       return {
         hasFirst: true,
@@ -1634,7 +1706,11 @@ var WalkerActor = protocol.ActorClass({
    *       https://developer.mozilla.org/en-US/docs/Web/API/NodeFilter.
    */
   nextSibling: method(function(node, options={}) {
-    let walker = DocumentWalker(node.rawNode, this.rootWin, options.whatToShow || Ci.nsIDOMNodeFilter.SHOW_ALL);
+    if (isNodeDead(node)) {
+      return null;
+    }
+
+    let walker = this.getDocumentWalker(node.rawNode, options.whatToShow);
     let sibling = walker.nextSibling();
     return sibling ? this._ref(sibling) : null;
   }, traversalMethod),
@@ -1649,7 +1725,11 @@ var WalkerActor = protocol.ActorClass({
    *       https://developer.mozilla.org/en-US/docs/Web/API/NodeFilter.
    */
   previousSibling: method(function(node, options={}) {
-    let walker = DocumentWalker(node.rawNode, this.rootWin, options.whatToShow || Ci.nsIDOMNodeFilter.SHOW_ALL);
+    if (isNodeDead(node)) {
+      return null;
+    }
+
+    let walker = this.getDocumentWalker(node.rawNode, options.whatToShow);
     let sibling = walker.previousSibling();
     return sibling ? this._ref(sibling) : null;
   }, traversalMethod),
@@ -1710,11 +1790,11 @@ var WalkerActor = protocol.ActorClass({
    * @param string selector
    */
   querySelector: method(function(baseNode, selector) {
-    if (!baseNode) {
-      return {}
-    };
-    let node = baseNode.rawNode.querySelector(selector);
+    if (isNodeDead(baseNode)) {
+      return {};
+    }
 
+    let node = baseNode.rawNode.querySelector(selector);
     if (!node) {
       return {}
     };
@@ -1756,6 +1836,42 @@ var WalkerActor = protocol.ActorClass({
   }),
 
   /**
+   * Get a list of nodes that match the given selector in all known frames of
+   * the current content page.
+   * @param {String} selector.
+   * @return {Array}
+   */
+  _multiFrameQuerySelectorAll: function(selector) {
+    let nodes = [];
+
+    for (let {document} of this.tabActor.windows) {
+      try {
+        nodes = [...nodes, ...document.querySelectorAll(selector)];
+      } catch(e) {
+        // Bad selector. Do nothing as the selector can come from a searchbox.
+      }
+    }
+
+    return nodes;
+  },
+
+  /**
+   * Return a NodeListActor with all nodes that match the given selector in all
+   * frames of the current content page.
+   * @param {String} selector
+   */
+  multiFrameQuerySelectorAll: method(function(selector) {
+    return new NodeListActor(this, this._multiFrameQuerySelectorAll(selector));
+  }, {
+    request: {
+      selector: Arg(0)
+    },
+    response: {
+      list: RetVal("domnodelist")
+    }
+  }),
+
+  /**
    * Returns a list of matching results for CSS selector autocompletion.
    *
    * @param string query
@@ -1768,7 +1884,8 @@ var WalkerActor = protocol.ActorClass({
   getSuggestionsForQuery: method(function(query, completing, selectorState) {
     let sugs = {
       classes: new Map,
-      tags: new Map
+      tags: new Map,
+      ids: new Map
     };
     let result = [];
     let nodes = null;
@@ -1782,10 +1899,10 @@ var WalkerActor = protocol.ActorClass({
 
       case "class":
         if (!query) {
-          nodes = this.rootDoc.querySelectorAll("[class]");
+          nodes = this._multiFrameQuerySelectorAll("[class]");
         }
         else {
-          nodes = this.rootDoc.querySelectorAll(query);
+          nodes = this._multiFrameQuerySelectorAll(query);
         }
         for (let node of nodes) {
           for (let className of node.className.split(" ")) {
@@ -1800,31 +1917,34 @@ var WalkerActor = protocol.ActorClass({
         sugs.classes.delete(HIDDEN_CLASS);
         for (let [className, count] of sugs.classes) {
           if (className.startsWith(completing)) {
-            result.push(["." + className, count]);
+            result.push(["." + CSS.escape(className), count, selectorState]);
           }
         }
         break;
 
       case "id":
         if (!query) {
-          nodes = this.rootDoc.querySelectorAll("[id]");
+          nodes = this._multiFrameQuerySelectorAll("[id]");
         }
         else {
-          nodes = this.rootDoc.querySelectorAll(query);
+          nodes = this._multiFrameQuerySelectorAll(query);
         }
         for (let node of nodes) {
-          if (node.id.startsWith(completing)) {
-            result.push(["#" + node.id, 1]);
+          sugs.ids.set(node.id, (sugs.ids.get(node.id)|0) + 1);
+        }
+        for (let [id, count] of sugs.ids) {
+          if (id.startsWith(completing)) {
+            result.push(["#" + CSS.escape(id), count, selectorState]);
           }
         }
         break;
 
       case "tag":
         if (!query) {
-          nodes = this.rootDoc.getElementsByTagName("*");
+          nodes = this._multiFrameQuerySelectorAll("*");
         }
         else {
-          nodes = this.rootDoc.querySelectorAll(query);
+          nodes = this._multiFrameQuerySelectorAll(query);
         }
         for (let node of nodes) {
           let tag = node.tagName.toLowerCase();
@@ -1832,15 +1952,26 @@ var WalkerActor = protocol.ActorClass({
         }
         for (let [tag, count] of sugs.tags) {
           if ((new RegExp("^" + completing + ".*", "i")).test(tag)) {
-            result.push([tag, count]);
+            result.push([tag, count, selectorState]);
           }
         }
+
+        // For state 'tag' (no preceding # or .) and when there's no query (i.e.
+        // only one word) then search for the matching classes and ids
+        if (!query) {
+          result = [
+            ...result,
+            ...this.getSuggestionsForQuery(null, completing, "class").suggestions,
+            ...this.getSuggestionsForQuery(null, completing, "id").suggestions
+          ];
+        }
+
         break;
 
       case "null":
-        nodes = this.rootDoc.querySelectorAll(query);
+        nodes = this._multiFrameQuerySelectorAll(query);
         for (let node of nodes) {
-          node.id && result.push(["#" + node.id, 1]);
+          sugs.ids.set(node.id, (sugs.ids.get(node.id)|0) + 1);
           let tag = node.tagName.toLowerCase();
           sugs.tags.set(tag, (sugs.tags.get(tag)|0) + 1);
           for (let className of node.className.split(" ")) {
@@ -1849,6 +1980,9 @@ var WalkerActor = protocol.ActorClass({
         }
         for (let [tag, count] of sugs.tags) {
           tag && result.push([tag, count]);
+        }
+        for (let [id, count] of sugs.ids) {
+          id && result.push(["#" + id, count]);
         }
         sugs.classes.delete("");
         // Editing the style editor may make the stylesheet have errors and
@@ -1861,11 +1995,38 @@ var WalkerActor = protocol.ActorClass({
         }
     }
 
-    // Sort alphabetically in increaseing order.
-    result = result.sort();
-    // Sort based on count in decreasing order.
-    result = result.sort(function(a, b) {
-      return b[1] - a[1];
+    // Sort by count (desc) and name (asc)
+    result = result.sort((a, b) => {
+      // Computed a sortable string with first the inverted count, then the name
+      let sortA = (10000-a[1]) + a[0];
+      let sortB = (10000-b[1]) + b[0];
+
+      // Prefixing ids, classes and tags, to group results
+      let firstA = a[0].substring(0, 1);
+      let firstB = b[0].substring(0, 1);
+
+      if (firstA === "#") {
+        sortA = "2" + sortA;
+      }
+      else if (firstA === ".") {
+        sortA = "1" + sortA;
+      }
+      else {
+        sortA = "0" + sortA;
+      }
+
+      if (firstB === "#") {
+        sortB = "2" + sortB;
+      }
+      else if (firstB === ".") {
+        sortB = "1" + sortB;
+      }
+      else {
+        sortB = "0" + sortB;
+      }
+
+      // String compare
+      return sortA.localeCompare(sortB);
     });
 
     result.slice(0, 25);
@@ -1900,13 +2061,17 @@ var WalkerActor = protocol.ActorClass({
    *    be queued for any changed nodes.
    */
   addPseudoClassLock: method(function(node, pseudo, options={}) {
+    if (isNodeDead(node)) {
+      return;
+    }
+
     this._addPseudoClassLock(node, pseudo);
 
     if (!options.parents) {
       return;
     }
 
-    let walker = DocumentWalker(node.rawNode, this.rootWin);
+    let walker = this.getDocumentWalker(node.rawNode);
     let cur;
     while ((cur = walker.parentNode())) {
       let curNode = this._ref(cur);
@@ -1954,6 +2119,10 @@ var WalkerActor = protocol.ActorClass({
   },
 
   hideNode: method(function(node) {
+    if (isNodeDead(node)) {
+      return;
+    }
+
     this._installHelperSheet(node);
     node.rawNode.classList.add(HIDDEN_CLASS);
   }, {
@@ -1961,6 +2130,10 @@ var WalkerActor = protocol.ActorClass({
   }),
 
   unhideNode: method(function(node) {
+    if (isNodeDead(node)) {
+      return;
+    }
+
     node.rawNode.classList.remove(HIDDEN_CLASS);
   }, {
     request: { node: Arg(0, "domnode") }
@@ -1981,13 +2154,17 @@ var WalkerActor = protocol.ActorClass({
    *    will be emitted for any changed nodes.
    */
   removePseudoClassLock: method(function(node, pseudo, options={}) {
+    if (isNodeDead(node)) {
+      return;
+    }
+
     this._removePseudoClassLock(node, pseudo);
 
     if (!options.parents) {
       return;
     }
 
-    let walker = DocumentWalker(node.rawNode, this.rootWin);
+    let walker = this.getDocumentWalker(node.rawNode);
     let cur;
     while ((cur = walker.parentNode())) {
       let curNode = this._ref(cur);
@@ -2020,6 +2197,10 @@ var WalkerActor = protocol.ActorClass({
    * @param {NodeActor} node Optional node to clear pseudo-classes on
    */
   clearPseudoClassLocks: method(function(node) {
+    if (node && isNodeDead(node)) {
+      return;
+    }
+
     if (node) {
       DOMUtils.clearPseudoClassLocks(node.rawNode);
       this._activePseudoClassLocks.delete(node);
@@ -2042,7 +2223,11 @@ var WalkerActor = protocol.ActorClass({
    * Get a node's innerHTML property.
    */
   innerHTML: method(function(node) {
-    return LongStringActor(this.conn, node.rawNode.innerHTML);
+    let html = "";
+    if (!isNodeDead(node)) {
+      html = node.rawNode.innerHTML;
+    }
+    return LongStringActor(this.conn, html);
   }, {
     request: {
       node: Arg(0, "domnode")
@@ -2053,10 +2238,39 @@ var WalkerActor = protocol.ActorClass({
   }),
 
   /**
+   * Set a node's innerHTML property.
+   *
+   * @param {NodeActor} node The node.
+   * @param {string} value The piece of HTML content.
+   */
+  setInnerHTML: method(function(node, value) {
+    if (isNodeDead(node)) {
+      return;
+    }
+
+    let rawNode = node.rawNode;
+    if (rawNode.nodeType !== rawNode.ownerDocument.ELEMENT_NODE)
+      throw new Error("Can only change innerHTML to element nodes");
+    rawNode.innerHTML = value;
+  }, {
+    request: {
+      node: Arg(0, "domnode"),
+      value: Arg(1, "string"),
+    },
+    response: {}
+  }),
+
+  /**
    * Get a node's outerHTML property.
+   *
+   * @param {NodeActor} node The node.
    */
   outerHTML: method(function(node) {
-    return LongStringActor(this.conn, node.rawNode.outerHTML);
+    let html = "";
+    if (!isNodeDead(node)) {
+      html = node.rawNode.outerHTML;
+    }
+    return LongStringActor(this.conn, html);
   }, {
     request: {
       node: Arg(0, "domnode")
@@ -2068,8 +2282,15 @@ var WalkerActor = protocol.ActorClass({
 
   /**
    * Set a node's outerHTML property.
+   *
+   * @param {NodeActor} node The node.
+   * @param {string} value The piece of HTML content.
    */
   setOuterHTML: method(function(node, value) {
+    if (isNodeDead(node)) {
+      return;
+    }
+
     let parsedDOM = DOMParser.parseFromString(value, "text/html");
     let rawNode = node.rawNode;
     let parentNode = rawNode.parentNode;
@@ -2116,27 +2337,110 @@ var WalkerActor = protocol.ActorClass({
   }, {
     request: {
       node: Arg(0, "domnode"),
-      value: Arg(1),
+      value: Arg(1, "string"),
     },
     response: {}
   }),
 
   /**
+   * Insert adjacent HTML to a node.
+   *
+   * @param {Node} node
+   * @param {string} position One of "beforeBegin", "afterBegin", "beforeEnd",
+   *                          "afterEnd" (see Element.insertAdjacentHTML).
+   * @param {string} value The HTML content.
+   */
+  insertAdjacentHTML: method(function(node, position, value) {
+    if (isNodeDead(node)) {
+      return {node: [], newParents: []}
+    }
+
+    let rawNode = node.rawNode;
+    // Don't insert anything adjacent to the document element,
+    // the head or the body.
+    if (node.isDocumentElement()) {
+      throw new Error("Can't insert adjacent element to the root.");
+    }
+
+    let isInsertAsSibling = position === "beforeBegin" ||
+      position === "afterEnd";
+    if ((rawNode.tagName === "BODY" || rawNode.tagName === "HEAD") &&
+      isInsertAsSibling) {
+      throw new Error("Can't insert element before or after the body " +
+        "or the head.");
+    }
+
+    let rawParentNode = rawNode.parentNode;
+    if (!rawParentNode && isInsertAsSibling) {
+      throw new Error("Can't insert as sibling without parent node.");
+    }
+
+    // We can't use insertAdjacentHTML, because we want to return the nodes
+    // being created (so the front can remove them if the user undoes
+    // the change). So instead, use Range.createContextualFragment().
+    let range = rawNode.ownerDocument.createRange();
+    if (position === "beforeBegin" || position === "afterEnd") {
+      range.selectNode(rawNode);
+    } else {
+      range.selectNodeContents(rawNode);
+    }
+    let docFrag = range.createContextualFragment(value);
+    let newRawNodes = Array.from(docFrag.childNodes);
+    switch (position) {
+      case "beforeBegin":
+        rawParentNode.insertBefore(docFrag, rawNode);
+        break;
+      case "afterEnd":
+        // Note: if the second argument is null, rawParentNode.insertBefore
+        // behaves like rawParentNode.appendChild.
+        rawParentNode.insertBefore(docFrag, rawNode.nextSibling);
+      case "afterBegin":
+        rawNode.insertBefore(docFrag, rawNode.firstChild);
+        break;
+      case "beforeEnd":
+        rawNode.appendChild(docFrag);
+        break;
+      default:
+        throw new Error('Invalid position value. Must be either ' +
+          '"beforeBegin", "beforeEnd", "afterBegin" or "afterEnd".');
+    }
+
+    return this.attachElements(newRawNodes);
+  }, {
+    request: {
+      node: Arg(0, "domnode"),
+      position: Arg(1, "string"),
+      value: Arg(2, "string")
+    },
+    response: RetVal("disconnectedNodeArray")
+  }),
+
+  /**
+   * Test whether a node is a document or a document element.
+   *
+   * @param {NodeActor} node The node to remove.
+   * @return {boolean} True if the node is a document or a document element.
+   */
+  isDocumentOrDocumentElementNode: function(node) {
+      return ((node.rawNode.ownerDocument &&
+        node.rawNode.ownerDocument.documentElement === this.rawNode) ||
+        node.rawNode.nodeType === Ci.nsIDOMNode.DOCUMENT_NODE);
+  },
+
+  /**
    * Removes a node from its parent node.
    *
+   * @param {NodeActor} node The node to remove.
    * @returns The node's nextSibling before it was removed.
    */
   removeNode: method(function(node) {
-    if ((node.rawNode.ownerDocument &&
-         node.rawNode.ownerDocument.documentElement === this.rawNode) ||
-         node.rawNode.nodeType === Ci.nsIDOMNode.DOCUMENT_NODE) {
-      throw Error("Cannot remove document or document elements.");
+    if (isNodeDead(node) || this.isDocumentOrDocumentElementNode(node)) {
+      throw Error("Cannot remove document, document elements or dead nodes.");
     }
+
     let nextSibling = this.nextSibling(node);
-    if (node.rawNode.parentNode) {
-      node.rawNode.parentNode.removeChild(node.rawNode);
-      // Mutation events will take care of the rest.
-    }
+    node.rawNode.remove();
+    // Mutation events will take care of the rest.
     return nextSibling;
   }, {
     request: {
@@ -2148,9 +2452,39 @@ var WalkerActor = protocol.ActorClass({
   }),
 
   /**
+   * Removes an array of nodes from their parent node.
+   *
+   * @param {NodeActor[]} nodes The nodes to remove.
+   */
+  removeNodes: method(function(nodes) {
+    // Check that all nodes are valid before processing the removals.
+    for (let node of nodes) {
+      if (isNodeDead(node) || this.isDocumentOrDocumentElementNode(node)) {
+        throw Error("Cannot remove document, document elements or dead nodes");
+      }
+    }
+
+    for (let node of nodes) {
+      node.rawNode.remove();
+      // Mutation events will take care of the rest.
+    }
+  }, {
+    request: {
+      node: Arg(0, "array:domnode")
+    },
+    response: {}
+  }),
+
+  /**
    * Insert a node into the DOM.
    */
   insertBefore: method(function(node, parent, sibling) {
+    if (isNodeDead(node) ||
+        isNodeDead(parent) ||
+        (sibling && isNodeDead(sibling))) {
+      return null;
+    }
+
     parent.rawNode.insertBefore(node.rawNode, sibling ? sibling.rawNode : null);
   }, {
     request: {
@@ -2168,6 +2502,10 @@ var WalkerActor = protocol.ActorClass({
    * informing the consumers about changes.
    */
   editTagName: method(function(node, tagName) {
+    if (isNodeDead(node)) {
+      return;
+    }
+
     let oldNode = node.rawNode;
 
     // Create a new element with the same attributes as the current element and
@@ -2257,7 +2595,29 @@ var WalkerActor = protocol.ActorClass({
       this._orphaned = new Set();
     }
 
-    return pending;
+
+    // Clear out any duplicate attribute mutations before sending them over
+    // the protocol.  Keep only the most recent change for each attribute.
+    let targetMap = {};
+    let filtered = pending.reverse().filter(mutation => {
+      if (mutation.type === "attributes") {
+        if (!targetMap[mutation.target]) {
+          targetMap[mutation.target] = {};
+        }
+        let attributesForTarget = targetMap[mutation.target];
+
+        if (attributesForTarget[mutation.attributeName]) {
+          // Since the array was reversed, if we've seen this attribute already
+          // then this one is a duplicate and can be skipped.
+          return false;
+        }
+
+        attributesForTarget[mutation.attributeName] = true;
+      }
+      return true;
+    }).reverse();
+
+    return filtered;
   }, {
     request: {
       cleanup: Option(0)
@@ -2305,7 +2665,9 @@ var WalkerActor = protocol.ActorClass({
       if (mutation.type === "attributes") {
         mutation.attributeName = change.attributeName;
         mutation.attributeNamespace = change.attributeNamespace || undefined;
-        mutation.newValue = targetNode.getAttribute(mutation.attributeName);
+        mutation.newValue = targetNode.hasAttribute(mutation.attributeName) ?
+                            targetNode.getAttribute(mutation.attributeName)
+                            : null;
       } else if (mutation.type === "characterData") {
         if (targetNode.nodeValue.length > gValueSummaryLength) {
           mutation.newValue = targetNode.nodeValue.substring(0, gValueSummaryLength);
@@ -2432,7 +2794,7 @@ var WalkerActor = protocol.ActorClass({
       target: documentActor.actorID
     });
 
-    let walker = DocumentWalker(doc, this.rootWin);
+    let walker = this.getDocumentWalker(doc);
     let parentNode = walker.parentNode();
     if (parentNode) {
       // Send a childList mutation on the frame so that clients know
@@ -2457,7 +2819,7 @@ var WalkerActor = protocol.ActorClass({
    * document fragment
    */
   _isInDOMTree: function(rawNode) {
-    let walker = DocumentWalker(rawNode, this.rootWin);
+    let walker = this.getDocumentWalker(rawNode);
     let current = walker.currentNode;
 
     // Reaching the top of tree
@@ -2480,7 +2842,10 @@ var WalkerActor = protocol.ActorClass({
    * @see _isInDomTree
    */
   isInDOMTree: method(function(node) {
-    return node ? this._isInDOMTree(node.rawNode) : false;
+    if (isNodeDead(node)) {
+      return false;
+    }
+    return this._isInDOMTree(node.rawNode);
   }, {
     request: { node: Arg(0, "domnode") },
     response: { attached: RetVal("boolean") }
@@ -2491,6 +2856,11 @@ var WalkerActor = protocol.ActorClass({
    * webconsole and variablesView, return the corresponding inspector's NodeActor
    */
   getNodeActorFromObjectActor: method(function(objectActorID) {
+    let actor = this.conn.getActor(objectActorID);
+    if (!actor) {
+      return null;
+    }
+
     let debuggerObject = this.conn.getActor(objectActorID).obj;
     let rawNode = debuggerObject.unsafeDereference();
 
@@ -2515,19 +2885,13 @@ var WalkerActor = protocol.ActorClass({
   }),
 
   /**
-   * Given an StyleSheetActor (identified by its ID), commonly used in the
+   * Given a StyleSheetActor (identified by its ID), commonly used in the
    * style-editor, get its ownerNode and return the corresponding walker's
-   * NodeActor
+   * NodeActor.
+   * Note that getNodeFromActor was added later and can now be used instead.
    */
   getStyleSheetOwnerNode: method(function(styleSheetActorID) {
-    let styleSheetActor = this.conn.getActor(styleSheetActorID);
-    let ownerNode = styleSheetActor.ownerNode;
-
-    if (!styleSheetActor || !ownerNode) {
-      return null;
-    }
-
-    return this.attachElement(ownerNode);
+    return this.getNodeFromActor(styleSheetActorID, ["ownerNode"]);
   }, {
     request: {
       styleSheetActorID: Arg(0, "string")
@@ -2536,6 +2900,60 @@ var WalkerActor = protocol.ActorClass({
       ownerNode: RetVal("nullable:disconnectedNode")
     }
   }),
+
+  /**
+   * This method can be used to retrieve NodeActor for DOM nodes from other
+   * actors in a way that they can later be highlighted in the page, or
+   * selected in the inspector.
+   * If an actor has a reference to a DOM node, and the UI needs to know about
+   * this DOM node (and possibly select it in the inspector), the UI should
+   * first retrieve a reference to the walkerFront:
+   *
+   * // Make sure the inspector/walker have been initialized first.
+   * toolbox.initInspector().then(() => {
+   *  // Retrieve the walker.
+   *  let walker = toolbox.walker;
+   * });
+   *
+   * And then call this method:
+   *
+   * // Get the nodeFront from my actor, passing the ID and properties path.
+   * walker.getNodeFromActor(myActorID, ["element"]).then(nodeFront => {
+   *   // Use the nodeFront, e.g. select the node in the inspector.
+   *   toolbox.getPanel("inspector").selection.setNodeFront(nodeFront);
+   * });
+   *
+   * @param {String} actorID The ID for the actor that has a reference to the
+   * DOM node.
+   * @param {Array} path Where, on the actor, is the DOM node stored. If in the
+   * scope of the actor, the node is available as `this.data.node`, then this
+   * should be ["data", "node"].
+   * @return {NodeActor} The attached NodeActor, or null if it couldn't be found.
+   */
+  getNodeFromActor: method(function(actorID, path) {
+    let actor = this.conn.getActor(actorID);
+    if (!actor) {
+      return null;
+    }
+
+    let obj = actor;
+    for (let name of path) {
+      if (!(name in obj)) {
+        return null;
+      }
+      obj = obj[name];
+    }
+
+    return this.attachElement(obj);
+  }, {
+    request: {
+      actorID: Arg(0, "string"),
+      path: Arg(1, "array:string")
+    },
+    response: {
+      node: RetVal("nullable:disconnectedNode")
+    }
+  })
 });
 
 /**
@@ -2693,6 +3111,14 @@ var WalkerFront = exports.WalkerFront = protocol.FrontClass(WalkerActor, {
     impl: "_getStyleSheetOwnerNode"
   }),
 
+  getNodeFromActor: protocol.custom(function(actorID, path) {
+    return this._getNodeFromActor(actorID, path).then(response => {
+      return response ? response.node : null;
+    });
+  }, {
+    impl: "_getNodeFromActor"
+  }),
+
   _releaseFront: function(node, force) {
     if (node.retained && !force) {
       node.reparent(null);
@@ -2841,7 +3267,7 @@ var WalkerFront = exports.WalkerFront = protocol.FrontClass(WalkerActor, {
    */
   onMutations: protocol.preEvent("new-mutations", function() {
     // Fetch and process the mutations.
-    this.getMutations({cleanup: this.autoCleanup}).then(null, console.error);
+    this.getMutations({cleanup: this.autoCleanup}).catch(() => {});
   }),
 
   isLocal: function() {
@@ -2865,7 +3291,7 @@ var WalkerFront = exports.WalkerFront = protocol.FrontClass(WalkerActor, {
     let nodeType = types.getType("domnode");
     let returnNode = nodeType.read(nodeType.write(nodeActor, walkerActor), this);
     let top = returnNode;
-    let extras = walkerActor.parents(nodeActor);
+    let extras = walkerActor.parents(nodeActor, {sameTypeRootTreeItem: true});
     for (let extraActor of extras) {
       top = nodeType.read(nodeType.write(extraActor, walkerActor), this);
     }
@@ -2876,7 +3302,18 @@ var WalkerFront = exports.WalkerFront = protocol.FrontClass(WalkerActor, {
       walkerActor._orphaned.add(this.conn._transport._serverConnection.getActor(top.actorID));
     }
     return returnNode;
-  }
+  },
+
+  removeNode: protocol.custom(Task.async(function* (node) {
+    let previousSibling = yield this.previousSibling(node);
+    let nextSibling = yield this._removeNode(node);
+    return {
+      previousSibling: previousSibling,
+      nextSibling: nextSibling,
+    };
+  }), {
+    impl: "_removeNode"
+  }),
 });
 
 /**
@@ -2961,7 +3398,9 @@ var InspectorActor = exports.InspectorActor = protocol.ActorClass({
 
     return this._walkerPromise;
   }, {
-    request: {},
+    request: {
+      options: Arg(0, "nullable:json")
+    },
     response: {
       walker: RetVal("domwalker")
     }
@@ -3026,7 +3465,7 @@ var InspectorActor = exports.InspectorActor = protocol.ActorClass({
    * typeName passed doesn't match any available highlighter
    */
   getHighlighterByType: method(function (typeName) {
-    if (HIGHLIGHTER_CLASSES[typeName]) {
+    if (isTypeRegistered(typeName)) {
       return CustomHighlighterActor(this, typeName);
     } else {
       return null;
@@ -3088,6 +3527,30 @@ var InspectorActor = exports.InspectorActor = protocol.ActorClass({
   }, {
     request: {url: Arg(0), maxDim: Arg(1, "nullable:number")},
     response: RetVal("imageData")
+  }),
+
+  /**
+   * Resolve a URL to its absolute form, in the scope of a given content window.
+   * @param {String} url.
+   * @param {NodeActor} node If provided, the owner window of this node will be
+   * used to resolve the URL. Otherwise, the top-level content window will be
+   * used instead.
+   * @return {String} url.
+   */
+  resolveRelativeURL: method(function(url, node) {
+    let document = isNodeDead(node)
+                   ? this.window.document
+                   : nodeDocument(node.rawNode);
+
+    if (!document) {
+      return url;
+    } else {
+      let baseURI = Services.io.newURI(document.location.href, null, null);
+      return Services.io.newURI(url, null, baseURI).spec;
+    }
+  }, {
+    request: {url: Arg(0, "string"), node: Arg(1, "nullable:domnode")},
+    response: {value: RetVal("string")}
   })
 });
 
@@ -3110,8 +3573,8 @@ var InspectorFront = exports.InspectorFront = protocol.FrontClass(InspectorActor
     protocol.Front.prototype.destroy.call(this);
   },
 
-  getWalker: protocol.custom(function() {
-    return this._getWalker().then(walker => {
+  getWalker: protocol.custom(function(options = {}) {
+    return this._getWalker(options).then(walker => {
       this.walker = walker;
       return walker;
     });
@@ -3139,26 +3602,38 @@ var InspectorFront = exports.InspectorFront = protocol.FrontClass(InspectorActor
 exports._documentWalker = DocumentWalker;
 
 function nodeDocument(node) {
+  if (Cu.isDeadWrapper(node)) {
+    return null;
+  }
   return node.ownerDocument || (node.nodeType == Ci.nsIDOMNode.DOCUMENT_NODE ? node : null);
+}
+
+function nodeDocshell(node) {
+  let doc = node ? nodeDocument(node) : null;
+  let win = doc ? doc.defaultView : null;
+  if (win) {
+    return win.
+           QueryInterface(Ci.nsIInterfaceRequestor).
+           getInterface(Ci.nsIDocShell);
+  }
+}
+
+function isNodeDead(node) {
+  return !node || !node.rawNode || Cu.isDeadWrapper(node.rawNode);
 }
 
 /**
  * Wrapper for inDeepTreeWalker.  Adds filtering to the traversal methods.
  * See inDeepTreeWalker for more information about the methods.
  *
- * @param {DOMNode} aNode
- * @param {Window} aRootWin
- * @param {Int} aShow See Ci.nsIDOMNodeFilter / inIDeepTreeWalker for options.
- * @param {Function} aFilter A custom filter function Taking in a DOMNode
- *        and returning an Int. See nodeFilter for an example.
+ * @param {DOMNode} node
+ * @param {Window} rootWin
+ * @param {Int} whatToShow See Ci.nsIDOMNodeFilter / inIDeepTreeWalker for options.
+ * @param {Function} filter A custom filter function Taking in a DOMNode
+ *        and returning an Int. See WalkerActor.nodeFilter for an example.
  */
-function DocumentWalker(aNode, aRootWin, aShow=Ci.nsIDOMNodeFilter.SHOW_ALL,
-                        aFilter=nodeFilter) {
-  if (!(this instanceof DocumentWalker)) {
-    return new DocumentWalker(aNode, aRootWin, aShow, aFilter);
-  }
-
-  if (!aRootWin.location) {
+function DocumentWalker(node, rootWin, whatToShow=Ci.nsIDOMNodeFilter.SHOW_ALL, filter=standardTreeWalkerFilter) {
+  if (!rootWin.location) {
     throw new Error("Got an invalid root window in DocumentWalker");
   }
 
@@ -3166,9 +3641,9 @@ function DocumentWalker(aNode, aRootWin, aShow=Ci.nsIDOMNodeFilter.SHOW_ALL,
   this.walker.showAnonymousContent = true;
   this.walker.showSubDocuments = true;
   this.walker.showDocumentsAsNodes = true;
-  this.walker.init(aRootWin.document, aShow);
-  this.walker.currentNode = aNode;
-  this.filter = aFilter;
+  this.walker.init(rootWin.document, whatToShow);
+  this.walker.currentNode = node;
+  this.filter = filter;
 }
 
 DocumentWalker.prototype = {
@@ -3230,9 +3705,11 @@ function isXULElement(el) {
 }
 
 /**
- * A tree walker filter for avoiding empty whitespace text nodes.
+ * This DeepTreeWalker filter skips whitespace text nodes and anonymous
+ * content with the exception of ::before and ::after and anonymous content
+ * in XUL document (needed to show all elements in the browser toolbox).
  */
-function nodeFilter(aNode) {
+function standardTreeWalkerFilter(aNode) {
   // Ignore empty whitespace text nodes.
   if (aNode.nodeType == Ci.nsIDOMNode.TEXT_NODE &&
       !/[^\s]/.exec(aNode.nodeValue)) {
@@ -3255,6 +3732,19 @@ function nodeFilter(aNode) {
   }
 
   return Ci.nsIDOMNodeFilter.FILTER_ACCEPT;
+}
+
+/**
+ * This DeepTreeWalker filter is like standardTreeWalkerFilter except that
+ * it also includes all anonymous content (like internal form controls).
+ */
+function allAnonymousContentTreeWalkerFilter(aNode) {
+  // Ignore empty whitespace text nodes.
+  if (aNode.nodeType == Ci.nsIDOMNode.TEXT_NODE &&
+      !/[^\s]/.exec(aNode.nodeValue)) {
+    return Ci.nsIDOMNodeFilter.FILTER_SKIP;
+  }
+  return Ci.nsIDOMNodeFilter.FILTER_ACCEPT
 }
 
 /**

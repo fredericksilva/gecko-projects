@@ -1,3 +1,5 @@
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -27,6 +29,7 @@
 #include "mozilla/dom/Event.h"
 #include "mozilla/Services.h"
 #include "nsContentPermissionHelper.h"
+#include "nsILoadContext.h"
 #ifdef MOZ_B2G
 #include "nsIDOMDesktopNotification.h"
 #endif
@@ -34,7 +37,7 @@
 namespace mozilla {
 namespace dom {
 
-class NotificationStorageCallback MOZ_FINAL : public nsINotificationStorageCallback
+class NotificationStorageCallback final : public nsINotificationStorageCallback
 {
 public:
   NS_DECL_CYCLE_COLLECTING_ISUPPORTS
@@ -63,7 +66,7 @@ public:
                     const nsAString& aIcon,
                     const nsAString& aData,
                     const nsAString& aBehavior,
-                    JSContext* aCx)
+                    JSContext* aCx) override
   {
     MOZ_ASSERT(!aID.IsEmpty());
 
@@ -82,13 +85,13 @@ public:
     ErrorResult rv;
     notification->InitFromBase64(aCx, aData, rv);
     if (rv.Failed()) {
-      return rv.ErrorCode();
+      return rv.StealNSResult();
     }
 
     notification->SetStoredState(true);
 
     JSAutoCompartment ac(aCx, mGlobal);
-    JS::Rooted<JSObject*> element(aCx, notification->WrapObject(aCx));
+    JS::Rooted<JSObject*> element(aCx, notification->WrapObject(aCx, JS::NullPtr()));
     NS_ENSURE_TRUE(element, NS_ERROR_FAILURE);
 
     JS::Rooted<JSObject*> notifications(aCx, mNotifications);
@@ -98,7 +101,7 @@ public:
     return NS_OK;
   }
 
-  NS_IMETHOD Done(JSContext* aCx)
+  NS_IMETHOD Done(JSContext* aCx) override
   {
     JSAutoCompartment ac(aCx, mGlobal);
     JS::Rooted<JS::Value> result(aCx, JS::ObjectValue(*mNotifications));
@@ -171,7 +174,10 @@ public:
                                 NotificationPermissionCallback* aCallback)
     : mPrincipal(aPrincipal), mWindow(aWindow),
       mPermission(NotificationPermission::Default),
-      mCallback(aCallback) {}
+      mCallback(aCallback)
+  {
+    mRequester = new nsContentPermissionRequester(mWindow);
+  }
 
 protected:
   virtual ~NotificationPermissionRequest() {}
@@ -182,6 +188,7 @@ protected:
   nsCOMPtr<nsPIDOMWindow> mWindow;
   NotificationPermission mPermission;
   nsRefPtr<NotificationPermissionCallback> mCallback;
+  nsCOMPtr<nsIContentPermissionRequester> mRequester;
 };
 
 class NotificationObserver : public nsIObserver
@@ -306,6 +313,16 @@ NotificationPermissionRequest::Allow(JS::HandleValue aChoices)
   return DispatchCallback();
 }
 
+NS_IMETHODIMP
+NotificationPermissionRequest::GetRequester(nsIContentPermissionRequester** aRequester)
+{
+  NS_ENSURE_ARG_POINTER(aRequester);
+
+  nsCOMPtr<nsIContentPermissionRequester> requester = mRequester;
+  requester.forget(aRequester);
+  return NS_OK;
+}
+
 inline nsresult
 NotificationPermissionRequest::DispatchCallback()
 {
@@ -323,7 +340,7 @@ NotificationPermissionRequest::CallCallback()
 {
   ErrorResult rv;
   mCallback->Call(mPermission, rv);
-  return rv.ErrorCode();
+  return rv.StealNSResult();
 }
 
 NS_IMETHODIMP
@@ -677,10 +694,16 @@ Notification::ShowInternal()
   // nsIObserver. Thus the cookie must be unique to differentiate observers.
   nsString uniqueCookie = NS_LITERAL_STRING("notification:");
   uniqueCookie.AppendInt(sCount++);
+  bool inPrivateBrowsing = false;
+  if (doc) {
+    nsCOMPtr<nsILoadContext> loadContext = doc->GetLoadContext();
+    inPrivateBrowsing = loadContext && loadContext->UsePrivateBrowsing();
+  }
   alertService->ShowAlertNotification(absoluteUrl, mTitle, mBody, true,
                                       uniqueCookie, observer, mAlertName,
                                       DirectionToString(mDir), mLang,
-                                      dataStr, GetPrincipal());
+                                      dataStr, GetPrincipal(),
+                                      inPrivateBrowsing);
 }
 
 void
@@ -816,9 +839,9 @@ Notification::Get(const GlobalObject& aGlobal,
 }
 
 JSObject*
-Notification::WrapObject(JSContext* aCx)
+Notification::WrapObject(JSContext* aCx, JS::Handle<JSObject*> aGivenProto)
 {
-  return mozilla::dom::NotificationBinding::Wrap(aCx, this);
+  return mozilla::dom::NotificationBinding::Wrap(aCx, this, aGivenProto);
 }
 
 void
@@ -920,7 +943,7 @@ Notification::InitFromJSVal(JSContext* aCx, JS::Handle<JS::Value> aData,
     return;
   }
   mDataObjectContainer = new nsStructuredCloneContainer();
-  aRv = mDataObjectContainer->InitFromJSVal(aData);
+  aRv = mDataObjectContainer->InitFromJSVal(aData, aCx);
 }
 
 void Notification::InitFromBase64(JSContext* aCx, const nsAString& aData,

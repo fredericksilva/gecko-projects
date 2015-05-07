@@ -16,8 +16,8 @@ using mozilla::ipc::IOThreadChild;
 namespace mozilla {
 namespace gmp {
 
-GMPProcessChild::GMPProcessChild(ProcessHandle parentHandle)
-: ProcessChild(parentHandle)
+GMPProcessChild::GMPProcessChild(ProcessId aParentPid)
+: ProcessChild(aParentPid)
 {
 }
 
@@ -29,18 +29,21 @@ bool
 GMPProcessChild::Init()
 {
   std::string pluginFilename;
+  std::string voucherFilename;
 
 #if defined(OS_POSIX)
   // NB: need to be very careful in ensuring that the first arg
   // (after the binary name) here is indeed the plugin module path.
   // Keep in sync with dom/plugins/PluginModuleParent.
   std::vector<std::string> values = CommandLine::ForCurrentProcess()->argv();
-  NS_ABORT_IF_FALSE(values.size() >= 2, "not enough args");
+  MOZ_ASSERT(values.size() >= 3, "not enough args");
   pluginFilename = values[1];
+  voucherFilename = values[2];
 #elif defined(OS_WIN)
   std::vector<std::wstring> values = CommandLine::ForCurrentProcess()->GetLooseValues();
-  NS_ABORT_IF_FALSE(values.size() >= 1, "not enough loose args");
+  MOZ_ASSERT(values.size() >= 2, "not enough loose args");
   pluginFilename = WideToUTF8(values[0]);
+  voucherFilename = WideToUTF8(values[1]);
 #else
 #error Not implemented
 #endif
@@ -48,7 +51,8 @@ GMPProcessChild::Init()
   BackgroundHangMonitor::Startup();
 
   return mPlugin.Init(pluginFilename,
-                      ParentHandle(),
+                      voucherFilename,
+                      ParentPid(),
                       IOThreadChild::message_loop(),
                       IOThreadChild::channel());
 }

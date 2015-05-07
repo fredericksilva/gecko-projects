@@ -6,12 +6,12 @@
 
 #include "nsNSSCertificateDB.h"
 
-#include "pkix/pkix.h"
-#include "pkix/pkixnss.h"
-#include "pkix/ScopedPtr.h"
-#include "mozilla/RefPtr.h"
-#include "CryptoTask.h"
 #include "AppTrustDomain.h"
+#include "base64.h"
+#include "certdb.h"
+#include "CryptoTask.h"
+#include "mozilla/RefPtr.h"
+#include "mozilla/UniquePtr.h"
 #include "nsComponentManagerUtils.h"
 #include "nsCOMPtr.h"
 #include "nsDataSignatureVerifier.h"
@@ -24,16 +24,16 @@
 #include "nsNetUtil.h"
 #include "nsNSSCertificate.h"
 #include "nsProxyRelease.h"
+#include "nssb64.h"
 #include "NSSCertDBTrustDomain.h"
 #include "nsString.h"
 #include "nsTHashtable.h"
-
-#include "base64.h"
-#include "certdb.h"
-#include "nssb64.h"
-#include "secmime.h"
 #include "plstr.h"
 #include "prlog.h"
+#include "pkix/pkix.h"
+#include "pkix/pkixnss.h"
+#include "secmime.h"
+
 
 using namespace mozilla::pkix;
 using namespace mozilla;
@@ -807,8 +807,10 @@ VerifySignedManifest(AppTrustedRoot aTrustedRoot,
   }
 
   // Get base64 encoded string from manifest buffer digest
-  ScopedPtr<char, PORT_Free_string> base64EncDigest(NSSBase64_EncodeItem(nullptr,
-    nullptr, 0, const_cast<SECItem*>(&manifestCalculatedDigest.get())));
+  UniquePtr<char, void(&)(void*)>
+    base64EncDigest(NSSBase64_EncodeItem(nullptr, nullptr, 0,
+                      const_cast<SECItem*>(&manifestCalculatedDigest.get())),
+                    PORT_Free);
   if (NS_WARN_IF(!base64EncDigest)) {
     return NS_ERROR_OUT_OF_MEMORY;
   }
@@ -845,7 +847,7 @@ VerifySignedManifest(AppTrustedRoot aTrustedRoot,
   return NS_OK;
 }
 
-class OpenSignedAppFileTask MOZ_FINAL : public CryptoTask
+class OpenSignedAppFileTask final : public CryptoTask
 {
 public:
   OpenSignedAppFileTask(AppTrustedRoot aTrustedRoot, nsIFile* aJarFile,
@@ -857,7 +859,7 @@ public:
   }
 
 private:
-  virtual nsresult CalculateResult() MOZ_OVERRIDE
+  virtual nsresult CalculateResult() override
   {
     return OpenSignedAppFile(mTrustedRoot, mJarFile,
                              getter_AddRefs(mZipReader),
@@ -866,9 +868,9 @@ private:
 
   // nsNSSCertificate implements nsNSSShutdownObject, so there's nothing that
   // needs to be released
-  virtual void ReleaseNSSResources() { }
+  virtual void ReleaseNSSResources() override { }
 
-  virtual void CallCallback(nsresult rv)
+  virtual void CallCallback(nsresult rv) override
   {
     (void) mCallback->OpenSignedAppFileFinished(rv, mZipReader, mSignerCert);
   }
@@ -880,7 +882,7 @@ private:
   nsCOMPtr<nsIX509Cert> mSignerCert; // out
 };
 
-class VerifySignedmanifestTask MOZ_FINAL : public CryptoTask
+class VerifySignedmanifestTask final : public CryptoTask
 {
 public:
   VerifySignedmanifestTask(AppTrustedRoot aTrustedRoot,
@@ -896,7 +898,7 @@ public:
   }
 
 private:
-  virtual nsresult CalculateResult() MOZ_OVERRIDE
+  virtual nsresult CalculateResult() override
   {
     return VerifySignedManifest(mTrustedRoot, mManifestStream,
                                 mSignatureStream, getter_AddRefs(mSignerCert));
@@ -904,9 +906,9 @@ private:
 
   // nsNSSCertificate implements nsNSSShutdownObject, so there's nothing that
   // needs to be released
-  virtual void ReleaseNSSResources() { }
+  virtual void ReleaseNSSResources() override { }
 
-  virtual void CallCallback(nsresult rv)
+  virtual void CallCallback(nsresult rv) override
   {
     (void) mCallback->VerifySignedManifestFinished(rv, mSignerCert);
   }

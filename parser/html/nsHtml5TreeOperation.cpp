@@ -108,7 +108,7 @@ nsHtml5TreeOperation::~nsHtml5TreeOperation()
       delete[] mOne.charPtr;
       break;
     case eTreeOpProcessOfflineManifest:
-      nsMemory::Free(mOne.unicharPtr);
+      free(mOne.unicharPtr);
       break;
     default: // keep the compiler happy
       break;
@@ -439,14 +439,11 @@ nsHtml5TreeOperation::CreateElement(int32_t aNs,
                           value,
                           false);
 
-      // Custom element prototype swizzling may be needed if there is an
-      // "is" attribute.
+      // Custom element setup may be needed if there is an "is" attribute.
       if (kNameSpaceID_None == nsuri && !prefix && nsGkAtoms::is == localName) {
-        ErrorResult errorResult;
-        newContent->OwnerDoc()->SwizzleCustomElement(newContent,
-                                                     value,
-                                                     newContent->GetNameSpaceID(),
-                                                     errorResult);
+        newContent->OwnerDoc()->SetupCustomElement(newContent,
+                                                   newContent->GetNameSpaceID(),
+                                                   &value);
       }
     }
   }

@@ -13,7 +13,6 @@
   <head>
     <meta charset="utf8"/>
     <link rel="stylesheet" href="chrome://webide/skin/deck.css" type="text/css"/>
-    <link rel="stylesheet" href="chrome://webide/skin/prefs.css" type="text/css"/>
     <script type="application/javascript;version=1.8" src="chrome://webide/content/prefs.js"></script>
   </head>
   <body>
@@ -30,9 +29,9 @@
 
     <ul>
       <li>
-        <label title="&prefs_options_templatesurl_tooltip;">
-          <span>&prefs_options_templatesurl;</span>
-          <input data-pref="devtools.webide.templatesURL"/>
+        <label title="&prefs_options_showeditor_tooltip;">
+          <input type="checkbox" data-pref="devtools.webide.showProjectEditor"/>
+          <span>&prefs_options_showeditor;</span>
         </label>
       </li>
       <li>
@@ -42,9 +41,15 @@
         </label>
       </li>
       <li>
-        <label title="&prefs_options_showeditor_tooltip;">
-          <input type="checkbox" data-pref="devtools.webide.showProjectEditor"/>
-          <span>&prefs_options_showeditor;</span>
+        <label title="&prefs_options_autoconnectruntime_tooltip;">
+          <input type="checkbox" data-pref="devtools.webide.autoConnectRuntime"/>
+          <span>&prefs_options_autoconnectruntime;</span>
+        </label>
+      </li>
+      <li>
+        <label class="text-input" title="&prefs_options_templatesurl_tooltip;">
+          <span>&prefs_options_templatesurl;</span>
+          <input data-pref="devtools.webide.templatesURL"/>
         </label>
       </li>
     </ul>
@@ -52,16 +57,6 @@
     <h2>&prefs_editor_title;</h2>
 
     <ul>
-      <li>
-        <label><span>&prefs_options_keybindings;</span>
-          <select data-pref="devtools.editor.keymap">
-            <option value="default">&prefs_options_keybindings_default;</option>
-            <option value="vim">Vim</option>
-            <option value="emacs">Emacs</option>
-            <option value="sublime">Sublime</option>
-          </select>
-        </label>
-      </li>
       <li>
         <label><span>&prefs_options_tabsize;</span>
           <select data-pref="devtools.editor.tabsize">
@@ -93,6 +88,16 @@
         <label title="&prefs_options_autoclosebrackets_tooltip;">
           <input type="checkbox" data-pref="devtools.editor.autoclosebrackets"/>
           <span>&prefs_options_autoclosebrackets;</span>
+        </label>
+      </li>
+      <li>
+        <label><span>&prefs_options_keybindings;</span>
+          <select data-pref="devtools.editor.keymap">
+            <option value="default">&prefs_options_keybindings_default;</option>
+            <option value="vim">Vim</option>
+            <option value="emacs">Emacs</option>
+            <option value="sublime">Sublime</option>
+          </select>
         </label>
       </li>
     </ul>

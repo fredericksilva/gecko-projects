@@ -13,6 +13,7 @@
 #ifdef MOZILLA_INTERNAL_API
 #include "mozilla/TimeStamp.h"
 #endif
+#include <float.h>
 
 namespace mozilla {
 
@@ -24,7 +25,7 @@ public:
     mBuffers.SwapElements(*aBuffers);
   }
 
-  virtual size_t SizeOfExcludingThis(MallocSizeOf aMallocSizeOf) const MOZ_OVERRIDE
+  virtual size_t SizeOfExcludingThis(MallocSizeOf aMallocSizeOf) const override
   {
     size_t amount = 0;
     amount += mBuffers.SizeOfExcludingThis(aMallocSizeOf);
@@ -35,7 +36,7 @@ public:
     return amount;
   }
 
-  virtual size_t SizeOfIncludingThis(MallocSizeOf aMallocSizeOf) const MOZ_OVERRIDE
+  virtual size_t SizeOfIncludingThis(MallocSizeOf aMallocSizeOf) const override
   {
     return aMallocSizeOf(this) + SizeOfExcludingThis(aMallocSizeOf);
   }
@@ -43,7 +44,6 @@ public:
   nsTArray<nsTArray<T> > mBuffers;
 };
 
-class AudioStream;
 class AudioMixer;
 
 /**
@@ -84,7 +84,7 @@ struct AudioChunk {
   typedef mozilla::AudioSampleFormat SampleFormat;
 
   // Generic methods
-  void SliceTo(TrackTicks aStart, TrackTicks aEnd)
+  void SliceTo(StreamTime aStart, StreamTime aEnd)
   {
     MOZ_ASSERT(aStart >= 0 && aStart < aEnd && aEnd <= mDuration,
                "Slice out of bounds");
@@ -97,7 +97,7 @@ struct AudioChunk {
     }
     mDuration = aEnd - aStart;
   }
-  TrackTicks GetDuration() const { return mDuration; }
+  StreamTime GetDuration() const { return mDuration; }
   bool CanCombineWithFollowing(const AudioChunk& aOther) const
   {
     if (aOther.mBuffer != mBuffer) {
@@ -121,7 +121,7 @@ struct AudioChunk {
     return true;
   }
   bool IsNull() const { return mBuffer == nullptr; }
-  void SetNull(TrackTicks aDuration)
+  void SetNull(StreamTime aDuration)
   {
     mBuffer = nullptr;
     mChannelData.Clear();
@@ -129,6 +129,25 @@ struct AudioChunk {
     mVolume = 1.0f;
     mBufferFormat = AUDIO_FORMAT_SILENCE;
   }
+
+  bool IsSilentOrSubnormal() const
+  {
+    if (!mBuffer) {
+      return true;
+    }
+
+    for (uint32_t i = 0, length = mChannelData.Length(); i < length; ++i) {
+      const float* channel = static_cast<const float*>(mChannelData[i]);
+      for (StreamTime frame = 0; frame < mDuration; ++frame) {
+        if (fabs(channel[frame]) >= FLT_MIN) {
+          return false;
+        }
+      }
+    }
+
+    return true;
+  }
+
   int ChannelCount() const { return mChannelData.Length(); }
 
   bool IsMuted() const { return mVolume == 0.0f; }
@@ -154,7 +173,7 @@ struct AudioChunk {
     return amount;
   }
 
-  TrackTicks mDuration; // in frames within the buffer
+  StreamTime mDuration; // in frames within the buffer
   nsRefPtr<ThreadSharedObject> mBuffer; // the buffer object whose lifetime is managed; null means data is all zeroes
   nsTArray<const void*> mChannelData; // one pointer per channel; empty if and only if mBuffer is null
   float mVolume; // volume multiplier to apply (1.0f if mBuffer is nonnull)
@@ -163,7 +182,6 @@ struct AudioChunk {
   mozilla::TimeStamp mTimeStamp;           // time at which this has been fetched from the MediaEngine
 #endif
 };
-
 
 /**
  * A list of audio samples consisting of a sequence of slices of SharedBuffers.
@@ -198,20 +216,27 @@ public:
       MOZ_ASSERT(channels == segmentChannelCount);
       output.SetLength(channels);
       bufferPtrs.SetLength(channels);
+#if !defined(MOZILLA_XPCOMRT_API)
+// FIXME Bug 1126414 - XPCOMRT does not support dom::WebAudioUtils::SpeexResamplerProcess
       uint32_t inFrames = c.mDuration;
+#endif // !defined(MOZILLA_XPCOMRT_API)
       // Round up to allocate; the last frame may not be used.
       NS_ASSERTION((UINT32_MAX - aInRate + 1) / c.mDuration >= aOutRate,
                    "Dropping samples");
       uint32_t outSize = (c.mDuration * aOutRate + aInRate - 1) / aInRate;
       for (uint32_t i = 0; i < channels; i++) {
-        const T* in = static_cast<const T*>(c.mChannelData[i]);
         T* out = output[i].AppendElements(outSize);
         uint32_t outFrames = outSize;
 
+#if !defined(MOZILLA_XPCOMRT_API)
+// FIXME Bug 1126414 - XPCOMRT does not support dom::WebAudioUtils::SpeexResamplerProcess
+        const T* in = static_cast<const T*>(c.mChannelData[i]);
         dom::WebAudioUtils::SpeexResamplerProcess(aResampler, i,
                                                   in, &inFrames,
                                                   out, &outFrames);
         MOZ_ASSERT(inFrames == c.mDuration);
+#endif // !defined(MOZILLA_XPCOMRT_API)
+
         bufferPtrs[i] = out;
         output[i].SetLength(outFrames);
       }
@@ -289,8 +314,9 @@ public:
     return 0;
   }
 
-  bool IsNull() {
-    for (ChunkIterator ci(*this); !ci.IsEnded(); ci.Next()) {
+  bool IsNull() const {
+    for (ChunkIterator ci(*const_cast<AudioSegment*>(this)); !ci.IsEnded();
+         ci.Next()) {
       if (!ci->IsNull()) {
         return false;
       }
@@ -300,7 +326,7 @@ public:
 
   static Type StaticType() { return AUDIO; }
 
-  virtual size_t SizeOfIncludingThis(MallocSizeOf aMallocSizeOf) const MOZ_OVERRIDE
+  virtual size_t SizeOfIncludingThis(MallocSizeOf aMallocSizeOf) const override
   {
     return aMallocSizeOf(this) + SizeOfExcludingThis(aMallocSizeOf);
   }

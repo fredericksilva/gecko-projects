@@ -53,14 +53,14 @@ XPCOMUtils.defineLazyModuleGetter(this, "PageThumbs",
 XPCOMUtils.defineLazyModuleGetter(this, "NewTabUtils",
                                   "resource://gre/modules/NewTabUtils.jsm");
 
-XPCOMUtils.defineLazyModuleGetter(this, "BrowserNewTabPreloader",
-                                  "resource:///modules/BrowserNewTabPreloader.jsm");
-
 XPCOMUtils.defineLazyModuleGetter(this, "CustomizationTabPreloader",
                                   "resource:///modules/CustomizationTabPreloader.jsm");
 
 XPCOMUtils.defineLazyModuleGetter(this, "PdfJs",
                                   "resource://pdf.js/PdfJs.jsm");
+
+XPCOMUtils.defineLazyModuleGetter(this, "ProcessHangMonitor",
+                                  "resource:///modules/ProcessHangMonitor.jsm");
 
 #ifdef NIGHTLY_BUILD
 XPCOMUtils.defineLazyModuleGetter(this, "ShumwayUtils",
@@ -91,6 +91,9 @@ XPCOMUtils.defineLazyModuleGetter(this, "RemotePrompt",
 XPCOMUtils.defineLazyModuleGetter(this, "ContentPrefServiceParent",
                                   "resource://gre/modules/ContentPrefServiceParent.jsm");
 
+XPCOMUtils.defineLazyModuleGetter(this, "SelfSupportBackend",
+                                  "resource:///modules/SelfSupportBackend.jsm");
+
 XPCOMUtils.defineLazyModuleGetter(this, "SessionStore",
                                   "resource:///modules/sessionstore/SessionStore.jsm");
 
@@ -119,6 +122,13 @@ XPCOMUtils.defineLazyModuleGetter(this, "UpdateChannel",
                                   "resource://gre/modules/UpdateChannel.jsm");
 #endif
 
+#ifdef MOZ_CRASHREPORTER
+XPCOMUtils.defineLazyModuleGetter(this, "TabCrashReporter",
+                                  "resource:///modules/ContentCrashReporters.jsm");
+XPCOMUtils.defineLazyModuleGetter(this, "PluginCrashReporter",
+                                  "resource:///modules/ContentCrashReporters.jsm");
+#endif
+
 XPCOMUtils.defineLazyGetter(this, "ShellService", function() {
   try {
     return Cc["@mozilla.org/browser/shell-service;1"].
@@ -129,11 +139,29 @@ XPCOMUtils.defineLazyGetter(this, "ShellService", function() {
   }
 });
 
+XPCOMUtils.defineLazyGetter(this, "gBrandBundle", function() {
+  return Services.strings.createBundle('chrome://branding/locale/brand.properties');
+});
+
+XPCOMUtils.defineLazyGetter(this, "gBrowserBundle", function() {
+  return Services.strings.createBundle('chrome://browser/locale/browser.properties');
+});
+
+
 XPCOMUtils.defineLazyModuleGetter(this, "FormValidationHandler",
                                   "resource:///modules/FormValidationHandler.jsm");
 
 XPCOMUtils.defineLazyModuleGetter(this, "WebChannel",
                                   "resource://gre/modules/WebChannel.jsm");
+
+XPCOMUtils.defineLazyModuleGetter(this, "ReaderParent",
+                                  "resource:///modules/ReaderParent.jsm");
+
+XPCOMUtils.defineLazyModuleGetter(this, "AddonWatcher",
+                                  "resource://gre/modules/AddonWatcher.jsm");
+
+XPCOMUtils.defineLazyModuleGetter(this, "LightweightThemeManager",
+                                  "resource://gre/modules/LightweightThemeManager.jsm");
 
 const PREF_PLUGINS_NOTIFYUSER = "plugins.update.notifyUser";
 const PREF_PLUGINS_UPDATEURL  = "plugins.update.url";
@@ -146,6 +174,28 @@ const BOOKMARKS_BACKUP_MIN_INTERVAL_DAYS = 1;
 // Maximum interval between backups.  If the last backup is older than these
 // days we will try to create a new one more aggressively.
 const BOOKMARKS_BACKUP_MAX_INTERVAL_DAYS = 3;
+
+// Record the current default search engine in Telemetry.
+function recordDefaultSearchEngine() {
+  let engine;
+  try {
+    engine = Services.search.defaultEngine;
+  } catch (e) {}
+  let name;
+
+  if (!engine) {
+    name = "NONE";
+  } else if (engine.identifier) {
+    name = engine.identifier;
+  } else if (engine.name) {
+    name = "other-" + engine.name;
+  } else {
+    name = "UNDEFINED";
+  }
+
+  let engines = Services.telemetry.getKeyedHistogramById("SEARCH_DEFAULT_ENGINE");
+  engines.add(name, true)
+}
 
 // Factory object
 const BrowserGlueServiceFactory = {
@@ -251,6 +301,9 @@ BrowserGlue.prototype = {
         Services.console.logStringMessage(null); // clear the console (in case it's open)
         Services.console.reset();
         break;
+      case "restart-in-safe-mode":
+        this._onSafeModeRestart();
+        break;
       case "quit-application-requested":
         this._onQuitRequest(subject, data);
         break;
@@ -329,6 +382,11 @@ BrowserGlue.prototype = {
         else if (data == "force-places-init") {
           this._initPlaces(false);
         }
+        else if (data == "smart-bookmarks-init") {
+          this.ensurePlacesDefaultQueriesInitialized().then(() => {
+            Services.obs.notifyObservers(null, "test-smart-bookmarks-done", null);
+          });
+        }
         break;
       case "initial-migration-will-import-default-bookmarks":
         this._migrationImportsDefaultBookmarks = true;
@@ -388,6 +446,19 @@ BrowserGlue.prototype = {
 #endif
         break;
       case "browser-search-engine-modified":
+        // Ensure we cleanup the hiddenOneOffs pref when removing
+        // an engine, and that newly added engines are visible.
+        if (data == "engine-added" || data == "engine-removed") {
+          let engineName = subject.QueryInterface(Ci.nsISearchEngine).name;
+          let Preferences =
+            Cu.import("resource://gre/modules/Preferences.jsm", {}).Preferences;
+          let pref = Preferences.get("browser.search.hiddenOneOffs");
+          let hiddenList = pref ? pref.split(",") : [];
+          hiddenList = hiddenList.filter(x => x !== engineName);
+          Preferences.set("browser.search.hiddenOneOffs",
+                          hiddenList.join(","));
+        }
+
         if (data != "engine-default" && data != "engine-current") {
           break;
         }
@@ -405,12 +476,14 @@ BrowserGlue.prototype = {
           ss.defaultEngine = ss.currentEngine;
         else
           ss.currentEngine = ss.defaultEngine;
+        recordDefaultSearchEngine();
         break;
       case "browser-search-service":
         if (data != "init-complete")
           return;
         Services.obs.removeObserver(this, "browser-search-service");
         this._syncSearchEngines();
+        recordDefaultSearchEngine();
         break;
 #ifdef NIGHTLY_BUILD
       case "nsPref:changed":
@@ -427,7 +500,11 @@ BrowserGlue.prototype = {
             Services.prefs.clearUserPref("privacy.trackingprotection.ui.enabled");
           }
         }
+        break;
 #endif
+      case "flash-plugin-hang":
+        this._handleFlashHang();
+        break;
     }
   },
 
@@ -474,6 +551,10 @@ BrowserGlue.prototype = {
 #endif
     os.addObserver(this, "browser-search-engine-modified", false);
     os.addObserver(this, "browser-search-service", false);
+    os.addObserver(this, "restart-in-safe-mode", false);
+    os.addObserver(this, "flash-plugin-hang", false);
+
+    this._flashHangCount = 0;
   },
 
   // cleanup (called on application shutdown)
@@ -485,6 +566,7 @@ BrowserGlue.prototype = {
     os.removeObserver(this, "browser:purge-session-history");
     os.removeObserver(this, "quit-application-requested");
     os.removeObserver(this, "quit-application-granted");
+    os.removeObserver(this, "restart-in-safe-mode");
 #ifdef OBSERVE_LASTWINDOW_CLOSE_TOPICS
     os.removeObserver(this, "browser-lastwindow-close-requested");
     os.removeObserver(this, "browser-lastwindow-close-granted");
@@ -517,12 +599,82 @@ BrowserGlue.prototype = {
 #ifdef NIGHTLY_BUILD
     Services.prefs.removeObserver(POLARIS_ENABLED, this);
 #endif
+    os.removeObserver(this, "flash-plugin-hang");
   },
 
   _onAppDefaults: function BG__onAppDefaults() {
     // apply distribution customizations (prefs)
     // other customizations are applied in _finalUIStartup()
     this._distributionCustomizer.applyPrefDefaults();
+  },
+
+  _notifySlowAddon: function BG_notifySlowAddon(addonId) {
+    let addonCallback = function(addon) {
+      if (!addon) {
+        Cu.reportError("couldn't look up addon: " + addonId);
+        return;
+      }
+      let win = RecentWindow.getMostRecentBrowserWindow();
+
+      if (!win) {
+        return;
+      }
+
+      let brandBundle = win.document.getElementById("bundle_brand");
+      let brandShortName = brandBundle.getString("brandShortName");
+      let message = win.gNavigatorBundle.getFormattedString("addonwatch.slow", [addon.name, brandShortName]);
+      let notificationBox = win.document.getElementById("global-notificationbox");
+      let notificationId = 'addon-slow:' + addonId;
+      let notification = notificationBox.getNotificationWithValue(notificationId);
+      if(notification) {
+        notification.label = message;
+      } else {
+        let buttons = [
+          {
+            label: win.gNavigatorBundle.getFormattedString("addonwatch.disable.label", [addon.name]),
+            callback: function() {
+              addon.userDisabled = true;
+              if (addon.pendingOperations != addon.PENDING_NONE) {
+                let restartMessage = win.gNavigatorBundle.getFormattedString("addonwatch.restart.message", [addon.name, brandShortName]);
+                let restartButton = [
+                  {
+                    label: win.gNavigatorBundle.getFormattedString("addonwatch.restart.label", [brandShortName]),
+                    accessKey: win.gNavigatorBundle.getString("addonwatch.restart.accesskey"),
+                    callback: function() {
+                      let appStartup = Cc["@mozilla.org/toolkit/app-startup;1"]
+                        .getService(Ci.nsIAppStartup);
+                      appStartup.quit(appStartup.eForceQuit | appStartup.eRestart);
+                    }
+                  }
+                ];
+                const priority = notificationBox.PRIORITY_WARNING_MEDIUM;
+                notificationBox.appendNotification(restartMessage, "restart-" + addonId, "",
+                                                   priority, restartButton);
+              }
+            }
+          },
+          {
+            label: win.gNavigatorBundle.getString("addonwatch.ignoreSession.label"),
+            accessKey: win.gNavigatorBundle.getString("addonwatch.ignoreSession.accesskey"),
+            callback: function() {
+              AddonWatcher.ignoreAddonForSession(addonId);
+            }
+          },
+          {
+            label: win.gNavigatorBundle.getString("addonwatch.ignorePerm.label"),
+            accessKey: win.gNavigatorBundle.getString("addonwatch.ignorePerm.accesskey"),
+            callback: function() {
+              AddonWatcher.ignoreAddonPermanently(addonId);
+            }
+          },
+        ];
+
+        const priority = notificationBox.PRIORITY_WARNING_MEDIUM;
+        notificationBox.appendNotification(message, notificationId, "",
+                                             priority, buttons);
+      }
+    };
+    AddonManager.getAddonByID(addonId, addonCallback);
   },
 
   // runs on startup, before the first command line handler is invoked
@@ -554,9 +706,6 @@ BrowserGlue.prototype = {
       SignInToWebsiteUX.init();
     }
 #endif
-#ifdef NIGHTLY_BUILD
-    ShumwayUtils.init();
-#endif
     webrtcUI.init();
     AboutHome.init();
     SessionStore.init();
@@ -569,12 +718,38 @@ BrowserGlue.prototype = {
     ContentPrefServiceParent.init();
 
     LoginManagerParent.init();
+    ReaderParent.init();
+
+    SelfSupportBackend.init();
 
 #ifdef NIGHTLY_BUILD
     Services.prefs.addObserver(POLARIS_ENABLED, this, false);
 #endif
 
+#ifndef RELEASE_BUILD
+    let themeName = gBrowserBundle.GetStringFromName("deveditionTheme.name");
+    let vendorShortName = gBrandBundle.GetStringFromName("vendorShortName");
+
+    LightweightThemeManager.addBuiltInTheme({
+      id: "firefox-devedition@mozilla.org",
+      name: themeName,
+      accentcolor: "transparent",
+      headerURL: "resource:///chrome/browser/content/browser/defaultthemes/devedition.header.png",
+      iconURL: "resource:///chrome/browser/content/browser/defaultthemes/devedition.icon.png",
+      author: vendorShortName,
+    });
+#endif
+
+#ifdef MOZ_CRASHREPORTER
+    TabCrashReporter.init();
+    PluginCrashReporter.init();
+#endif
+
     Services.obs.notifyObservers(null, "browser-ui-startup-complete", "");
+
+#ifdef NIGHTLY_BUILD
+    AddonWatcher.init(this._notifySlowAddon);
+#endif
   },
 
   _checkForOldBuildUpdates: function () {
@@ -598,6 +773,33 @@ BrowserGlue.prototype = {
       if (buildDate + acceptableAge < today) {
         Cc["@mozilla.org/updates/update-service;1"].getService(Ci.nsIApplicationUpdateService).checkForBackgroundUpdates();
       }
+    }
+  },
+
+  _onSafeModeRestart: function BG_onSafeModeRestart() {
+    // prompt the user to confirm
+    let strings = gBrowserBundle;
+    let promptTitle = strings.GetStringFromName("safeModeRestartPromptTitle");
+    let promptMessage = strings.GetStringFromName("safeModeRestartPromptMessage");
+    let restartText = strings.GetStringFromName("safeModeRestartButton");
+    let buttonFlags = (Services.prompt.BUTTON_POS_0 *
+                       Services.prompt.BUTTON_TITLE_IS_STRING) +
+                      (Services.prompt.BUTTON_POS_1 *
+                       Services.prompt.BUTTON_TITLE_CANCEL) +
+                      Services.prompt.BUTTON_POS_0_DEFAULT;
+
+    let rv = Services.prompt.confirmEx(null, promptTitle, promptMessage,
+                                       buttonFlags, restartText, null, null,
+                                       null, {});
+    if (rv != 0)
+      return;
+
+    let cancelQuit = Cc["@mozilla.org/supports-PRBool;1"]
+                       .createInstance(Ci.nsISupportsPRBool);
+    Services.obs.notifyObservers(cancelQuit, "quit-application-requested", "restart");
+
+    if (!cancelQuit.data) {
+      Services.startup.restartInSafeMode(Ci.nsIAppStartup.eAttemptQuit);
     }
   },
 
@@ -634,9 +836,7 @@ BrowserGlue.prototype = {
     if (!win)
       return;
 
-    let productName = Services.strings
-                              .createBundle("chrome://branding/locale/brand.properties")
-                              .GetStringFromName("brandFullName");
+    let productName = gBrandBundle.GetStringFromName("brandFullName");
     let message = win.gNavigatorBundle.getFormattedString("slowStartup.message", [productName]);
 
     let buttons = [
@@ -674,9 +874,7 @@ BrowserGlue.prototype = {
     if (!ResetProfile.resetSupported())
       return;
 
-    let productName = Services.strings
-                              .createBundle("chrome://branding/locale/brand.properties")
-                              .GetStringFromName("brandShortName");
+    let productName = gBrandBundle.GetStringFromName("brandShortName");
     let resetBundle = Services.strings
                               .createBundle("chrome://global/locale/resetProfile.properties");
 
@@ -728,6 +926,12 @@ BrowserGlue.prototype = {
     // With older versions of the extension installed, this load will fail
     // passively.
     aWindow.messageManager.loadFrameScript("resource://pdf.js/pdfjschildbootstrap.js", true);
+#ifdef NIGHTLY_BUILD
+    // Registering Shumway bootstrap script the child processes.
+    aWindow.messageManager.loadFrameScript("chrome://shumway/content/bootstrap-content.js", true);
+    // Initializing Shumway (shall be run after child script registration).
+    ShumwayUtils.init();
+#endif
 #ifdef XP_WIN
     // For windows seven, initialize the jump list module.
     const WINTASKBAR_CONTRACTID = "@mozilla.org/windows-taskbar;1";
@@ -738,6 +942,8 @@ BrowserGlue.prototype = {
       temp.WinTaskbarJumpList.startup();
     }
 #endif
+
+    ProcessHangMonitor.init();
 
     // A channel for "remote troubleshooting" code...
     let channel = new WebChannel("remote-troubleshooting", "remote-troubleshooting");
@@ -791,7 +997,8 @@ BrowserGlue.prototype = {
       Cu.reportError("Could not end startup crash tracking in quit-application-granted: " + e);
     }
 
-    BrowserNewTabPreloader.uninit();
+    SelfSupportBackend.uninit();
+
     CustomizationTabPreloader.uninit();
     WebappManager.uninit();
 #ifdef NIGHTLY_BUILD
@@ -801,9 +1008,15 @@ BrowserGlue.prototype = {
 #endif
     webrtcUI.uninit();
     FormValidationHandler.uninit();
+#ifdef NIGHTLY_BUILD
+    AddonWatcher.uninit();
+#endif
   },
 
   _initServiceDiscovery: function () {
+    if (!Services.prefs.getBoolPref("browser.casting.enabled")) {
+      return;
+    }
     var rokuDevice = {
       id: "roku:ecp",
       target: "roku:ecp",
@@ -811,7 +1024,7 @@ BrowserGlue.prototype = {
         Cu.import("resource://gre/modules/RokuApp.jsm");
         return new RokuApp(aService);
       },
-      mirror: false,
+      mirror: true,
       types: ["video/mp4"],
       extensions: ["mp4"]
     };
@@ -1009,9 +1222,7 @@ BrowserGlue.prototype = {
 
     let prompt = Services.prompt;
     let quitBundle = Services.strings.createBundle("chrome://browser/locale/quitDialog.properties");
-    let brandBundle = Services.strings.createBundle("chrome://branding/locale/brand.properties");
-
-    let appName = brandBundle.GetStringFromName("brandShortName");
+    let appName = gBrandBundle.GetStringFromName("brandShortName");
     let quitDialogTitle = quitBundle.formatStringFromName("quitDialogTitle",
                                                           [appName], 1);
     let neverAskText = quitBundle.GetStringFromName("neverAsk2");
@@ -1088,9 +1299,7 @@ BrowserGlue.prototype = {
 
     var formatter = Cc["@mozilla.org/toolkit/URLFormatterService;1"].
                     getService(Ci.nsIURLFormatter);
-    var browserBundle = Services.strings.createBundle("chrome://browser/locale/browser.properties");
-    var brandBundle = Services.strings.createBundle("chrome://branding/locale/brand.properties");
-    var appName = brandBundle.GetStringFromName("brandShortName");
+    var appName = gBrandBundle.GetStringFromName("brandShortName");
 
     function getNotifyString(aPropData) {
       var propValue = update.getProperty(aPropData.propName);
@@ -1098,11 +1307,11 @@ BrowserGlue.prototype = {
         if (aPropData.prefName)
           propValue = formatter.formatURLPref(aPropData.prefName);
         else if (aPropData.stringParams)
-          propValue = browserBundle.formatStringFromName(aPropData.stringName,
-                                                         aPropData.stringParams,
-                                                         aPropData.stringParams.length);
+          propValue = gBrowserBundle.formatStringFromName(aPropData.stringName,
+                                                          aPropData.stringParams,
+                                                          aPropData.stringParams.length);
         else
-          propValue = browserBundle.GetStringFromName(aPropData.stringName);
+          propValue = gBrowserBundle.GetStringFromName(aPropData.stringName);
       }
       return propValue;
     }
@@ -1243,7 +1452,7 @@ BrowserGlue.prototype = {
         () => BookmarkHTMLUtils.exportToFile(BookmarkHTMLUtils.defaultPath));
     }
 
-    Task.spawn(function() {
+    Task.spawn(function* () {
       // Check if Safe Mode or the user has required to restore bookmarks from
       // default profile's bookmarks.html
       let restoreDefaultBookmarks = false;
@@ -1293,8 +1502,8 @@ BrowserGlue.prototype = {
       if (!importBookmarks) {
         // Now apply distribution customized bookmarks.
         // This should always run after Places initialization.
-        this._distributionCustomizer.applyBookmarks();
-        this.ensurePlacesDefaultQueriesInitialized();
+        yield this._distributionCustomizer.applyBookmarks();
+        yield this.ensurePlacesDefaultQueriesInitialized();
       }
       else {
         // An import operation is about to run.
@@ -1319,23 +1528,21 @@ BrowserGlue.prototype = {
         if (bookmarksUrl) {
           // Import from bookmarks.html file.
           try {
-            BookmarkHTMLUtils.importFromURL(bookmarksUrl, true).then(null,
-              function onFailure() {
-                Cu.reportError("Bookmarks.html file could be corrupt.");
-              }
-            ).then(
-              function onComplete() {
-                // Now apply distribution customized bookmarks.
-                // This should always run after Places initialization.
-                this._distributionCustomizer.applyBookmarks();
-                // Ensure that smart bookmarks are created once the operation is
-                // complete.
-                this.ensurePlacesDefaultQueriesInitialized();
-              }.bind(this)
-            );
-          } catch (err) {
-            Cu.reportError("Bookmarks.html file could be corrupt. " + err);
+            yield BookmarkHTMLUtils.importFromURL(bookmarksUrl, true);
+          } catch (e) {
+            Cu.reportError("Bookmarks.html file could be corrupt. " + e);
           }
+          try {
+            // Now apply distribution customized bookmarks.
+            // This should always run after Places initialization.
+            yield this._distributionCustomizer.applyBookmarks();
+            // Ensure that smart bookmarks are created once the operation is
+            // complete.
+            yield this.ensurePlacesDefaultQueriesInitialized();
+          } catch (e) {
+            Cu.reportError(e);
+          }
+
         }
         else {
           Cu.reportError("Unable to find bookmarks.html file.");
@@ -1375,7 +1582,7 @@ BrowserGlue.prototype = {
                       .getHistogramById("PLACES_BACKUPS_DAYSFROMLAST")
                       .add(backupAge);
             } catch (ex) {
-              Components.utils.reportError("Unable to report telemetry.");
+              Cu.reportError("Unable to report telemetry.");
             }
 
             if (backupAge > BOOKMARKS_BACKUP_MAX_INTERVAL_DAYS)
@@ -1424,8 +1631,7 @@ BrowserGlue.prototype = {
    * Show the notificationBox for a locked places database.
    */
   _showPlacesLockedNotificationBox: function BG__showPlacesLockedNotificationBox() {
-    var brandBundle  = Services.strings.createBundle("chrome://branding/locale/brand.properties");
-    var applicationName = brandBundle.GetStringFromName("brandShortName");
+    var applicationName = gBrandBundle.GetStringFromName("brandShortName");
     var placesBundle = Services.strings.createBundle("chrome://browser/locale/places/places.properties");
     var title = placesBundle.GetStringFromName("lockPrompt.title");
     var text = placesBundle.formatStringFromName("lockPrompt.text", [applicationName], 1);
@@ -1459,7 +1665,7 @@ BrowserGlue.prototype = {
   },
 
   _migrateUI: function BG__migrateUI() {
-    const UI_VERSION = 26;
+    const UI_VERSION = 30;
     const BROWSER_DOCURL = "chrome://browser/content/browser.xul";
     let currentUIVersion = 0;
     try {
@@ -1593,7 +1799,7 @@ BrowserGlue.prototype = {
       let currentset = xulStore.getValue(BROWSER_DOCURL, "nav-bar", "currentset");
       // Need to migrate only if toolbar is customized.
       if (currentset) {
-        if (currentset.contains("bookmarks-menu-button-container")) {
+        if (currentset.includes("bookmarks-menu-button-container")) {
           currentset = currentset.replace(/(^|,)bookmarks-menu-button-container($|,)/,
                                           "$1bookmarks-menu-button$2");
           xulStore.setValue(BROWSER_DOCURL, "nav-bar", "currentset", currentset);
@@ -1621,13 +1827,13 @@ BrowserGlue.prototype = {
       let currentset = xulStore.getValue(BROWSER_DOCURL, "nav-bar", "currentset");
       // Need to migrate only if toolbar is customized.
       if (currentset) {
-        if (!currentset.contains("bookmarks-menu-button")) {
+        if (!currentset.includes("bookmarks-menu-button")) {
           // The button isn't in the nav-bar, so let's look for an appropriate
           // place to put it.
-          if (currentset.contains("downloads-button")) {
+          if (currentset.includes("downloads-button")) {
             currentset = currentset.replace(/(^|,)downloads-button($|,)/,
                                             "$1bookmarks-menu-button,downloads-button$2");
-          } else if (currentset.contains("home-button")) {
+          } else if (currentset.includes("home-button")) {
             currentset = currentset.replace(/(^|,)home-button($|,)/,
                                             "$1bookmarks-menu-button,home-button$2");
           } else {
@@ -1769,6 +1975,66 @@ BrowserGlue.prototype = {
       }
     }
 
+    if (currentUIVersion < 27) {
+      // Fix up document color use:
+      const kOldColorPref = "browser.display.use_document_colors";
+      if (Services.prefs.prefHasUserValue(kOldColorPref) &&
+          !Services.prefs.getBoolPref(kOldColorPref)) {
+        Services.prefs.setIntPref("browser.display.document_color_use", 2);
+      }
+    }
+
+    if (currentUIVersion < 29) {
+      let group = null;
+      try {
+        group = Services.prefs.getComplexValue("font.language.group",
+                                               Ci.nsIPrefLocalizedString);
+      } catch (ex) {}
+      if (group &&
+          ["tr", "x-baltic", "x-central-euro"].some(g => g == group.data)) {
+        // Latin groups were consolidated.
+        group.data = "x-western";
+        Services.prefs.setComplexValue("font.language.group",
+                                       Ci.nsIPrefLocalizedString, group);
+      }
+    }
+
+    if (currentUIVersion < 30) {
+      // Convert old devedition theme pref to lightweight theme storage
+      let lightweightThemeSelected = false;
+      let selectedThemeID = null;
+      try {
+        lightweightThemeSelected = Services.prefs.prefHasUserValue("lightweightThemes.selectedThemeID");
+        selectedThemeID = Services.prefs.getCharPref("lightweightThemes.selectedThemeID");
+      } catch(e) {}
+
+      let defaultThemeSelected = false;
+      try {
+         defaultThemeSelected = Services.prefs.getCharPref("general.skins.selectedSkin") == "classic/1.0";
+      } catch(e) {}
+
+      let deveditionThemeEnabled = false;
+      try {
+         deveditionThemeEnabled = Services.prefs.getBoolPref("browser.devedition.theme.enabled");
+      } catch(e) {}
+
+      // If we are on the devedition channel, the devedition theme is on by
+      // default.  But we need to handle the case where they didn't want it
+      // applied, and unapply the theme.
+      let userChoseToNotUseDeveditionTheme =
+        !deveditionThemeEnabled ||
+        !defaultThemeSelected ||
+        (lightweightThemeSelected && selectedThemeID != "firefox-devedition@mozilla.org");
+
+      if (userChoseToNotUseDeveditionTheme && selectedThemeID == "firefox-devedition@mozilla.org") {
+        Services.prefs.setCharPref("lightweightThemes.selectedThemeID", "");
+      }
+
+      // Not clearing browser.devedition.theme.enabled, to preserve user's pref
+      // if for some reason this function runs again (even though it shouldn't)
+      Services.prefs.clearUserPref("browser.devedition.showCustomizeButton");
+    }
+
     // Update the migration version.
     Services.prefs.setIntPref("browser.migration.version", UI_VERSION);
   },
@@ -1781,12 +2047,11 @@ BrowserGlue.prototype = {
     this._sanitizer.sanitize(aParentWindow);
   },
 
-  ensurePlacesDefaultQueriesInitialized:
-  function BG_ensurePlacesDefaultQueriesInitialized() {
-    // This is actual version of the smart bookmarks, must be increased every
-    // time smart bookmarks change.
+  ensurePlacesDefaultQueriesInitialized: Task.async(function* () {
+    // This is the current smart bookmarks version, it must be increased every
+    // time they change.
     // When adding a new smart bookmark below, its newInVersion property must
-    // be set to the version it has been added in, we will compare its value
+    // be set to the version it has been added in.  We will compare its value
     // to users' smartBookmarksVersion and add new smart bookmarks without
     // recreating old deleted ones.
     const SMART_BOOKMARKS_VERSION = 7;
@@ -1802,160 +2067,128 @@ BrowserGlue.prototype = {
       smartBookmarksCurrentVersion = Services.prefs.getIntPref(SMART_BOOKMARKS_PREF);
     } catch(ex) {}
 
-    // If version is current or smart bookmarks are disabled, just bail out.
+    // If version is current, or smart bookmarks are disabled, bail out.
     if (smartBookmarksCurrentVersion == -1 ||
         smartBookmarksCurrentVersion >= SMART_BOOKMARKS_VERSION) {
       return;
     }
 
-    let batch = {
-      runBatched: function BG_EPDQI_runBatched() {
-        let menuIndex = 0;
-        let toolbarIndex = 0;
-        let bundle = Services.strings.createBundle("chrome://browser/locale/places/places.properties");
+    try {
+      let menuIndex = 0;
+      let toolbarIndex = 0;
+      let bundle = Services.strings.createBundle("chrome://browser/locale/places/places.properties");
+      let queryOptions = Ci.nsINavHistoryQueryOptions;
 
-        let smartBookmarks = {
-          MostVisited: {
-            title: bundle.GetStringFromName("mostVisitedTitle"),
-            uri: NetUtil.newURI("place:sort=" +
-                                Ci.nsINavHistoryQueryOptions.SORT_BY_VISITCOUNT_DESCENDING +
-                                "&maxResults=" + MAX_RESULTS),
-            parent: PlacesUtils.toolbarFolderId,
-            get position() { return toolbarIndex++; },
-            newInVersion: 1
-          },
-          RecentlyBookmarked: {
-            title: bundle.GetStringFromName("recentlyBookmarkedTitle"),
-            uri: NetUtil.newURI("place:folder=BOOKMARKS_MENU" +
-                                "&folder=UNFILED_BOOKMARKS" +
-                                "&folder=TOOLBAR" +
-                                "&queryType=" +
-                                Ci.nsINavHistoryQueryOptions.QUERY_TYPE_BOOKMARKS +
-                                "&sort=" +
-                                Ci.nsINavHistoryQueryOptions.SORT_BY_DATEADDED_DESCENDING +
-                                "&maxResults=" + MAX_RESULTS +
-                                "&excludeQueries=1"),
-            parent: PlacesUtils.bookmarksMenuFolderId,
-            get position() { return menuIndex++; },
-            newInVersion: 1
-          },
-          RecentTags: {
-            title: bundle.GetStringFromName("recentTagsTitle"),
-            uri: NetUtil.newURI("place:"+
-                                "type=" +
-                                Ci.nsINavHistoryQueryOptions.RESULTS_AS_TAG_QUERY +
-                                "&sort=" +
-                                Ci.nsINavHistoryQueryOptions.SORT_BY_LASTMODIFIED_DESCENDING +
-                                "&maxResults=" + MAX_RESULTS),
-            parent: PlacesUtils.bookmarksMenuFolderId,
-            get position() { return menuIndex++; },
-            newInVersion: 1
-          },
-        };
+      let smartBookmarks = {
+        MostVisited: {
+          title: bundle.GetStringFromName("mostVisitedTitle"),
+          url: "place:sort=" + queryOptions.SORT_BY_VISITCOUNT_DESCENDING +
+                    "&maxResults=" + MAX_RESULTS,
+          parentGuid: PlacesUtils.bookmarks.toolbarGuid,
+          newInVersion: 1
+        },
+        RecentlyBookmarked: {
+          title: bundle.GetStringFromName("recentlyBookmarkedTitle"),
+          url: "place:folder=BOOKMARKS_MENU" +
+                    "&folder=UNFILED_BOOKMARKS" +
+                    "&folder=TOOLBAR" +
+                    "&queryType=" + queryOptions.QUERY_TYPE_BOOKMARKS +
+                    "&sort=" + queryOptions.SORT_BY_DATEADDED_DESCENDING +
+                    "&maxResults=" + MAX_RESULTS +
+                    "&excludeQueries=1",
+          parentGuid: PlacesUtils.bookmarks.menuGuid,
+          newInVersion: 1
+        },
+        RecentTags: {
+          title: bundle.GetStringFromName("recentTagsTitle"),
+          url: "place:type=" + queryOptions.RESULTS_AS_TAG_QUERY +
+                    "&sort=" + queryOptions.SORT_BY_LASTMODIFIED_DESCENDING +
+                    "&maxResults=" + MAX_RESULTS,
+          parentGuid: PlacesUtils.bookmarks.menuGuid,
+          newInVersion: 1
+        },
+      };
 
-        if (Services.metro && Services.metro.supported) {
-          smartBookmarks.Windows8Touch = {
-            title: PlacesUtils.getString("windows8TouchTitle"),
-            get uri() {
-              let metroBookmarksRoot = PlacesUtils.annotations.getItemsWithAnnotation('metro/bookmarksRoot', {});
-              if (metroBookmarksRoot.length > 0) {
-                return NetUtil.newURI("place:folder=" +
-                                      metroBookmarksRoot[0] +
-                                      "&queryType=" +
-                                      Ci.nsINavHistoryQueryOptions.QUERY_TYPE_BOOKMARKS +
-                                      "&sort=" +
-                                      Ci.nsINavHistoryQueryOptions.SORT_BY_DATEADDED_DESCENDING +
-                                      "&maxResults=" + MAX_RESULTS +
-                                      "&excludeQueries=1")
-              }
-              return null;
-            },
-            parent: PlacesUtils.bookmarksMenuFolderId,
-            get position() { return menuIndex++; },
-            newInVersion: 7
-          };
-        }
-
-        // Set current itemId, parent and position if Smart Bookmark exists,
-        // we will use these informations to create the new version at the same
-        // position.
-        let smartBookmarkItemIds = PlacesUtils.annotations.getItemsWithAnnotation(SMART_BOOKMARKS_ANNO);
-        smartBookmarkItemIds.forEach(function (itemId) {
-          let queryId = PlacesUtils.annotations.getItemAnnotation(itemId, SMART_BOOKMARKS_ANNO);
-          if (queryId in smartBookmarks) {
-            let smartBookmark = smartBookmarks[queryId];
-            if (!smartBookmark.uri) {
-              PlacesUtils.bookmarks.removeItem(itemId);
-              return;
-            }
-            smartBookmark.itemId = itemId;
-            smartBookmark.parent = PlacesUtils.bookmarks.getFolderIdForItem(itemId);
-            smartBookmark.updatedPosition = PlacesUtils.bookmarks.getItemIndex(itemId);
-          }
-          else {
-            // We don't remove old Smart Bookmarks because user could still
-            // find them useful, or could have personalized them.
-            // Instead we remove the Smart Bookmark annotation.
-            PlacesUtils.annotations.removeItemAnnotation(itemId, SMART_BOOKMARKS_ANNO);
-          }
-        });
-
-        for (let queryId in smartBookmarks) {
+      // Set current guid, parentGuid and index of existing Smart Bookmarks.
+      // We will use those to create a new version of the bookmark at the same
+      // position.
+      let smartBookmarkItemIds = PlacesUtils.annotations.getItemsWithAnnotation(SMART_BOOKMARKS_ANNO);
+      for (let itemId of smartBookmarkItemIds) {
+        let queryId = PlacesUtils.annotations.getItemAnnotation(itemId, SMART_BOOKMARKS_ANNO);
+        if (queryId in smartBookmarks) {
+          // Known smart bookmark.
           let smartBookmark = smartBookmarks[queryId];
+          smartBookmark.guid = yield PlacesUtils.promiseItemGuid(itemId);
 
-          // We update or create only changed or new smart bookmarks.
-          // Also we respect user choices, so we won't try to create a smart
-          // bookmark if it has been removed.
-          if (smartBookmarksCurrentVersion > 0 &&
-              smartBookmark.newInVersion <= smartBookmarksCurrentVersion &&
-              !smartBookmark.itemId || !smartBookmark.uri)
+          if (!smartBookmark.url) {
+            yield PlacesUtils.bookmarks.remove(smartBookmark.guid);
             continue;
-
-          // Remove old version of the smart bookmark if it exists, since it
-          // will be replaced in place.
-          if (smartBookmark.itemId) {
-            PlacesUtils.bookmarks.removeItem(smartBookmark.itemId);
           }
 
-          // Create the new smart bookmark and store its updated itemId.
-          smartBookmark.itemId =
-            PlacesUtils.bookmarks.insertBookmark(smartBookmark.parent,
-                                                 smartBookmark.uri,
-                                                 smartBookmark.updatedPosition || smartBookmark.position,
-                                                 smartBookmark.title);
-          PlacesUtils.annotations.setItemAnnotation(smartBookmark.itemId,
-                                                    SMART_BOOKMARKS_ANNO,
-                                                    queryId, 0,
-                                                    PlacesUtils.annotations.EXPIRE_NEVER);
+          let bm = yield PlacesUtils.bookmarks.fetch(smartBookmark.guid);
+          smartBookmark.parentGuid = bm.parentGuid;
+          smartBookmark.index = bm.index;
         }
-
-        // If we are creating all Smart Bookmarks from ground up, add a
-        // separator below them in the bookmarks menu.
-        if (smartBookmarksCurrentVersion == 0 &&
-            smartBookmarkItemIds.length == 0) {
-          let id = PlacesUtils.bookmarks.getIdForItemAt(PlacesUtils.bookmarksMenuFolderId,
-                                                        menuIndex);
-          // Don't add a separator if the menu was empty or there is one already.
-          if (id != -1 &&
-              PlacesUtils.bookmarks.getItemType(id) != PlacesUtils.bookmarks.TYPE_SEPARATOR) {
-            PlacesUtils.bookmarks.insertSeparator(PlacesUtils.bookmarksMenuFolderId,
-                                                  menuIndex);
-          }
+        else {
+          // We don't remove old Smart Bookmarks because user could still
+          // find them useful, or could have personalized them.
+          // Instead we remove the Smart Bookmark annotation.
+          PlacesUtils.annotations.removeItemAnnotation(itemId, SMART_BOOKMARKS_ANNO);
         }
       }
-    };
 
-    try {
-      PlacesUtils.bookmarks.runInBatchMode(batch, null);
-    }
-    catch(ex) {
-      Components.utils.reportError(ex);
-    }
-    finally {
+      for (let queryId of Object.keys(smartBookmarks)) {
+        let smartBookmark = smartBookmarks[queryId];
+
+        // We update or create only changed or new smart bookmarks.
+        // Also we respect user choices, so we won't try to create a smart
+        // bookmark if it has been removed.
+        if (smartBookmarksCurrentVersion > 0 &&
+            smartBookmark.newInVersion <= smartBookmarksCurrentVersion &&
+            !smartBookmark.guid || !smartBookmark.url)
+          continue;
+
+        // Remove old version of the smart bookmark if it exists, since it
+        // will be replaced in place.
+        if (smartBookmark.guid) {
+          yield PlacesUtils.bookmarks.remove(smartBookmark.guid);
+        }
+
+        // Create the new smart bookmark and store its updated guid.
+        if (!("index" in smartBookmark)) {
+          if (smartBookmark.parentGuid == PlacesUtils.bookmarks.toolbarGuid)
+            smartBookmark.index = toolbarIndex++;
+          else if (smartBookmark.parentGuid == PlacesUtils.bookmarks.menuGuid)
+            smartBookmark.index = menuIndex++;
+        }
+        smartBookmark = yield PlacesUtils.bookmarks.insert(smartBookmark);
+        let itemId = yield PlacesUtils.promiseItemId(smartBookmark.guid);
+        PlacesUtils.annotations.setItemAnnotation(itemId,
+                                                  SMART_BOOKMARKS_ANNO,
+                                                  queryId, 0,
+                                                  PlacesUtils.annotations.EXPIRE_NEVER);
+      }
+
+      // If we are creating all Smart Bookmarks from ground up, add a
+      // separator below them in the bookmarks menu.
+      if (smartBookmarksCurrentVersion == 0 &&
+          smartBookmarkItemIds.length == 0) {
+        let bm = yield PlacesUtils.bookmarks.fetch({ parentGuid: PlacesUtils.bookmarks.menuGuid,
+                                                     index: menuIndex });
+        // Don't add a separator if the menu was empty or there is one already.
+        if (bm && bm.type != PlacesUtils.bookmarks.TYPE_SEPARATOR) {
+          yield PlacesUtils.bookmarks.insert({ type: PlacesUtils.bookmarks.TYPE_SEPARATOR,
+                                               parentGuid: PlacesUtils.bookmarks.menuGuid,
+                                               index: menuIndex });
+        }
+      }
+    } catch(ex) {
+      Cu.reportError(ex);
+    } finally {
       Services.prefs.setIntPref(SMART_BOOKMARKS_PREF, SMART_BOOKMARKS_VERSION);
       Services.prefs.savePrefFile(null);
     }
-  },
+  }),
 
   // this returns the most recent non-popup browser window
   getMostRecentBrowserWindow: function BG_getMostRecentBrowserWindow() {
@@ -1985,6 +2218,47 @@ BrowserGlue.prototype = {
     }
   },
 #endif
+
+  _handleFlashHang: function() {
+    ++this._flashHangCount;
+    if (this._flashHangCount < 2) {
+      return;
+    }
+    // protected mode only applies to win32
+    if (Services.appinfo.XPCOMABI != "x86-msvc") {
+      return;
+    }
+
+    if (Services.prefs.getBoolPref("dom.ipc.plugins.flash.disable-protected-mode")) {
+      return;
+    }
+    if (!Services.prefs.getBoolPref("browser.flash-protected-mode-flip.enable")) {
+      return;
+    }
+    if (Services.prefs.getBoolPref("browser.flash-protected-mode-flip.done")) {
+      return;
+    }
+    Services.prefs.setBoolPref("dom.ipc.plugins.flash.disable-protected-mode", true);
+    Services.prefs.setBoolPref("browser.flash-protected-mode-flip.done", true);
+
+    let win = this.getMostRecentBrowserWindow();
+    if (!win) {
+      return;
+    }
+    let productName = gBrandBundle.GetStringFromName("brandShortName");
+    let message = win.gNavigatorBundle.
+      getFormattedString("flashHang.message", [productName]);
+    let buttons = [{
+      label: win.gNavigatorBundle.getString("flashHang.helpButton.label"),
+      accessKey: win.gNavigatorBundle.getString("flashHang.helpButton.accesskey"),
+      callback: function() {
+        win.openUILinkIn("https://support.mozilla.org/kb/flash-protected-mode-autodisabled", "tab");
+      }
+    }];
+    let nb = win.document.getElementById("global-notificationbox");
+    nb.appendNotification(message, "flash-hang", null,
+                          nb.PRIORITY_INFO_MEDIUM, buttons);
+  },
 
   // for XPCOM
   classID:          Components.ID("{eab9012e-5f74-4cbc-b2b5-a590235513cc}"),
@@ -2037,7 +2311,6 @@ ContentPermissionPrompt.prototype = {
       popup.remove();
     }
 
-    var browserBundle = Services.strings.createBundle("chrome://browser/locale/browser.properties");
 
     var browser = this._getBrowserForRequest(aRequest);
     var chromeWin = browser.ownerDocument.defaultView;
@@ -2056,8 +2329,8 @@ ContentPermissionPrompt.prototype = {
       }
 
       var action = {
-        label: browserBundle.GetStringFromName(promptAction.stringId),
-        accessKey: browserBundle.GetStringFromName(promptAction.stringId + ".accesskey"),
+        label: gBrowserBundle.GetStringFromName(promptAction.stringId),
+        accessKey: gBrowserBundle.GetStringFromName(promptAction.stringId + ".accesskey"),
         callback: function() {
           if (promptAction.callback) {
             promptAction.callback();
@@ -2124,9 +2397,44 @@ ContentPermissionPrompt.prototype = {
     }
   },
 
+  _promptPush : function(aRequest) {
+    var browserBundle = Services.strings.createBundle("chrome://browser/locale/browser.properties");
+    var requestingURI = aRequest.principal.URI;
+
+    var message = browserBundle.formatStringFromName("push.enablePush",
+                                                 [requestingURI.host], 1);
+
+    var actions = [
+    {
+      stringId: "push.alwaysAllow",
+      action: Ci.nsIPermissionManager.ALLOW_ACTION,
+      expireType: null,
+      callback: function() {}
+    },
+    {
+      stringId: "push.allowForSession",
+      action: Ci.nsIPermissionManager.ALLOW_ACTION,
+      expireType: Ci.nsIPermissionManager.EXPIRE_SESSION,
+      callback: function() {}
+    },
+    {
+      stringId: "push.alwaysBlock",
+      action: Ci.nsIPermissionManager.DENY_ACTION,
+      expireType: null,
+      callback: function() {}
+    }]
+
+    var options = {
+                    learnMoreURL: Services.urlFormatter.formatURLPref("browser.push.warning.infoURL"),
+                  };
+
+    this._showPrompt(aRequest, message, "push", actions, "push",
+                     "push-notification-icon", options);
+
+  },
+
   _promptGeo : function(aRequest) {
     var secHistogram = Services.telemetry.getHistogramById("SECURITY_UI");
-    var browserBundle = Services.strings.createBundle("chrome://browser/locale/browser.properties");
     var requestingURI = aRequest.principal.URI;
 
     var message;
@@ -2142,11 +2450,11 @@ ContentPermissionPrompt.prototype = {
     }];
 
     if (requestingURI.schemeIs("file")) {
-      message = browserBundle.formatStringFromName("geolocation.shareWithFile",
-                                                   [requestingURI.path], 1);
+      message = gBrowserBundle.formatStringFromName("geolocation.shareWithFile",
+                                                    [requestingURI.path], 1);
     } else {
-      message = browserBundle.formatStringFromName("geolocation.shareWithSite",
-                                                   [requestingURI.host], 1);
+      message = gBrowserBundle.formatStringFromName("geolocation.shareWithSite",
+                                                    [requestingURI.host], 1);
       // Always share location action.
       actions.push({
         stringId: "geolocation.alwaysShareLocation",
@@ -2179,11 +2487,10 @@ ContentPermissionPrompt.prototype = {
   },
 
   _promptWebNotifications : function(aRequest) {
-    var browserBundle = Services.strings.createBundle("chrome://browser/locale/browser.properties");
     var requestingURI = aRequest.principal.URI;
 
-    var message = browserBundle.formatStringFromName("webNotifications.showFromSite",
-                                                     [requestingURI.host], 1);
+    var message = gBrowserBundle.formatStringFromName("webNotifications.showFromSite",
+                                                      [requestingURI.host], 1);
 
     var actions = [
       {
@@ -2213,11 +2520,10 @@ ContentPermissionPrompt.prototype = {
 
   _promptPointerLock: function CPP_promtPointerLock(aRequest, autoAllow) {
 
-    let browserBundle = Services.strings.createBundle("chrome://browser/locale/browser.properties");
     let requestingURI = aRequest.principal.URI;
 
     let originString = requestingURI.schemeIs("file") ? requestingURI.path : requestingURI.host;
-    let message = browserBundle.formatStringFromName(autoAllow ?
+    let message = gBrowserBundle.formatStringFromName(autoAllow ?
                                   "pointerLock.autoLock.title2" : "pointerLock.title2",
                                   [originString], 1);
     // If this is an autoAllow info prompt, offer no actions.
@@ -2251,7 +2557,6 @@ ContentPermissionPrompt.prototype = {
   },
 
   prompt: function CPP_prompt(request) {
-
     // Only allow exactly one permission rquest here.
     let types = request.types.QueryInterface(Ci.nsIArray);
     if (types.length != 1) {
@@ -2263,6 +2568,7 @@ ContentPermissionPrompt.prototype = {
     const kFeatureKeys = { "geolocation" : "geo",
                            "desktop-notification" : "desktop-notification",
                            "pointerLock" : "pointerLock",
+                           "push" : "push"
                          };
 
     // Make sure that we support the request.
@@ -2312,6 +2618,9 @@ ContentPermissionPrompt.prototype = {
       break;
     case "pointerLock":
       this._promptPointerLock(request, autoAllow);
+      break;
+    case "push":
+      this._promptPush(request);
       break;
     }
   },
@@ -2379,28 +2688,28 @@ let DefaultBrowserCheck = {
   },
 
   prompt: function(win) {
-    let brandBundle = win.document.getElementById("bundle_brand");
-    let shellBundle = win.document.getElementById("bundle_shell");
-
-    let brandShortName = brandBundle.getString("brandShortName");
-    let promptMessage = shellBundle.getFormattedString("setDefaultBrowserMessage2",
-                                                       [brandShortName]);
-
-    let yesButton = shellBundle.getFormattedString("setDefaultBrowserConfirm.label",
-                                                   [brandShortName]);
-
-    let notNowButton = shellBundle.getString("setDefaultBrowserNotNow.label");
-    let notNowButtonKey = shellBundle.getString("setDefaultBrowserNotNow.accesskey");
-
-    let neverLabel = shellBundle.getString("setDefaultBrowserNever.label");
-    let neverKey = shellBundle.getString("setDefaultBrowserNever.accesskey");
-
     let useNotificationBar = Services.prefs.getBoolPref("browser.defaultbrowser.notificationbar");
+
+    let brandBundle = win.document.getElementById("bundle_brand");
+    let brandShortName = brandBundle.getString("brandShortName");
+
+    let shellBundle = win.document.getElementById("bundle_shell");
+    let buttonPrefix = "setDefaultBrowser" + (useNotificationBar ? "" : "Alert");
+    let yesButton = shellBundle.getFormattedString(buttonPrefix + "Confirm.label",
+                                                   [brandShortName]);
+    let notNowButton = shellBundle.getString(buttonPrefix + "NotNow.label");
+
     if (useNotificationBar) {
+      let promptMessage = shellBundle.getFormattedString("setDefaultBrowserMessage2",
+                                                         [brandShortName]);
       let optionsMessage = shellBundle.getString("setDefaultBrowserOptions.label");
       let optionsKey = shellBundle.getString("setDefaultBrowserOptions.accesskey");
 
+      let neverLabel = shellBundle.getString("setDefaultBrowserNever.label");
+      let neverKey = shellBundle.getString("setDefaultBrowserNever.accesskey");
+
       let yesButtonKey = shellBundle.getString("setDefaultBrowserConfirm.accesskey");
+      let notNowButtonKey = shellBundle.getString("setDefaultBrowserNotNow.accesskey");
 
       let notificationBox = win.document.getElementById("high-priority-global-notificationbox");
 
@@ -2438,17 +2747,21 @@ let DefaultBrowserCheck = {
     } else {
       // Modal prompt
       let promptTitle = shellBundle.getString("setDefaultBrowserTitle");
+      let promptMessage = shellBundle.getFormattedString("setDefaultBrowserMessage",
+                                                         [brandShortName]);
+      let askLabel = shellBundle.getFormattedString("setDefaultBrowserDontAsk",
+                                                    [brandShortName]);
 
       let ps = Services.prompt;
-      let dontAsk = { value: false };
+      let shouldAsk = { value: true };
       let buttonFlags = (ps.BUTTON_TITLE_IS_STRING * ps.BUTTON_POS_0) +
                         (ps.BUTTON_TITLE_IS_STRING * ps.BUTTON_POS_1) +
                         ps.BUTTON_POS_0_DEFAULT;
       let rv = ps.confirmEx(win, promptTitle, promptMessage, buttonFlags,
-                            yesButton, notNowButton, null, neverLabel, dontAsk);
+                            yesButton, notNowButton, null, askLabel, shouldAsk);
       if (rv == 0) {
         this.setAsDefault();
-      } else if (dontAsk.value) {
+      } else if (!shouldAsk.value) {
         ShellService.shouldCheckDefaultBrowser = false;
       }
     }
@@ -2469,7 +2782,7 @@ let DefaultBrowserCheck = {
 let E10SUINotification = {
   // Increase this number each time we want to roll out an
   // e10s testing period to Nightly users.
-  CURRENT_NOTICE_COUNT: 2,
+  CURRENT_NOTICE_COUNT: 4,
   CURRENT_PROMPT_PREF: "browser.displayedE10SPrompt.1",
   PREVIOUS_PROMPT_PREF: "browser.displayedE10SPrompt",
 
@@ -2498,7 +2811,7 @@ let E10SUINotification = {
       // e10s doesn't work with accessibility, so we prompt to disable
       // e10s if a11y is enabled, now or in the future.
       Services.obs.addObserver(this, "a11y-init-or-shutdown", true);
-      if (Services.appinfo.accessibilityEnabled) {
+      if (Services.appinfo.accessibilityIsBlacklistedForE10S) {
         this._showE10sAccessibilityWarning();
       }
     } else {
@@ -2513,7 +2826,12 @@ let E10SUINotification = {
           return;
         }
 
+        // The user has just voluntarily disabled e10s. Subtract one from displayedE10SNotice
+        // so that the next time e10s is activated (either by the user or forced by us), they
+        // can see the notice again.
+        Services.prefs.setIntPref("browser.displayedE10SNotice", this.CURRENT_NOTICE_COUNT - 1);
         Services.prefs.clearUserPref("browser.requestE10sFeedback");
+
         let url = Services.urlFormatter.formatURLPref("app.feedback.baseURL");
         url += "?utm_source=tab&utm_campaign=e10sfeedback";
 
@@ -2538,7 +2856,6 @@ let E10SUINotification = {
 
       if (!Services.appinfo.inSafeMode &&
           !Services.appinfo.accessibilityEnabled &&
-          !Services.appinfo.keyboardMayHaveIME &&
           isHardwareAccelerated &&
           e10sPromptShownCount < 5) {
         Services.tm.mainThread.dispatch(() => {

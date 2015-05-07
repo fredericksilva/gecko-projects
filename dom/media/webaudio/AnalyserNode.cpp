@@ -16,9 +16,9 @@ namespace dom {
 
 NS_IMPL_ISUPPORTS_INHERITED0(AnalyserNode, AudioNode)
 
-class AnalyserNodeEngine : public AudioNodeEngine
+class AnalyserNodeEngine final : public AudioNodeEngine
 {
-  class TransferBuffer : public nsRunnable
+  class TransferBuffer final : public nsRunnable
   {
   public:
     TransferBuffer(AudioNodeStream* aStream,
@@ -60,20 +60,32 @@ public:
   virtual void ProcessBlock(AudioNodeStream* aStream,
                             const AudioChunk& aInput,
                             AudioChunk* aOutput,
-                            bool* aFinished) MOZ_OVERRIDE
+                            bool* aFinished) override
   {
     *aOutput = aInput;
 
     MutexAutoLock lock(NodeMutex());
 
-    if (Node() &&
-        aInput.mChannelData.Length() > 0) {
-      nsRefPtr<TransferBuffer> transfer = new TransferBuffer(aStream, aInput);
+    if (Node()) {
+      // If the input is silent, we sill need to send a silent buffer
+      if (aOutput->IsNull()) {
+        AllocateAudioBlock(1, aOutput);
+        float* samples = static_cast<float*>(
+            const_cast<void*>(aOutput->mChannelData[0]));
+        PodZero(samples, WEBAUDIO_BLOCK_SIZE);
+      }
+      uint32_t channelCount = aOutput->mChannelData.Length();
+      for (uint32_t channel = 0; channel < channelCount; ++channel) {
+        float* samples = static_cast<float*>(
+            const_cast<void*>(aOutput->mChannelData[channel]));
+        AudioBlockInPlaceScale(samples, aOutput->mVolume);
+      }
+      nsRefPtr<TransferBuffer> transfer = new TransferBuffer(aStream, *aOutput);
       NS_DispatchToMainThread(transfer);
     }
   }
 
-  virtual size_t SizeOfIncludingThis(MallocSizeOf aMallocSizeOf) const MOZ_OVERRIDE
+  virtual size_t SizeOfIncludingThis(MallocSizeOf aMallocSizeOf) const override
   {
     return aMallocSizeOf(this) + SizeOfExcludingThis(aMallocSizeOf);
   }
@@ -82,7 +94,7 @@ public:
 AnalyserNode::AnalyserNode(AudioContext* aContext)
   : AudioNode(aContext,
               1,
-              ChannelCountMode::Explicit,
+              ChannelCountMode::Max,
               ChannelInterpretation::Speakers)
   , mAnalysisBlock(2048)
   , mMinDecibels(-100.)
@@ -112,17 +124,17 @@ AnalyserNode::SizeOfIncludingThis(MallocSizeOf aMallocSizeOf) const
 }
 
 JSObject*
-AnalyserNode::WrapObject(JSContext* aCx)
+AnalyserNode::WrapObject(JSContext* aCx, JS::Handle<JSObject*> aGivenProto)
 {
-  return AnalyserNodeBinding::Wrap(aCx, this);
+  return AnalyserNodeBinding::Wrap(aCx, this, aGivenProto);
 }
 
 void
 AnalyserNode::SetFftSize(uint32_t aValue, ErrorResult& aRv)
 {
-  // Disallow values that are not a power of 2 and outside the [32,2048] range
+  // Disallow values that are not a power of 2 and outside the [32,32768] range
   if (aValue < 32 ||
-      aValue > 2048 ||
+      aValue > 32768 ||
       (aValue & (aValue - 1)) != 0) {
     aRv.Throw(NS_ERROR_DOM_INDEX_SIZE_ERR);
     return;
@@ -243,7 +255,7 @@ AnalyserNode::FFTAnalysis()
   if (mWriteIndex == 0) {
     inputBuffer = mBuffer.Elements();
   } else {
-    inputBuffer = static_cast<float*>(moz_malloc(FftSize() * sizeof(float)));
+    inputBuffer = static_cast<float*>(malloc(FftSize() * sizeof(float)));
     if (!inputBuffer) {
       return false;
     }
@@ -268,7 +280,7 @@ AnalyserNode::FFTAnalysis()
   }
 
   if (allocated) {
-    moz_free(inputBuffer);
+    free(inputBuffer);
   }
   return true;
 }

@@ -127,18 +127,6 @@ function removeDeveloperButtonIfDevEdition(areaPanelPlacements) {
   }
 }
 
-function isInWin8() {
-  if (!Services.metro)
-    return false;
-  return Services.metro.supported;
-}
-
-function addSwitchToMetroButtonInWindows8(areaPanelPlacements) {
-  if (isInWin8()) {
-    areaPanelPlacements.push("switch-to-metro-button");
-  }
-}
-
 function assertAreaPlacements(areaId, expectedPlacements) {
   let actualPlacements = getAreaWidgetIds(areaId);
   placementArraysEqual(areaId, actualPlacements, expectedPlacements);
@@ -459,6 +447,34 @@ function promiseTabHistoryNavigation(aDirection = -1, aConditionFn) {
   content.history.go(aDirection);
 
   return deferred.promise;
+}
+
+/**
+ * Wait for an attribute on a node to change
+ *
+ * @param aNode      Node on which the mutation is expected
+ * @param aAttribute The attribute we're interested in
+ * @param aFilterFn  A function to check if the new value is what we want.
+ * @return {Promise} resolved when the requisite mutation shows up.
+ */
+function promiseAttributeMutation(aNode, aAttribute, aFilterFn) {
+  return new Promise((resolve, reject) => {
+    info("waiting for mutation of attribute '" + aAttribute + "'.");
+    let obs = new MutationObserver((mutations) => {
+      for (let mut of mutations) {
+        let attr = mut.attributeName;
+        let newValue = mut.target.getAttribute(attr);
+        if (aFilterFn(newValue)) {
+          ok(true, "mutation occurred: attribute '" + attr + "' changed to '" + newValue + "' from '" + mut.oldValue + "'.");
+          obs.disconnect();
+          resolve();
+        } else {
+          info("Ignoring mutation that produced value " + newValue + " because of filter.");
+        }
+      }
+    });
+    obs.observe(aNode, {attributeFilter: [aAttribute]});
+  });
 }
 
 function popupShown(aPopup) {

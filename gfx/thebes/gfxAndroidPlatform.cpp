@@ -23,6 +23,7 @@
 #include "nsServiceManagerUtils.h"
 #include "gfxPrefs.h"
 #include "cairo.h"
+#include "VsyncSource.h"
 
 #ifdef MOZ_WIDGET_ANDROID
 #include "AndroidBridge.h"
@@ -30,6 +31,8 @@
 
 #ifdef MOZ_WIDGET_GONK
 #include <cutils/properties.h>
+#include "mozilla/layers/CompositorParent.h"
+#include "HwcComposer2D.h"
 #endif
 
 #include "ft2build.h"
@@ -42,8 +45,8 @@ using namespace mozilla::gfx;
 
 static FT_Library gPlatformFTLibrary = nullptr;
 
-class FreetypeReporter MOZ_FINAL : public nsIMemoryReporter,
-                                   public CountingAllocatorBase<FreetypeReporter>
+class FreetypeReporter final : public nsIMemoryReporter,
+                               public CountingAllocatorBase<FreetypeReporter>
 {
 private:
     ~FreetypeReporter() {}
@@ -129,8 +132,7 @@ gfxAndroidPlatform::CreateOffscreenSurface(const IntSize& size,
                                            gfxContentType contentType)
 {
     nsRefPtr<gfxASurface> newSurface;
-    newSurface = new gfxImageSurface(ThebesIntSize(size),
-                                     OptimalFormatForContent(contentType));
+    newSurface = new gfxImageSurface(size, OptimalFormatForContent(contentType));
 
     return newSurface.forget();
 }
@@ -419,4 +421,88 @@ bool gfxAndroidPlatform::HaveChoiceOfHWAndSWCanvas()
     }
 #endif
     return gfxPlatform::HaveChoiceOfHWAndSWCanvas();
+}
+
+#ifdef MOZ_WIDGET_GONK
+class GonkVsyncSource final : public VsyncSource
+{
+public:
+  GonkVsyncSource()
+  {
+  }
+
+  virtual Display& GetGlobalDisplay() override
+  {
+    return mGlobalDisplay;
+  }
+
+  class GonkDisplay final : public VsyncSource::Display
+  {
+  public:
+    GonkDisplay() : mVsyncEnabled(false)
+    {
+    }
+
+    ~GonkDisplay()
+    {
+      DisableVsync();
+    }
+
+    virtual void EnableVsync() override
+    {
+      MOZ_ASSERT(NS_IsMainThread());
+      if (IsVsyncEnabled()) {
+        return;
+      }
+      mVsyncEnabled = HwcComposer2D::GetInstance()->EnableVsync(true);
+    }
+
+    virtual void DisableVsync() override
+    {
+      MOZ_ASSERT(NS_IsMainThread());
+      if (!IsVsyncEnabled()) {
+        return;
+      }
+      mVsyncEnabled = HwcComposer2D::GetInstance()->EnableVsync(false);
+    }
+
+    virtual bool IsVsyncEnabled() override
+    {
+      MOZ_ASSERT(NS_IsMainThread());
+      return mVsyncEnabled;
+    }
+  private:
+    bool mVsyncEnabled;
+  }; // GonkDisplay
+
+private:
+  virtual ~GonkVsyncSource()
+  {
+  }
+
+  GonkDisplay mGlobalDisplay;
+}; // GonkVsyncSource
+#endif
+
+already_AddRefed<mozilla::gfx::VsyncSource>
+gfxAndroidPlatform::CreateHardwareVsyncSource()
+{
+    // Only enable true hardware vsync on kit-kat due to L HwcComposer issues
+    // Jelly Bean has inaccurate hardware vsync so disable on JB
+    // Android pre-JB doesn't have hardware vsync
+    // Once L HwcComposer issues have been resolved, re-enable for L devices
+    // L is andriod version 21, Kit-kat is 19, 20 is kit-kat for wearables
+#if defined(MOZ_WIDGET_GONK) && (ANDROID_VERSION == 19)
+    nsRefPtr<GonkVsyncSource> vsyncSource = new GonkVsyncSource();
+    VsyncSource::Display& display = vsyncSource->GetGlobalDisplay();
+    display.EnableVsync();
+    if (!display.IsVsyncEnabled()) {
+        NS_WARNING("Error enabling gonk vsync. Falling back to software vsync");
+        return gfxPlatform::CreateHardwareVsyncSource();
+    }
+    display.DisableVsync();
+    return vsyncSource.forget();
+#else
+    return gfxPlatform::CreateHardwareVsyncSource();
+#endif
 }

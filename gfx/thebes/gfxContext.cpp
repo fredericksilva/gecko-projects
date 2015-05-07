@@ -27,7 +27,7 @@
 #include "mozilla/gfx/DrawTargetTiled.h"
 #include <algorithm>
 
-#if CAIRO_HAS_DWRITE_FONT
+#if XP_WIN
 #include "gfxWindowsPlatform.h"
 #endif
 
@@ -239,18 +239,6 @@ gfxContext::Fill(const Pattern& aPattern)
 }
 
 void
-gfxContext::FillWithOpacity(gfxFloat aOpacity)
-{
-  FillWithOpacity(PatternFromState(this), aOpacity);
-}
-
-void
-gfxContext::FillWithOpacity(const Pattern& aPattern, gfxFloat aOpacity)
-{
-  FillAzure(aPattern, Float(aOpacity));
-}
-
-void
 gfxContext::MoveTo(const gfxPoint& pt)
 {
   EnsurePathBuilder();
@@ -262,20 +250,6 @@ gfxContext::LineTo(const gfxPoint& pt)
 {
   EnsurePathBuilder();
   mPathBuilder->LineTo(ToPoint(pt));
-}
-
-void
-gfxContext::CurveTo(const gfxPoint& pt1, const gfxPoint& pt2, const gfxPoint& pt3)
-{
-  EnsurePathBuilder();
-  mPathBuilder->BezierTo(ToPoint(pt1), ToPoint(pt2), ToPoint(pt3));
-}
-
-void
-gfxContext::QuadraticCurveTo(const gfxPoint& pt1, const gfxPoint& pt2)
-{
-  EnsurePathBuilder();
-  mPathBuilder->QuadraticBezierTo(ToPoint(pt1), ToPoint(pt2));
 }
 
 void
@@ -321,39 +295,6 @@ gfxContext::Rectangle(const gfxRect& rect, bool snapToPixels)
   mPathBuilder->LineTo(rec.BottomRight());
   mPathBuilder->LineTo(rec.BottomLeft());
   mPathBuilder->Close();
-}
-
-void
-gfxContext::Polygon(const gfxPoint *points, uint32_t numPoints)
-{
-  if (numPoints == 0) {
-    return;
-  }
-
-  EnsurePathBuilder();
-
-  mPathBuilder->MoveTo(ToPoint(points[0]));
-  for (uint32_t i = 1; i < numPoints; i++) {
-    mPathBuilder->LineTo(ToPoint(points[i]));
-  }
-}
-
-void
-gfxContext::DrawSurface(gfxASurface *surface, const gfxSize& size)
-{
-  // Lifetime needs to be limited here since we may wrap surface's data.
-  RefPtr<SourceSurface> surf =
-    gfxPlatform::GetPlatform()->GetSourceSurfaceForSurface(mDT, surface);
-
-  if (!surf) {
-    return;
-  }
-
-  Rect rect(0, 0, Float(size.width), Float(size.height));
-  rect.Intersect(Rect(0, 0, Float(surf->GetSize().width), Float(surf->GetSize().height)));
-
-  // XXX - Should fix pixel snapping.
-  mDT->DrawSurface(surf, rect, rect);
 }
 
 // transform stuff
@@ -554,11 +495,6 @@ gfxContext::CurrentLineWidth() const
 void
 gfxContext::SetOperator(GraphicsOperator op)
 {
-  if (op == OPERATOR_CLEAR) {
-    CurrentState().opIsClear = true;
-    return;
-  }
-  CurrentState().opIsClear = false;
   CurrentState().op = CompositionOpForOp(op);
 }
 
@@ -658,24 +594,12 @@ gfxContext::Clip()
 }
 
 void
-gfxContext::ResetClip()
+gfxContext::PopClip()
 {
-  for (int i = mStateStack.Length() - 1; i >= 0; i--) {
-    for (unsigned int c = 0; c < mStateStack[i].pushedClips.Length(); c++) {
-      mDT->PopClip();
-    }
+  MOZ_ASSERT(CurrentState().pushedClips.Length() > 0);
 
-    if (mStateStack[i].clipWasReset) {
-      break;
-    }
-  }
-  CurrentState().pushedClips.Clear();
-  CurrentState().clipWasReset = true;
-}
-
-void
-gfxContext::UpdateSurfaceClip()
-{
+  CurrentState().pushedClips.RemoveElementAt(CurrentState().pushedClips.Length() - 1);
+  mDT->PopClip();
 }
 
 gfxRect
@@ -843,17 +767,17 @@ gfxContext::Mask(gfxASurface *surface, const gfxPoint& offset)
 
   gfxPoint pt = surface->GetDeviceOffset();
 
-  Mask(sourceSurf, Point(offset.x - pt.x, offset.y - pt.y));
+  Mask(sourceSurf, 1.0f, Point(offset.x - pt.x, offset.y - pt.y));
 }
 
 void
-gfxContext::Mask(SourceSurface *surface, const Point& offset)
+gfxContext::Mask(SourceSurface *surface, float alpha, const Point& offset)
 {
   // We clip here to bind to the mask surface bounds, see above.
   mDT->MaskSurface(PatternFromState(this),
             surface,
             offset,
-            DrawOptions(1.0f, CurrentState().op, CurrentState().aaMode));
+            DrawOptions(alpha, CurrentState().op, CurrentState().aaMode));
 }
 
 void
@@ -865,7 +789,7 @@ gfxContext::Paint(gfxFloat alpha)
   AzureState &state = CurrentState();
 
   if (state.sourceSurface && !state.sourceSurfCairo &&
-      !state.patternTransformChanged && !state.opIsClear)
+      !state.patternTransformChanged)
   {
     // This is the case where a PopGroupToSource has been done and this
     // paint is executed without changing the transform or the source.
@@ -888,12 +812,8 @@ gfxContext::Paint(gfxFloat alpha)
   mat.Invert();
   Rect paintRect = mat.TransformBounds(Rect(Point(0, 0), Size(mDT->GetSize())));
 
-  if (state.opIsClear) {
-    mDT->ClearRect(paintRect);
-  } else {
-    mDT->FillRect(paintRect, PatternFromState(this),
-                  DrawOptions(Float(alpha), GetOp()));
-  }
+  mDT->FillRect(paintRect, PatternFromState(this),
+                DrawOptions(Float(alpha), GetOp()));
 }
 
 // groups
@@ -1152,9 +1072,7 @@ gfxContext::FillAzure(const Pattern& aPattern, Float aOpacity)
   if (mPathIsRect) {
     MOZ_ASSERT(!mTransformChanged);
 
-    if (state.opIsClear) {
-      mDT->ClearRect(mRect);
-    } else if (op == CompositionOp::OP_SOURCE) {
+    if (op == CompositionOp::OP_SOURCE) {
       // Emulate cairo operator source which is bound by mask!
       mDT->ClearRect(mRect);
       mDT->FillRect(mRect, aPattern, DrawOptions(aOpacity));
@@ -1163,9 +1081,6 @@ gfxContext::FillAzure(const Pattern& aPattern, Float aOpacity)
     }
   } else {
     EnsurePath();
-
-    NS_ASSERTION(!state.opIsClear, "We shouldn't be clearing complex paths!");
-
     mDT->Fill(mPath, aPattern, DrawOptions(aOpacity, op, state.aaMode));
   }
 }
@@ -1355,7 +1270,11 @@ gfxContext::PushNewDT(gfxContentType content)
     newDT = mDT->CreateSimilarDrawTarget(IntSize(64, 64), format);
 
     if (!newDT) {
-      if (!gfxPlatform::GetPlatform()->DidRenderingDeviceReset()) {
+      if (!gfxPlatform::GetPlatform()->DidRenderingDeviceReset()
+#ifdef XP_WIN
+          && !(mDT->GetBackendType() == BackendType::DIRECT2D1_1 && !gfxWindowsPlatform::GetPlatform()->GetD3D11ContentDevice())
+#endif
+          ) {
         // If even this fails.. we're most likely just out of memory!
         NS_ABORT_OOM(BytesPerPixel(format) * 64 * 64);
       }

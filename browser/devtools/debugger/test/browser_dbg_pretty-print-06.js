@@ -43,9 +43,9 @@ function test() {
         ok(false, "The source editor text shouldn't have changed.");
       });
 
-      is(gSources.selectedValue, JS_URL,
+      is(getSelectedSourceURL(gSources), JS_URL,
         "The correct source is currently selected.");
-      ok(gEditor.getText().contains("myFunction"),
+      ok(gEditor.getText().includes("myFunction"),
         "The source shouldn't be pretty printed yet.");
 
       clickPrettyPrintButton();
@@ -55,17 +55,17 @@ function test() {
         yield gControllerSources.togglePrettyPrint(source);
         ok(false, "The promise for a prettified source should be rejected!");
       } catch ([source, error]) {
-        ok(error.contains("prettyPrintError"),
+        ok(error.includes("prettyPrintError"),
           "The promise was correctly rejected with a meaningful message.");
       }
 
       let text;
       [source, text] = yield gControllerSources.getText(source);
-      is(gSources.selectedValue, JS_URL,
+      is(getSelectedSourceURL(gSources), JS_URL,
         "The correct source is still selected.");
-      ok(gEditor.getText().contains("myFunction"),
+      ok(gEditor.getText().includes("myFunction"),
         "The displayed source hasn't changed.");
-      ok(text.contains("myFunction"),
+      ok(text.includes("myFunction"),
         "The cached source text wasn't altered in any way.");
 
       is(gPrettyPrinted, true,

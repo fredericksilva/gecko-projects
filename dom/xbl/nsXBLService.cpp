@@ -1,4 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -136,17 +137,20 @@ public:
     // notification of its parent.  (We can know about both if the
     // binding loads were triggered from the DOM rather than frame
     // construction.)  So we have to check both whether the element
-    // has a primary frame and whether it's in the undisplayed map
+    // has a primary frame and whether it's in the frame manager maps
     // before sending a ContentInserted notification, or bad things
     // will happen.
     MOZ_ASSERT(shell == doc->GetShell());
     if (shell) {
       nsIFrame* childFrame = mBoundElement->GetPrimaryFrame();
       if (!childFrame) {
-        // Check to see if it's in the undisplayed content map.
-        nsStyleContext* sc =
-          shell->FrameManager()->GetUndisplayedContent(mBoundElement);
-
+        // Check to see if it's in the undisplayed content map...
+        nsFrameManager* fm = shell->FrameManager();
+        nsStyleContext* sc = fm->GetUndisplayedContent(mBoundElement);
+        if (!sc) {
+          // or in the display:contents map.
+          sc = fm->GetDisplayContentsStyleFor(mBoundElement);
+        }
         if (!sc) {
           shell->CreateFramesFor(destroyedFramesFor);
         }
@@ -164,8 +168,8 @@ public:
 // nsXBLStreamListener, a helper class used for
 // asynchronous parsing of URLs
 /* Header file */
-class nsXBLStreamListener MOZ_FINAL : public nsIStreamListener,
-                                      public nsIDOMEventListener
+class nsXBLStreamListener final : public nsIStreamListener,
+                                  public nsIDOMEventListener
 {
 public:
   NS_DECL_ISUPPORTS
@@ -663,7 +667,8 @@ MayBindToContent(nsXBLPrototypeBinding* aProtoBinding, nsIContent* aBoundElement
 
   // We let XUL content and content in XUL documents through, since XUL is
   // restricted anyway and we want to minimize remote XUL breakage.
-  if (aBoundElement->IsXUL() || aBoundElement->OwnerDoc()->IsXUL()) {
+  if (aBoundElement->IsXULElement() ||
+      aBoundElement->OwnerDoc()->IsXULElement()) {
     return true;
   }
 
@@ -761,12 +766,10 @@ nsXBLService::GetBinding(nsIContent* aBoundElement, nsIURI* aURI,
    return NS_ERROR_FAILURE;
   }
 
-  NS_ENSURE_TRUE(aDontExtendURIs.AppendElement(protoBinding->BindingURI()),
-                 NS_ERROR_OUT_OF_MEMORY);
+  aDontExtendURIs.AppendElement(protoBinding->BindingURI());
   nsCOMPtr<nsIURI> altBindingURI = protoBinding->AlternateBindingURI();
   if (altBindingURI) {
-    NS_ENSURE_TRUE(aDontExtendURIs.AppendElement(altBindingURI),
-                   NS_ERROR_OUT_OF_MEMORY);
+    aDontExtendURIs.AppendElement(altBindingURI);
   }
 
   // Our prototype binding must have all its resources loaded.
@@ -828,7 +831,6 @@ nsXBLService::GetBinding(nsIContent* aBoundElement, nsIURI* aURI,
   if (!aPeekOnly) {
     // Make a new binding
     nsXBLBinding *newBinding = new nsXBLBinding(protoBinding);
-    NS_ENSURE_TRUE(newBinding, NS_ERROR_OUT_OF_MEMORY);
 
     if (baseBinding) {
       if (!baseProto) {
@@ -955,7 +957,7 @@ nsXBLService::LoadBindingDocumentInfo(nsIContent* aBoundElement,
                   ni->Equals(nsGkAtoms::thumb, kNameSpaceID_XUL) ||
                   ((ni->Equals(nsGkAtoms::input) ||
                     ni->Equals(nsGkAtoms::select)) &&
-                   aBoundElement->IsHTML()))) && !aForceSyncLoad) {
+                   aBoundElement->IsHTMLElement()))) && !aForceSyncLoad) {
       // The third line of defense is to investigate whether or not the
       // document is currently being loaded asynchronously.  If so, there's no
       // document yet, but we need to glom on our request so that it will be
@@ -1097,8 +1099,7 @@ nsXBLService::FetchBindingDocument(nsIContent* aBoundElement, nsIDocument* aBoun
 
   NS_ENSURE_SUCCESS(rv, rv);
 
-  nsCOMPtr<nsIInterfaceRequestor> sameOriginChecker = nsContentUtils::GetSameOriginChecker();
-  NS_ENSURE_TRUE(sameOriginChecker, NS_ERROR_OUT_OF_MEMORY);
+  nsCOMPtr<nsIInterfaceRequestor> sameOriginChecker = nsContentUtils::SameOriginChecker();
 
   channel->SetNotificationCallbacks(sameOriginChecker);
 
@@ -1106,7 +1107,6 @@ nsXBLService::FetchBindingDocument(nsIContent* aBoundElement, nsIDocument* aBoun
     // We can be asynchronous
     nsXBLStreamListener* xblListener =
       new nsXBLStreamListener(aBoundDocument, xblSink, doc);
-    NS_ENSURE_TRUE(xblListener,NS_ERROR_OUT_OF_MEMORY);
 
     // Add ourselves to the list of loading docs.
     nsBindingManager *bindingManager;

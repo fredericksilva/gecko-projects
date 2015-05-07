@@ -1,5 +1,5 @@
-/* -*- Mode: c++; c-basic-offset: 2; indent-tabs-mode: nil; tab-width: 40 -*- */
-/* vim: set ts=2 et sw=2 tw=80: */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -7,13 +7,14 @@
 #include "BluetoothRilListener.h"
 
 #include "BluetoothHfpManager.h"
-#include "nsIIccProvider.h"
+#include "nsIIccService.h"
 #include "nsIMobileConnectionInfo.h"
 #include "nsIMobileConnectionService.h"
+#include "nsITelephonyCallInfo.h"
 #include "nsITelephonyService.h"
-#include "nsRadioInterfaceLayer.h" // For NS_RILCONTENTHELPER_CONTRACTID.
 #include "nsServiceManagerUtils.h"
 #include "nsString.h"
+#include "nsQueryObject.h"
 
 USING_BLUETOOTH_NAMESPACE
 
@@ -59,15 +60,19 @@ IccListener::Listen(bool aStart)
 {
   NS_ENSURE_TRUE(mOwner, false);
 
-  nsCOMPtr<nsIIccProvider> provider =
-    do_GetService(NS_RILCONTENTHELPER_CONTRACTID);
-  NS_ENSURE_TRUE(provider, false);
+  nsCOMPtr<nsIIccService> service =
+    do_GetService(ICC_SERVICE_CONTRACTID);
+  NS_ENSURE_TRUE(service, false);
+
+  nsCOMPtr<nsIIcc> icc;
+  service->GetIccByServiceId(mOwner->mClientId, getter_AddRefs(icc));
+  NS_ENSURE_TRUE(icc, false);
 
   nsresult rv;
   if (aStart) {
-    rv = provider->RegisterIccMsg(mOwner->mClientId, this);
+    rv = icc->RegisterListener(this);
   } else {
-    rv = provider->UnregisterIccMsg(mOwner->mClientId, this);
+    rv = icc->UnregisterListener(this);
   }
 
   return NS_SUCCEEDED(rv);
@@ -102,13 +107,6 @@ MobileConnectionListener::NotifyDataChanged()
 }
 
 NS_IMETHODIMP
-MobileConnectionListener::NotifyUssdReceived(const nsAString & message,
-                                             bool sessionEnded)
-{
-  return NS_OK;
-}
-
-NS_IMETHODIMP
 MobileConnectionListener::NotifyDataError(const nsAString & message)
 {
   return NS_OK;
@@ -133,12 +131,6 @@ MobileConnectionListener::NotifyEmergencyCbModeChanged(bool active,
 
 NS_IMETHODIMP
 MobileConnectionListener::NotifyOtaStatusChanged(const nsAString & status)
-{
-  return NS_OK;
-}
-
-NS_IMETHODIMP
-MobileConnectionListener::NotifyIccChanged()
 {
   return NS_OK;
 }
@@ -199,48 +191,46 @@ MobileConnectionListener::Listen(bool aStart)
  */
 NS_IMPL_ISUPPORTS(TelephonyListener, nsITelephonyListener)
 
-NS_IMETHODIMP
-TelephonyListener::CallStateChanged(uint32_t aServiceId,
-                                    uint32_t aCallIndex,
-                                    uint16_t aCallState,
-                                    const nsAString& aNumber,
-                                    uint16_t aNumberPresentation,
-                                    const nsAString& aName,
-                                    uint16_t aNamePresentation,
-                                    bool aIsOutgoing,
-                                    bool aIsEmergency,
-                                    bool aIsConference,
-                                    bool aIsSwitchable,
-                                    bool aIsMergeable)
+/**
+ * @param aSend A boolean indicates whether we need to notify headset or not
+ */
+nsresult
+TelephonyListener::HandleCallInfo(nsITelephonyCallInfo* aInfo, bool aSend)
 {
   BluetoothHfpManager* hfp = BluetoothHfpManager::Get();
   NS_ENSURE_TRUE(hfp, NS_ERROR_FAILURE);
 
-  hfp->HandleCallStateChanged(aCallIndex, aCallState, EmptyString(), aNumber,
-                              aIsOutgoing, aIsConference, true);
+  uint32_t callIndex;
+  uint16_t callState;
+  nsAutoString number;
+  bool isOutgoing;
+  bool isConference;
+
+  aInfo->GetCallIndex(&callIndex);
+  aInfo->GetCallState(&callState);
+  aInfo->GetNumber(number);
+  aInfo->GetIsOutgoing(&isOutgoing);
+  aInfo->GetIsConference(&isConference);
+
+  hfp->HandleCallStateChanged(callIndex, callState, EmptyString(), number,
+                              isOutgoing, isConference, aSend);
   return NS_OK;
 }
 
 NS_IMETHODIMP
-TelephonyListener::EnumerateCallState(uint32_t aServiceId,
-                                      uint32_t aCallIndex,
-                                      uint16_t aCallState,
-                                      const nsAString_internal& aNumber,
-                                      uint16_t aNumberPresentation,
-                                      const nsAString& aName,
-                                      uint16_t aNamePresentation,
-                                      bool aIsOutgoing,
-                                      bool aIsEmergency,
-                                      bool aIsConference,
-                                      bool aIsSwitchable,
-                                      bool aIsMergeable)
+TelephonyListener::CallStateChanged(uint32_t aLength,
+                                    nsITelephonyCallInfo** aAllInfo)
 {
-  BluetoothHfpManager* hfp = BluetoothHfpManager::Get();
-  NS_ENSURE_TRUE(hfp, NS_ERROR_FAILURE);
-
-  hfp->HandleCallStateChanged(aCallIndex, aCallState, EmptyString(), aNumber,
-                              aIsOutgoing, aIsConference, false);
+  for (uint32_t i = 0; i < aLength; ++i) {
+    HandleCallInfo(aAllInfo[i], true);
+  }
   return NS_OK;
+}
+
+NS_IMETHODIMP
+TelephonyListener::EnumerateCallState(nsITelephonyCallInfo* aInfo)
+{
+  return HandleCallInfo(aInfo, false);
 }
 
 NS_IMETHODIMP

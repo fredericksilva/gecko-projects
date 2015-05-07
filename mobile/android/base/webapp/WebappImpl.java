@@ -14,10 +14,13 @@ import org.json.JSONObject;
 import org.mozilla.gecko.GeckoApp;
 import org.mozilla.gecko.GeckoAppShell;
 import org.mozilla.gecko.GeckoEvent;
+import org.mozilla.gecko.GeckoProfile;
 import org.mozilla.gecko.GeckoThread;
 import org.mozilla.gecko.R;
 import org.mozilla.gecko.Tab;
 import org.mozilla.gecko.Tabs;
+import org.mozilla.gecko.db.BrowserDB;
+import org.mozilla.gecko.db.StubBrowserDB;
 import org.mozilla.gecko.mozglue.ContextUtils.SafeIntent;
 import org.mozilla.gecko.util.NativeJSObject;
 import org.mozilla.gecko.webapp.InstallHelper.InstallCallback;
@@ -57,14 +60,17 @@ public class WebappImpl extends GeckoApp implements InstallCallback {
     @Override
     public int getLayout() { return R.layout.web_app; }
 
-    @Override
-    public boolean hasTabsSideBar() { return false; }
+    public WebappImpl() {
+        GeckoProfile.setBrowserDBFactory(new BrowserDB.Factory() {
+            @Override
+            public BrowserDB get(String profileName, File profileDir) {
+                return new StubBrowserDB(profileName);
+            }
+        });
+    }
 
     @Override
-    public void onCreate(Bundle savedInstance)
-    {
-
-        String action = getIntent().getAction();
+    public void onCreate(Bundle savedInstance) {
         Bundle extras = getIntent().getExtras();
         if (extras == null) {
             extras = savedInstance;
@@ -179,10 +185,19 @@ public class WebappImpl extends GeckoApp implements InstallCallback {
     }
 
     @Override
-    protected void loadStartupTab(String uri) {
+    protected void loadStartupTabWithAboutHome(final int flags) {
+        loadStartupTabWithExternalUrl(null, null, flags);
+    }
+
+    // Note: there is no support for applicationId in Webapps at
+    // the moment because I don't have time to debug/test.
+    @Override
+    protected void loadStartupTabWithExternalUrl(final String uri, final String applicationId,
+            int flags) {
         // Load a tab so it's available for any code that assumes a tab
         // before the app tab itself is loaded in BrowserApp._loadWebapp.
-        super.loadStartupTab("about:blank");
+        flags = Tabs.LOADURL_NEW_TAB | Tabs.LOADURL_USER_ENTERED | Tabs.LOADURL_EXTERNAL;
+        super.loadStartupTabWithExternalUrl("about:blank", null, flags);
     }
 
     private void showSplash() {

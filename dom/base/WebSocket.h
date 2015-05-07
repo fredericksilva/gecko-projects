@@ -1,5 +1,5 @@
 /* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set sw=2 ts=8 et tw=80 : */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -28,15 +28,11 @@ class nsIInputStream;
 namespace mozilla {
 namespace dom {
 
-namespace workers {
-class WorkerPrivate;
-}
-
 class File;
 
 class WebSocketImpl;
 
-class WebSocket MOZ_FINAL : public DOMEventTargetHelper
+class WebSocket final : public DOMEventTargetHelper
 {
   friend class WebSocketImpl;
 
@@ -54,15 +50,15 @@ public:
     WebSocket, DOMEventTargetHelper)
 
   // EventTarget
-  virtual void EventListenerAdded(nsIAtom* aType) MOZ_OVERRIDE;
-  virtual void EventListenerRemoved(nsIAtom* aType) MOZ_OVERRIDE;
+  virtual void EventListenerAdded(nsIAtom* aType) override;
+  virtual void EventListenerRemoved(nsIAtom* aType) override;
 
-  virtual void DisconnectFromOwner() MOZ_OVERRIDE;
+  virtual void DisconnectFromOwner() override;
 
   // nsWrapperCache
   nsPIDOMWindow* GetParentObject() { return GetOwner(); }
 
-  virtual JSObject* WrapObject(JSContext* cx) MOZ_OVERRIDE;
+  virtual JSObject* WrapObject(JSContext* cx, JS::Handle<JSObject*> aGivenProto) override;
 
 public: // static helpers:
 
@@ -158,8 +154,8 @@ private: // constructor && distructor
   void DontKeepAliveAnyMore();
 
 private:
-  WebSocket(const WebSocket& x) MOZ_DELETE;   // prevent bad usage
-  WebSocket& operator=(const WebSocket& x) MOZ_DELETE;
+  WebSocket(const WebSocket& x) = delete;   // prevent bad usage
+  WebSocket& operator=(const WebSocket& x) = delete;
 
   void Send(nsIInputStream* aMsgStream,
             const nsACString& aMsgString,
@@ -173,7 +169,7 @@ private:
   // WebSocket.
   WebSocketImpl* mImpl;
 
-  workers::WorkerPrivate* mWorkerPrivate;
+  bool mIsMainThread;
 
   bool mKeepingAlive;
   bool mCheckMustKeepAlive;
@@ -181,7 +177,7 @@ private:
   uint32_t mOutgoingBufferedAmount;
 
   // related to the WebSocket constructor steps
-  nsString mOriginalURL;
+  nsString mURI;
   nsString mEffectiveURL;   // after redirects
   nsCString mEstablishedExtensions;
   nsCString mEstablishedProtocol;

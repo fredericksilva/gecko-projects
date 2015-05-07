@@ -36,7 +36,9 @@ const NS_DIRECTORY_SERVICE_CONTRACTID =
 const NS_OBSERVER_SERVICE_CONTRACTID =
           "@mozilla.org/observer-service;1";
 
-Components.utils.import("resource://gre/modules/FileUtils.jsm");
+CU.import("resource://gre/modules/FileUtils.jsm");
+CU.import("chrome://reftest/content/httpd.jsm", this);
+CU.import("resource://gre/modules/Services.jsm");
 
 var gLoadTimeout = 0;
 var gTimeoutHook = null;
@@ -58,6 +60,7 @@ const BLANK_URL_FOR_CLEARING = "data:text/html;charset=UTF-8,%3C%21%2D%2DCLEAR%2
 var gBrowser;
 // Are we testing web content loaded in a separate process?
 var gBrowserIsRemote;           // bool
+var gB2GisMulet;                // bool
 // Are we using <iframe mozbrowser>?
 var gBrowserIsIframe;           // bool
 var gBrowserMessageManager;
@@ -110,6 +113,10 @@ var gExpectedCrashDumpFiles = [];
 var gUnexpectedCrashDumpFiles = { };
 var gCrashDumpDir;
 var gFailedNoPaint = false;
+var gFailedOpaqueLayer = false;
+var gFailedOpaqueLayerMessages = [];
+var gFailedAssignedLayer = false;
+var gFailedAssignedLayerMessages = [];
 
 // The enabled-state of the test-plugins, stored so they can be reset later
 var gTestPluginEnabledStates = null;
@@ -247,6 +254,12 @@ this.OnRefTestLoad = function OnRefTestLoad(win)
     }
 
     try {
+        gB2GisMulet = prefs.getBoolPref("b2g.is_mulet");
+    } catch (e) {
+        gB2GisMulet = false;
+    }
+
+    try {
       gBrowserIsIframe = prefs.getBoolPref("reftest.browser.iframe.enabled");
     } catch (e) {
       gBrowserIsIframe = false;
@@ -269,7 +282,6 @@ this.OnRefTestLoad = function OnRefTestLoad(win)
     gBrowser.setAttribute("id", "browser");
     gBrowser.setAttribute("type", "content-primary");
     gBrowser.setAttribute("remote", gBrowserIsRemote ? "true" : "false");
-    gBrowser.setAttribute("mozasyncpanzoom", "true");
     // Make sure the browser element is exactly 800x1000, no matter
     // what size our window is
     gBrowser.setAttribute("style", "padding: 0px; margin: 0px; border:none; min-width: 800px; min-height: 1000px; max-width: 800px; max-height: 1000px");
@@ -397,17 +409,7 @@ function InitAndStartRefTests()
     if (gRemote) {
         gServer = null;
     } else {
-        // not all gecko applications autoregister xpcom components
-        if (CC["@mozilla.org/server/jshttp;1"] === undefined) {
-            var file = CC["@mozilla.org/file/directory_service;1"].
-                        getService(CI.nsIProperties).get("ProfD", CI.nsIFile);
-            file.appendRelativePath("extensions/reftest@mozilla.org/chrome.manifest");
-
-            registrar = Components.manager.QueryInterface(CI.nsIComponentRegistrar);
-            registrar.autoRegister(file);
-        }
-        gServer = CC["@mozilla.org/server/jshttp;1"].
-                      createInstance(CI.nsIHttpServer);
+        gServer = new HttpServer();
     }
     try {
         if (gServer)
@@ -676,9 +678,12 @@ function BuildConditionSandbox(aURL) {
     sandbox.http = new sandbox.Object();
     httpProps.forEach((x) => sandbox.http[x] = hh[x]);
 
-    // Set OSX to the Mac OS X version for Mac, and 0 otherwise.
-    var osxmatch = /Mac OS X (\d+.\d+)$/.exec(hh.oscpu);
-    sandbox.OSX = osxmatch ? parseFloat(osxmatch[1]) : 0;
+    // Set OSX to be the Mac OS X version, as an integer, or undefined
+    // for other platforms.  The integer is formed by 100 times the
+    // major version plus the minor version, so 1006 for 10.6, 1010 for
+    // 10.10, etc.
+    var osxmatch = /Mac OS X (\d+).(\d+)$/.exec(hh.oscpu);
+    sandbox.OSX = osxmatch ? parseInt(osxmatch[1]) * 100 + parseInt(osxmatch[2]) : undefined;
 
     // see if we have the test plugin available,
     // and set a sandox prop accordingly
@@ -736,6 +741,7 @@ function BuildConditionSandbox(aURL) {
     // Tests shouldn't care about this except for when they need to
     // crash the content process
     sandbox.browserIsRemote = gBrowserIsRemote;
+    sandbox.Mulet = gB2GisMulet;
 
     try {
         sandbox.asyncPanZoom = prefs.getBoolPref("layers.async-pan-zoom.enabled");
@@ -748,6 +754,9 @@ function BuildConditionSandbox(aURL) {
         dump("REFTEST INFO | " + JSON.stringify(CU.waiveXrays(sandbox)) + " \n");
         gDumpedConditionSandbox = true;
     }
+
+    // Graphics features
+    sandbox.supportsRepeatResampling = !sandbox.cocoaWidget;
     return sandbox;
 }
 
@@ -807,7 +816,12 @@ function ReadManifest(aURL, inherited_status)
                      .getService(CI.nsIScriptSecurityManager);
 
     var listURL = aURL;
-    var channel = gIOService.newChannelFromURI(aURL);
+    var channel = gIOService.newChannelFromURI2(aURL,
+                                                null,      // aLoadingNode
+                                                Services.scriptSecurityManager.getSystemPrincipal(),
+                                                null,      // aTriggeringPrincipal
+                                                CI.nsILoadInfo.SEC_NORMAL,
+                                                CI.nsIContentPolicy.TYPE_OTHER);
     var inputStream = channel.open();
     if (channel instanceof Components.interfaces.nsIHttpChannel
         && channel.responseStatus != 200) {
@@ -1480,6 +1494,12 @@ function UpdateCurrentCanvasForInvalidation(rects)
         var right = Math.ceil(r.right);
         var bottom = Math.ceil(r.bottom);
 
+        // Clamp the values to the canvas size
+        left = Math.max(0, Math.min(left, gCurrentCanvas.width));
+        top = Math.max(0, Math.min(top, gCurrentCanvas.height));
+        right = Math.max(0, Math.min(right, gCurrentCanvas.width));
+        bottom = Math.max(0, Math.min(bottom, gCurrentCanvas.height));
+
         ctx.save();
         ctx.translate(left, top);
         DoDrawWindow(ctx, left, top, right - left, bottom - top);
@@ -1645,20 +1665,34 @@ function RecordResult(testRunTime, errorMsg, scriptResults)
                 gDumpLog("REFTEST fuzzy match\n");
             }
 
+            var failedExtraCheck = gFailedNoPaint || gFailedOpaqueLayer || gFailedAssignedLayer;
+
             // whether the comparison result matches what is in the manifest
-            var test_passed = (equal == (gURLs[0].type == TYPE_REFTEST_EQUAL)) && !gFailedNoPaint;
+            var test_passed = (equal == (gURLs[0].type == TYPE_REFTEST_EQUAL)) && !failedExtraCheck;
 
             output = outputs[expected][test_passed];
 
             ++gTestResults[output.n];
 
-            // It's possible that we failed both reftest-no-paint and the normal comparison, but we don't
-            // have a way to annotate these separately, so just print an error for the no-paint failure.
-            if (gFailedNoPaint) {
+            // It's possible that we failed both an "extra check" and the normal comparison, but we don't
+            // have a way to annotate these separately, so just print an error for the extra check failures.
+            if (failedExtraCheck) {
+                var failures = [];
+                if (gFailedNoPaint) {
+                    failures.push("failed reftest-no-paint");
+                }
+                // The gFailed*Messages arrays will contain messages from both the test and the reference.
+                if (gFailedOpaqueLayer) {
+                    failures.push("failed reftest-opaque-layer: " + gFailedOpaqueLayerMessages.join(", "));
+                }
+                if (gFailedAssignedLayer) {
+                    failures.push("failed reftest-assigned-layer: " + gFailedAssignedLayerMessages.join(", "));
+                }
+                var failureString = failures.join(", ");
                 if (expected == EXPECTED_FAIL) {
-                    gDumpLog("REFTEST TEST-KNOWN-FAIL | " + gURLs[0].prettyPath + " | failed reftest-no-paint\n");
+                    gDumpLog("REFTEST TEST-KNOWN-FAIL | " + gURLs[0].prettyPath + " | " + failureString + "\n");
                 } else {
-                    gDumpLog("REFTEST TEST-UNEXPECTED-FAIL | " + gURLs[0].prettyPath + " | failed reftest-no-paint\n");
+                    gDumpLog("REFTEST TEST-UNEXPECTED-FAIL | " + gURLs[0].prettyPath + " | " + failureString + "\n");
                 }
             } else {
                 var result = "REFTEST " + output.s + " | " +
@@ -1688,17 +1722,17 @@ function RecordResult(testRunTime, errorMsg, scriptResults)
                 }
 
                 gDumpLog(result);
+
+                if (gURLs[0].prefSettings1.length == 0) {
+                    UpdateCanvasCache(gURLs[0].url1, gCanvas1);
+                }
+                if (gURLs[0].prefSettings2.length == 0) {
+                    UpdateCanvasCache(gURLs[0].url2, gCanvas2);
+                }
             }
 
             if ((!test_passed && expected == EXPECTED_PASS) || (test_passed && expected == EXPECTED_FAIL)) {
                 FlushTestLog();
-            }
-
-            if (gURLs[0].prefSettings1.length == 0) {
-                UpdateCanvasCache(gURLs[0].url1, gCanvas1);
-            }
-            if (gURLs[0].prefSettings2.length == 0) {
-                UpdateCanvasCache(gURLs[0].url2, gCanvas2);
             }
 
             CleanUpCrashDumpFiles();
@@ -1782,6 +1816,10 @@ function FinishTestItem()
     // and tests will continue.
     SendClear();
     gFailedNoPaint = false;
+    gFailedOpaqueLayer = false;
+    gFailedOpaqueLayerMessages = [];
+    gFailedAssignedLayer = false;
+    gFailedAssignedLayerMessages = [];
 }
 
 function DoAssertionCheck(numAsserts)
@@ -1882,6 +1920,14 @@ function RegisterMessageListenersAndLoadContentScript()
         function (m) { RecvFailedNoPaint(); }
     );
     gBrowserMessageManager.addMessageListener(
+        "reftest:FailedOpaqueLayer",
+        function (m) { RecvFailedOpaqueLayer(m.json.why); }
+    );
+    gBrowserMessageManager.addMessageListener(
+        "reftest:FailedAssignedLayer",
+        function (m) { RecvFailedAssignedLayer(m.json.why); }
+    );
+    gBrowserMessageManager.addMessageListener(
         "reftest:InitCanvasWithSnapshot",
         function (m) { return RecvInitCanvasWithSnapshot(); }
     );
@@ -1938,6 +1984,16 @@ function RecvFailedLoad(why)
 function RecvFailedNoPaint()
 {
     gFailedNoPaint = true;
+}
+
+function RecvFailedOpaqueLayer(why) {
+    gFailedOpaqueLayer = true;
+    gFailedOpaqueLayerMessages.push(why);
+}
+
+function RecvFailedAssignedLayer(why) {
+    gFailedAssignedLayer = true;
+    gFailedAssignedLayerMessages.push(why);
 }
 
 function RecvInitCanvasWithSnapshot()

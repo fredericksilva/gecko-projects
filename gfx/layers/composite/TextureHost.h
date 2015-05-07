@@ -10,7 +10,7 @@
 #include <stdint.h>                     // for uint64_t, uint32_t, uint8_t
 #include "gfxTypes.h"
 #include "mozilla/Assertions.h"         // for MOZ_ASSERT, etc
-#include "mozilla/Attributes.h"         // for MOZ_OVERRIDE
+#include "mozilla/Attributes.h"         // for override
 #include "mozilla/RefPtr.h"             // for RefPtr, TemporaryRef, etc
 #include "mozilla/gfx/2D.h"             // for DataSourceSurface
 #include "mozilla/gfx/Point.h"          // for IntSize, IntPoint
@@ -28,11 +28,7 @@
 #include "nsTraceRefcnt.h"              // for MOZ_COUNT_CTOR, etc
 #include "nscore.h"                     // for nsACString
 #include "mozilla/layers/AtomicRefCountedWithFinalize.h"
-
-class gfxReusableSurfaceWrapper;
-struct nsIntPoint;
-struct nsIntSize;
-struct nsIntRect;
+#include "mozilla/gfx/Rect.h"
 
 namespace mozilla {
 namespace gl {
@@ -45,7 +41,6 @@ class Shmem;
 namespace layers {
 
 class Compositor;
-class CompositableHost;
 class CompositableParentManager;
 class SurfaceDescriptor;
 class SharedSurfaceDescriptor;
@@ -72,7 +67,7 @@ class BigImageIterator
 public:
   virtual void BeginBigImageIteration() = 0;
   virtual void EndBigImageIteration() {};
-  virtual nsIntRect GetTileRect() = 0;
+  virtual gfx::IntRect GetTileRect() = 0;
   virtual size_t GetTileCount() = 0;
   virtual bool NextTile() = 0;
 };
@@ -86,12 +81,14 @@ public:
  *
  * This class is used on the compositor side.
  */
-class TextureSource
+class TextureSource: public RefCounted<TextureSource>
 {
 public:
-  NS_INLINE_DECL_REFCOUNTING(TextureSource)
+  MOZ_DECLARE_REFCOUNTED_VIRTUAL_TYPENAME(TextureSource)
 
   TextureSource();
+
+  virtual ~TextureSource();
 
   /**
    * Should be overridden in order to deallocate the data that is associated
@@ -159,7 +156,6 @@ public:
   int NumCompositableRefs() const { return mCompositableCount; }
 
 protected:
-  virtual ~TextureSource();
 
   RefPtr<TextureSource> mNextSibling;
   int mCompositableCount;
@@ -169,31 +165,41 @@ protected:
  * equivalent of a RefPtr<TextureSource>, that calls AddCompositableRef and
  * ReleaseCompositableRef in addition to the usual AddRef and Release.
  */
-class CompositableTextureSourceRef {
+template<typename T>
+class CompositableTextureRef {
 public:
-  CompositableTextureSourceRef() {}
+  CompositableTextureRef() {}
 
-  ~CompositableTextureSourceRef()
+  explicit CompositableTextureRef(const CompositableTextureRef& aOther)
+  {
+    *this = aOther;
+  }
+
+  explicit CompositableTextureRef(T* aOther)
+  {
+    *this = aOther;
+  }
+
+  ~CompositableTextureRef()
   {
     if (mRef) {
       mRef->ReleaseCompositableRef();
     }
   }
 
-  CompositableTextureSourceRef& operator=(const TemporaryRef<TextureSource>& aOther)
+  CompositableTextureRef& operator=(const CompositableTextureRef& aOther)
   {
-    RefPtr<TextureSource> temp = aOther;
-    if (temp) {
-      temp->AddCompositableRef();
+    if (aOther.get()) {
+      aOther->AddCompositableRef();
     }
     if (mRef) {
       mRef->ReleaseCompositableRef();
     }
-    mRef = temp;
+    mRef = aOther.get();
     return *this;
   }
 
-  CompositableTextureSourceRef& operator=(TextureSource* aOther)
+  CompositableTextureRef& operator=(T* aOther)
   {
     if (aOther) {
       aOther->AddCompositableRef();
@@ -205,14 +211,17 @@ public:
     return *this;
   }
 
-  TextureSource* get() const { return mRef; }
-  operator TextureSource*() const { return mRef; }
-  TextureSource* operator->() const { return mRef; }
-  TextureSource& operator*() const { return *mRef; }
+  T* get() const { return mRef; }
+  operator T*() const { return mRef; }
+  T* operator->() const { return mRef; }
+  T& operator*() const { return *mRef; }
 
 private:
-  RefPtr<TextureSource> mRef;
+  RefPtr<T> mRef;
 };
+
+typedef CompositableTextureRef<TextureSource> CompositableTextureSourceRef;
+typedef CompositableTextureRef<TextureHost> CompositableTextureHostRef;
 
 /**
  * Interface for TextureSources that can be updated from a DataSourceSurface.
@@ -226,7 +235,7 @@ public:
     : mUpdateSerial(0)
   {}
 
-  virtual DataTextureSource* AsDataTextureSource() MOZ_OVERRIDE { return this; }
+  virtual DataTextureSource* AsDataTextureSource() override { return this; }
 
   /**
    * Upload a (portion of) surface to the TextureSource.
@@ -251,7 +260,7 @@ public:
 
   // By default at least set the update serial to zero.
   // overloaded versions should do that too.
-  virtual void DeallocateDeviceData() MOZ_OVERRIDE
+  virtual void DeallocateDeviceData() override
   {
     SetUpdateSerial(0);
   }
@@ -352,15 +361,6 @@ public:
   virtual gfx::SurfaceFormat GetFormat() const = 0;
 
   /**
-   * Return a list of TextureSources for use with a Compositor.
-   *
-   * This can trigger texture uploads, so do not call it inside transactions
-   * so as to not upload textures while the main thread is blocked.
-   * Must not be called while this TextureHost is not sucessfully Locked.
-   */
-  virtual TextureSource* GetTextureSources() = 0;
-
-  /**
    * Called during the transaction. The TextureSource may or may not be composited.
    *
    * Note that this is called outside of lock/unlock.
@@ -372,7 +372,7 @@ public:
    *
    * Note that this is called only withing lock/unlock.
    */
-  virtual bool BindTextureSource(CompositableTextureSourceRef& aTexture);
+  virtual bool BindTextureSource(CompositableTextureSourceRef& aTexture) = 0;
 
   /**
    * Called when another TextureHost will take over.
@@ -470,7 +470,7 @@ public:
    */
   PTextureParent* GetIPDLActor();
 
-  FenceHandle GetAndResetReleaseFenceHandle();
+  virtual FenceHandle GetAndResetReleaseFenceHandle();
 
   /**
    * Specific to B2G's Composer2D
@@ -505,11 +505,25 @@ public:
    */
   virtual TextureHostOGL* AsHostOGL() { return nullptr; }
 
+  void AddCompositableRef() { ++mCompositableCount; }
+
+  void ReleaseCompositableRef()
+  {
+    --mCompositableCount;
+    MOZ_ASSERT(mCompositableCount >= 0);
+    if (mCompositableCount == 0) {
+      UnbindTextureSource();
+    }
+  }
+
+  int NumCompositableRefs() const { return mCompositableCount; }
+
 protected:
   void RecycleTexture(TextureFlags aFlags);
 
   PTextureParent* mActor;
   TextureFlags mFlags;
+  int mCompositableCount;
 
   friend class TextureParent;
 };
@@ -539,32 +553,32 @@ public:
 
   virtual size_t GetBufferSize() = 0;
 
-  virtual void Updated(const nsIntRegion* aRegion = nullptr) MOZ_OVERRIDE;
+  virtual void Updated(const nsIntRegion* aRegion = nullptr) override;
 
-  virtual bool Lock() MOZ_OVERRIDE;
+  virtual bool Lock() override;
 
-  virtual void Unlock() MOZ_OVERRIDE;
+  virtual void Unlock() override;
 
-  virtual TextureSource* GetTextureSources() MOZ_OVERRIDE;
+  virtual bool BindTextureSource(CompositableTextureSourceRef& aTexture) override;
 
-  virtual void DeallocateDeviceData() MOZ_OVERRIDE;
+  virtual void DeallocateDeviceData() override;
 
-  virtual void SetCompositor(Compositor* aCompositor) MOZ_OVERRIDE;
+  virtual void SetCompositor(Compositor* aCompositor) override;
 
   /**
    * Return the format that is exposed to the compositor when calling
-   * GetTextureSources.
+   * BindTextureSource.
    *
    * If the shared format is YCbCr and the compositor does not support it,
    * GetFormat will be RGB32 (even though mFormat is SurfaceFormat::YUV).
    */
-  virtual gfx::SurfaceFormat GetFormat() const MOZ_OVERRIDE;
+  virtual gfx::SurfaceFormat GetFormat() const override;
 
-  virtual gfx::IntSize GetSize() const MOZ_OVERRIDE { return mSize; }
+  virtual gfx::IntSize GetSize() const override { return mSize; }
 
-  virtual TemporaryRef<gfx::DataSourceSurface> GetAsSurface() MOZ_OVERRIDE;
+  virtual TemporaryRef<gfx::DataSourceSurface> GetAsSurface() override;
 
-  virtual bool HasInternalBuffer() const MOZ_OVERRIDE { return true; }
+  virtual bool HasInternalBuffer() const override { return true; }
 
 protected:
   bool Upload(nsIntRegion *aRegion = nullptr);
@@ -600,17 +614,17 @@ protected:
   ~ShmemTextureHost();
 
 public:
-  virtual void DeallocateSharedData() MOZ_OVERRIDE;
+  virtual void DeallocateSharedData() override;
 
-  virtual void ForgetSharedData() MOZ_OVERRIDE;
+  virtual void ForgetSharedData() override;
 
-  virtual uint8_t* GetBuffer() MOZ_OVERRIDE;
+  virtual uint8_t* GetBuffer() override;
 
-  virtual size_t GetBufferSize() MOZ_OVERRIDE;
+  virtual size_t GetBufferSize() override;
 
-  virtual const char *Name() MOZ_OVERRIDE { return "ShmemTextureHost"; }
+  virtual const char *Name() override { return "ShmemTextureHost"; }
 
-  virtual void OnShutdown() MOZ_OVERRIDE;
+  virtual void OnShutdown() override;
 
 protected:
   UniquePtr<mozilla::ipc::Shmem> mShmem;
@@ -634,15 +648,15 @@ protected:
   ~MemoryTextureHost();
 
 public:
-  virtual void DeallocateSharedData() MOZ_OVERRIDE;
+  virtual void DeallocateSharedData() override;
 
-  virtual void ForgetSharedData() MOZ_OVERRIDE;
+  virtual void ForgetSharedData() override;
 
-  virtual uint8_t* GetBuffer() MOZ_OVERRIDE;
+  virtual uint8_t* GetBuffer() override;
 
-  virtual size_t GetBufferSize() MOZ_OVERRIDE;
+  virtual size_t GetBufferSize() override;
 
-  virtual const char *Name() MOZ_OVERRIDE { return "MemoryTextureHost"; }
+  virtual const char *Name() override { return "MemoryTextureHost"; }
 
 protected:
   uint8_t* mBuffer;
@@ -661,13 +675,13 @@ public:
     MOZ_ASSERT(!mIsLocked);
   }
 
-  virtual void DeallocateDeviceData() MOZ_OVERRIDE {};
+  virtual void DeallocateDeviceData() override {};
 
-  virtual TemporaryRef<gfx::DataSourceSurface> GetAsSurface() MOZ_OVERRIDE {
+  virtual TemporaryRef<gfx::DataSourceSurface> GetAsSurface() override {
     return nullptr; // XXX - implement this (for MOZ_DUMP_PAINTING)
   }
 
-  virtual void SetCompositor(Compositor* aCompositor) MOZ_OVERRIDE {
+  virtual void SetCompositor(Compositor* aCompositor) override {
     MOZ_ASSERT(!mIsLocked);
 
     if (aCompositor == mCompositor)
@@ -679,21 +693,22 @@ public:
 
 public:
 
-  virtual bool Lock() MOZ_OVERRIDE;
-  virtual void Unlock() MOZ_OVERRIDE;
+  virtual bool Lock() override;
+  virtual void Unlock() override;
 
-  virtual TextureSource* GetTextureSources() MOZ_OVERRIDE {
+  virtual bool BindTextureSource(CompositableTextureSourceRef& aTexture) override {
     MOZ_ASSERT(mIsLocked);
     MOZ_ASSERT(mTexSource);
-    return mTexSource;
+    aTexture = mTexSource;
+    return !!aTexture;
   }
 
-  virtual gfx::SurfaceFormat GetFormat() const MOZ_OVERRIDE;
+  virtual gfx::SurfaceFormat GetFormat() const override;
 
-  virtual gfx::IntSize GetSize() const MOZ_OVERRIDE;
+  virtual gfx::IntSize GetSize() const override;
 
 #ifdef MOZ_LAYERS_HAVE_LOG
-  virtual const char* Name() { return "SharedSurfaceTextureHost"; }
+  virtual const char* Name() override { return "SharedSurfaceTextureHost"; }
 #endif
 
 protected:
@@ -737,7 +752,8 @@ class CompositingRenderTarget: public TextureSource
 public:
 
   explicit CompositingRenderTarget(const gfx::IntPoint& aOrigin)
-    : mOrigin(aOrigin)
+    : mClearOnBind(false)
+    , mOrigin(aOrigin)
   {}
   virtual ~CompositingRenderTarget() {}
 
@@ -745,7 +761,19 @@ public:
   virtual TemporaryRef<gfx::DataSourceSurface> Dump(Compositor* aCompositor) { return nullptr; }
 #endif
 
+  /**
+   * Perform a clear when recycling a non opaque surface.
+   * The clear is deferred to when the render target is bound.
+   */
+  void ClearOnBind() {
+    mClearOnBind = true;
+  }
+
   const gfx::IntPoint& GetOrigin() { return mOrigin; }
+  gfx::IntRect GetRect() { return gfx::IntRect(GetOrigin(), GetSize()); }
+
+protected:
+  bool mClearOnBind;
 
 private:
   gfx::IntPoint mOrigin;

@@ -1,5 +1,5 @@
-/* -*- Mode: c++; c-basic-offset: 2; indent-tabs-mode: nil; tab-width: 40 -*- */
-/* vim: set ts=2 et sw=2 tw=80: */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -11,19 +11,26 @@
 
 BEGIN_BLUETOOTH_NAMESPACE
 
+class BluetoothDaemonListenSocket;
 class BluetoothDaemonChannel;
+class BluetoothDaemonA2dpInterface;
+class BluetoothDaemonAvrcpInterface;
+class BluetoothDaemonHandsfreeInterface;
 class BluetoothDaemonProtocol;
 class BluetoothDaemonSocketInterface;
 
-class BluetoothDaemonInterface MOZ_FINAL : public BluetoothInterface
+class BluetoothDaemonInterface final : public BluetoothInterface
 {
 public:
   class CleanupResultHandler;
   class InitResultHandler;
+  class StartDaemonTask;
 
+  friend class BluetoothDaemonListenSocket;
   friend class BluetoothDaemonChannel;
   friend class CleanupResultHandler;
   friend class InitResultHandler;
+  friend class StartDaemonTask;
 
   static BluetoothDaemonInterface* GetInstance();
 
@@ -68,9 +75,15 @@ public:
 
   /* Bonds */
 
-  void CreateBond(const nsAString& aBdAddr, BluetoothResultHandler* aRes);
+  void CreateBond(const nsAString& aBdAddr, BluetoothTransport aTransport,
+                  BluetoothResultHandler* aRes);
   void RemoveBond(const nsAString& aBdAddr, BluetoothResultHandler* aRes);
   void CancelBond(const nsAString& aBdAddr, BluetoothResultHandler* aRes);
+
+  /* Connection */
+
+  void GetConnectionState(const nsAString& aBdAddr,
+                          BluetoothResultHandler* aRes);
 
   /* Authentication */
 
@@ -78,7 +91,7 @@ public:
                 const nsAString& aPinCode,
                 BluetoothResultHandler* aRes);
 
-  void SspReply(const nsAString& aBdAddr, const nsAString& aVariant,
+  void SspReply(const nsAString& aBdAddr, BluetoothSspVariant aVariant,
                 bool aAccept, uint32_t aPasskey,
                 BluetoothResultHandler* aRes);
 
@@ -93,38 +106,52 @@ public:
   void LeTestMode(uint16_t aOpcode, uint8_t* aBuf, uint8_t aLen,
                   BluetoothResultHandler* aRes);
 
+  /* Energy Information */
+
+  void ReadEnergyInfo(BluetoothResultHandler* aRes);
+
   /* Profile Interfaces */
 
-  BluetoothSocketInterface* GetBluetoothSocketInterface() MOZ_OVERRIDE;
-  BluetoothHandsfreeInterface* GetBluetoothHandsfreeInterface() MOZ_OVERRIDE;
-  BluetoothA2dpInterface* GetBluetoothA2dpInterface() MOZ_OVERRIDE;
-  BluetoothAvrcpInterface* GetBluetoothAvrcpInterface() MOZ_OVERRIDE;
+  BluetoothSocketInterface* GetBluetoothSocketInterface() override;
+  BluetoothHandsfreeInterface* GetBluetoothHandsfreeInterface() override;
+  BluetoothA2dpInterface* GetBluetoothA2dpInterface() override;
+  BluetoothAvrcpInterface* GetBluetoothAvrcpInterface() override;
+  BluetoothGattInterface* GetBluetoothGattInterface() override;
 
 protected:
   enum Channel {
+    LISTEN_SOCKET,
     CMD_CHANNEL,
     NTF_CHANNEL
   };
 
-  BluetoothDaemonInterface(BluetoothDaemonChannel* aCmdChannel,
-                           BluetoothDaemonChannel* aNtfChannel,
-                           BluetoothDaemonProtocol* aProtocol);
+  BluetoothDaemonInterface();
   ~BluetoothDaemonInterface();
 
   void OnConnectSuccess(enum Channel aChannel);
   void OnConnectError(enum Channel aChannel);
   void OnDisconnect(enum Channel aChannel);
 
+  nsresult CreateRandomAddressString(const nsACString& aPrefix,
+                                     unsigned long aPostfixLength,
+                                     nsACString& aAddress);
+
 private:
   void DispatchError(BluetoothResultHandler* aRes, BluetoothStatus aStatus);
+  void DispatchError(BluetoothResultHandler* aRes, nsresult aRv);
 
-  nsAutoPtr<BluetoothDaemonChannel> mCmdChannel;
-  nsAutoPtr<BluetoothDaemonChannel> mNtfChannel;
+  nsCString mListenSocketName;
+  nsRefPtr<BluetoothDaemonListenSocket> mListenSocket;
+  nsRefPtr<BluetoothDaemonChannel> mCmdChannel;
+  nsRefPtr<BluetoothDaemonChannel> mNtfChannel;
   nsAutoPtr<BluetoothDaemonProtocol> mProtocol;
 
   nsTArray<nsRefPtr<BluetoothResultHandler> > mResultHandlerQ;
 
   nsAutoPtr<BluetoothDaemonSocketInterface> mSocketInterface;
+  nsAutoPtr<BluetoothDaemonHandsfreeInterface> mHandsfreeInterface;
+  nsAutoPtr<BluetoothDaemonA2dpInterface> mA2dpInterface;
+  nsAutoPtr<BluetoothDaemonAvrcpInterface> mAvrcpInterface;
 };
 
 END_BLUETOOTH_NAMESPACE

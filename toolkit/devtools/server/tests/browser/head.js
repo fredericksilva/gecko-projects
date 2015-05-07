@@ -21,13 +21,6 @@ const ALT_DOMAIN_SECURED = "https://sectest1.example.org:443/" + PATH;
 waitForExplicitFinish();
 
 /**
- * Define an async test based on a generator function.
- */
-function asyncTest(generator) {
-  return () => Task.spawn(generator).then(null, ok.bind(null, false)).then(finish);
-}
-
-/**
  * Add a new test tab in the browser and load the given url.
  * @param {String} url The url to be loaded in the new tab
  * @return a promise that resolves to the document when the url is loaded
@@ -56,7 +49,7 @@ function initDebuggerServer() {
     // tests.
     DebuggerServer.destroy();
   } catch (ex) { }
-  DebuggerServer.init(() => true);
+  DebuggerServer.init();
   DebuggerServer.addBrowserActors();
 }
 
@@ -123,6 +116,20 @@ function forceCollections() {
   Cu.forceGC();
   Cu.forceCC();
   Cu.forceShrinkingGC();
+}
+
+/**
+ * Get a mock tabActor from a given window.
+ * This is sometimes useful to test actors or classes that use the tabActor in
+ * isolation.
+ * @param {DOMWindow} win
+ * @return {Object}
+ */
+function getMockTabActor(win) {
+  return {
+    window: win,
+    isRootActor: true
+  };
 }
 
 registerCleanupFunction(function tearDown() {

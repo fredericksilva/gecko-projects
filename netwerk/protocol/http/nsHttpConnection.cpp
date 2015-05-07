@@ -519,7 +519,7 @@ nsHttpConnection::SetupNPNList(nsISSLSocketControl *ssl, uint32_t caps)
         ssl->SetAuthenticationPort(authPort);
     }
 
-    if (mConnInfo->GetRelaxed()) { // http:// over tls
+    if (mConnInfo->GetInsecureScheme()) { // http:// over tls
         if (authHost.IsEmpty() || authHost.Equals(mConnInfo->GetHost())) {
             LOG(("nsHttpConnection::SetupSSL %p TLS-Relaxed "
                  "with Same Host Auth Bypass", this));
@@ -555,10 +555,10 @@ nsHttpConnection::AddTransaction(nsAHttpTransaction *httpTransaction,
          needTunnel ? " over tunnel" : ""));
 
     // do a runtime check here just for defense in depth
-    if (transCI->GetRelaxed() &&
+    if (transCI->GetInsecureScheme() &&
         httpTransaction->RequestHead() && httpTransaction->RequestHead()->IsHTTPS()) {
-        LOG(("This Cannot happen - https on relaxed tls stream\n"));
-        MOZ_ASSERT(false, "https:// on tls relaxed");
+        LOG(("This Cannot happen - https on insecure scheme tls stream\n"));
+        MOZ_ASSERT(false, "https:// on tls insecure scheme");
         return NS_ERROR_FAILURE;
     }
 
@@ -591,6 +591,14 @@ nsHttpConnection::Close(nsresult reason)
             EndIdleMonitoring();
 
         mTLSFilter = nullptr;
+
+        // The connection and security errors clear out alt-svc mappings
+        // in case any previously validated ones are now invalid
+        if (((reason == NS_ERROR_NET_RESET) ||
+             (NS_ERROR_GET_MODULE(reason) == NS_ERROR_MODULE_SECURITY))
+            && mConnInfo) {
+            gHttpHandler->ConnMgr()->ClearHostMapping(mConnInfo);
+        }
 
         if (mSocketTransport) {
             mSocketTransport->SetEventSink(nullptr, nullptr);
@@ -652,17 +660,6 @@ nsHttpConnection::InitSSLParams(bool connectingToProxy, bool proxyStartSSL)
     if (NS_SUCCEEDED(SetupNPNList(ssl, mTransactionCaps))) {
         LOG(("InitSSLParams Setting up SPDY Negotiation OK"));
         mNPNComplete = false;
-    }
-
-    // transaction caps apply only to origin. we don't track
-    // proxy history.
-    if (!connectingToProxy &&
-        (mTransactionCaps & NS_HTTP_ALLOW_RSA_FALSESTART)) {
-        LOG(("nsHttpConnection::InitSSLParams %p "
-             ">= RSA Key Exchange Expected\n", this));
-        ssl->SetKEAExpected(ssl_kea_rsa);
-    } else {
-        ssl->SetKEAExpected(nsISSLSocketControl::KEY_EXCHANGE_UNKNOWN);
     }
 
     return NS_OK;
@@ -1131,9 +1128,9 @@ nsHttpConnection::TakeTransport(nsISocketTransport  **aTransport,
     // via https) that filter needs to take direct control of the
     // streams
     if (mTLSFilter) {
-        nsCOMPtr<nsISupports> ref1(mSocketIn);
-        nsCOMPtr<nsISupports> ref2(mSocketOut);
-        mTLSFilter->newIODriver(mSocketIn, mSocketOut,
+        nsCOMPtr<nsIAsyncInputStream>  ref1(mSocketIn);
+        nsCOMPtr<nsIAsyncOutputStream> ref2(mSocketOut);
+        mTLSFilter->newIODriver(ref1, ref2,
                                 getter_AddRefs(mSocketIn),
                                 getter_AddRefs(mSocketOut));
         mTLSFilter = nullptr;
@@ -1644,7 +1641,8 @@ nsHttpConnection::OnWriteSegment(char *buf,
         return NS_ERROR_FAILURE; // stop iterating
     }
 
-    if (ChaosMode::isActive() && ChaosMode::randomUint32LessThan(2)) {
+    if (ChaosMode::isActive(ChaosMode::IOAmounts) &&
+        ChaosMode::randomUint32LessThan(2)) {
         // read 1...count bytes
         count = ChaosMode::randomUint32LessThan(count) + 1;
     }
@@ -2090,8 +2088,8 @@ nsHttpConnection::OnOutputStreamReady(nsIAsyncOutputStream *out)
 NS_IMETHODIMP
 nsHttpConnection::OnTransportStatus(nsITransport *trans,
                                     nsresult status,
-                                    uint64_t progress,
-                                    uint64_t progressMax)
+                                    int64_t progress,
+                                    int64_t progressMax)
 {
     if (mTransaction)
         mTransaction->OnTransportStatus(trans, status, progress);

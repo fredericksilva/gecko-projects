@@ -1,4 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -34,6 +35,7 @@ using namespace mozilla::dom;
 nsWindowRoot::nsWindowRoot(nsPIDOMWindow* aWindow)
 {
   mWindow = aWindow;
+  MOZ_ASSERT(mWindow->IsOuterWindow());
 }
 
 nsWindowRoot::~nsWindowRoot()
@@ -281,6 +283,75 @@ nsWindowRoot::GetControllerForCommand(const char * aCommand,
   return NS_OK;
 }
 
+void
+nsWindowRoot::GetEnabledDisabledCommandsForControllers(nsIControllers* aControllers,
+                                                       nsTHashtable<nsCharPtrHashKey>& aCommandsHandled,
+                                                       nsTArray<nsCString>& aEnabledCommands,
+                                                       nsTArray<nsCString>& aDisabledCommands)
+{
+  uint32_t controllerCount;
+  aControllers->GetControllerCount(&controllerCount);
+  for (uint32_t c = 0; c < controllerCount; c++) {
+    nsCOMPtr<nsIController> controller;
+    aControllers->GetControllerAt(c, getter_AddRefs(controller));
+
+    nsCOMPtr<nsICommandController> commandController(do_QueryInterface(controller));
+    if (commandController) {
+      uint32_t commandsCount;
+      char** commands;
+      if (NS_SUCCEEDED(commandController->GetSupportedCommands(&commandsCount, &commands))) {
+        for (uint32_t e = 0; e < commandsCount; e++) {
+          // Use a hash to determine which commands have already been handled by
+          // earlier controllers, as the earlier controller's result should get
+          // priority.
+          if (!aCommandsHandled.Contains(commands[e])) {
+            aCommandsHandled.PutEntry(commands[e]);
+
+            bool enabled = false;
+            controller->IsCommandEnabled(commands[e], &enabled);
+
+            const nsDependentCSubstring commandStr(commands[e], strlen(commands[e]));
+            if (enabled) {
+              aEnabledCommands.AppendElement(commandStr);
+            } else {
+              aDisabledCommands.AppendElement(commandStr);
+            }
+          }
+        }
+
+        NS_FREE_XPCOM_ALLOCATED_POINTER_ARRAY(commandsCount, commands);
+      }
+    }
+  }
+}
+
+void
+nsWindowRoot::GetEnabledDisabledCommands(nsTArray<nsCString>& aEnabledCommands,
+                                         nsTArray<nsCString>& aDisabledCommands)
+{
+  nsTHashtable<nsCharPtrHashKey> commandsHandled;
+
+  nsCOMPtr<nsIControllers> controllers;
+  GetControllers(getter_AddRefs(controllers));
+  if (controllers) {
+    GetEnabledDisabledCommandsForControllers(controllers, commandsHandled,
+                                             aEnabledCommands, aDisabledCommands);
+  }
+
+  nsCOMPtr<nsPIDOMWindow> focusedWindow;
+  nsFocusManager::GetFocusedDescendant(mWindow, true, getter_AddRefs(focusedWindow));
+  while (focusedWindow) {
+    focusedWindow->GetControllers(getter_AddRefs(controllers));
+    if (controllers) {
+      GetEnabledDisabledCommandsForControllers(controllers, commandsHandled,
+                                               aEnabledCommands, aDisabledCommands);
+    }
+
+    nsGlobalWindow* win = static_cast<nsGlobalWindow*>(focusedWindow.get());
+    focusedWindow = win->GetPrivateParent();
+  }
+}
+
 nsIDOMNode*
 nsWindowRoot::GetPopupNode()
 {
@@ -300,9 +371,9 @@ nsWindowRoot::GetParentObject()
 }
 
 JSObject*
-nsWindowRoot::WrapObject(JSContext* aCx)
+nsWindowRoot::WrapObject(JSContext* aCx, JS::Handle<JSObject*> aGivenProto)
 {
-  return mozilla::dom::WindowRootBinding::Wrap(aCx, this);
+  return mozilla::dom::WindowRootBinding::Wrap(aCx, this, aGivenProto);
 }
 
 ///////////////////////////////////////////////////////////////////////////////////

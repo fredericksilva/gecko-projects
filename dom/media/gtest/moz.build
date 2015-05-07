@@ -8,11 +8,19 @@ UNIFIED_SOURCES += [
     'MockMediaResource.cpp',
     'TestAudioCompactor.cpp',
     'TestGMPCrossOrigin.cpp',
+    'TestGMPRemoveAndDelete.cpp',
+    'TestIntervalSet.cpp',
+    'TestMP4Demuxer.cpp',
     'TestMP4Reader.cpp',
     'TestTrackEncoder.cpp',
     'TestVideoSegment.cpp',
     'TestWebMBuffered.cpp',
 ]
+
+if CONFIG['MOZ_EME']:
+    UNIFIED_SOURCES += [
+        'TestEME.cpp',
+    ]
 
 if CONFIG['MOZ_WEBM_ENCODER']:
     UNIFIED_SOURCES += [
@@ -22,7 +30,9 @@ if CONFIG['MOZ_WEBM_ENCODER']:
     ]
 
 TEST_HARNESS_FILES.gtest += [
+    '../test/gizmo-frag.mp4',
     '../test/gizmo.mp4',
+    'dash_dashinit.mp4',
     'mediasource_test.mp4',
     'test.webm',
 ]
@@ -31,6 +41,7 @@ include('/ipc/chromium/chromium-config.mozbuild')
 
 LOCAL_INCLUDES += [
     '/dom/media',
+    '/dom/media/eme',
     '/dom/media/encoder',
     '/dom/media/fmp4',
     '/dom/media/gmp',

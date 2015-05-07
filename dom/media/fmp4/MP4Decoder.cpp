@@ -16,6 +16,7 @@
 
 #ifdef XP_WIN
 #include "mozilla/WindowsVersion.h"
+#include "WMFDecoderModule.h"
 #endif
 #ifdef MOZ_FFMPEG
 #include "FFmpegRuntimeLinker.h"
@@ -24,6 +25,7 @@
 #include "apple/AppleDecoderModule.h"
 #endif
 #ifdef MOZ_WIDGET_ANDROID
+#include "nsIGfxInfo.h"
 #include "AndroidBridge.h"
 #endif
 
@@ -40,12 +42,12 @@ MP4Decoder::SetCDMProxy(CDMProxy* aProxy)
 {
   nsresult rv = MediaDecoder::SetCDMProxy(aProxy);
   NS_ENSURE_SUCCESS(rv, rv);
-  {
+  if (aProxy) {
     // The MP4Reader can't decrypt EME content until it has a CDMProxy,
     // and the CDMProxy knows the capabilities of the CDM. The MP4Reader
     // remains in "waiting for resources" state until then.
     CDMCaps::AutoLock caps(aProxy->Capabilites());
-    nsRefPtr<nsIRunnable> task(
+    nsCOMPtr<nsIRunnable> task(
       NS_NewRunnableMethod(this, &MediaDecoder::NotifyWaitingForResourcesStatusChanged));
     caps.CallOnMainThreadWhenCapsAvailable(task);
   }
@@ -54,14 +56,31 @@ MP4Decoder::SetCDMProxy(CDMProxy* aProxy)
 #endif
 
 static bool
-IsSupportedAudioCodec(const nsAString& aCodec)
+IsSupportedAudioCodec(const nsAString& aCodec,
+                      bool& aOutContainsAAC,
+                      bool& aOutContainsMP3)
 {
-  // AAC-LC, HE-AAC or MP3 in M4A.
-  return aCodec.EqualsASCII("mp4a.40.2") ||
-#ifndef MOZ_GONK_MEDIACODEC // B2G doesn't support MP3 in MP4 yet.
-         aCodec.EqualsASCII("mp3") ||
+  // AAC-LC or HE-AAC in M4A.
+  aOutContainsAAC = aCodec.EqualsASCII("mp4a.40.2") ||
+                    aCodec.EqualsASCII("mp4a.40.5");
+  if (aOutContainsAAC) {
+#ifdef XP_WIN
+    if (!Preferences::GetBool("media.fragmented-mp4.use-blank-decoder") &&
+        !WMFDecoderModule::HasAAC()) {
+      return false;
+    }
 #endif
-         aCodec.EqualsASCII("mp4a.40.5");
+    return true;
+  }
+#ifndef MOZ_GONK_MEDIACODEC // B2G doesn't support MP3 in MP4 yet.
+  aOutContainsMP3 = aCodec.EqualsASCII("mp3");
+  if (aOutContainsMP3) {
+    return true;
+  }
+#else
+  aOutContainsMP3 = false;
+#endif
+  return false;
 }
 
 static bool
@@ -72,6 +91,19 @@ IsSupportedH264Codec(const nsAString& aCodec)
   if (!ExtractH264CodecDetails(aCodec, profile, level)) {
     return false;
   }
+
+#ifdef XP_WIN
+  if (!Preferences::GetBool("media.fragmented-mp4.use-blank-decoder") &&
+      !WMFDecoderModule::HasH264()) {
+    return false;
+  }
+
+  // Disable 4k video on windows vista since it performs poorly.
+  if (!IsWin7OrLater() &&
+      level >= H264_LEVEL_5) {
+    return false;
+  }
+#endif
 
   // Just assume what we can play on all platforms the codecs/formats that
   // WMF can play, since we don't have documentation about what other
@@ -92,14 +124,20 @@ IsSupportedH264Codec(const nsAString& aCodec)
 /* static */
 bool
 MP4Decoder::CanHandleMediaType(const nsACString& aType,
-                               const nsAString& aCodecs)
+                               const nsAString& aCodecs,
+                               bool& aOutContainsAAC,
+                               bool& aOutContainsH264,
+                               bool& aOutContainsMP3)
 {
   if (!IsEnabled()) {
     return false;
   }
 
   if (aType.EqualsASCII("audio/mp4") || aType.EqualsASCII("audio/x-m4a")) {
-    return aCodecs.IsEmpty() || IsSupportedAudioCodec(aCodecs);
+    return aCodecs.IsEmpty() ||
+           IsSupportedAudioCodec(aCodecs,
+                                 aOutContainsAAC,
+                                 aOutContainsMP3);
   }
 
   if (!aType.EqualsASCII("video/mp4")) {
@@ -113,7 +151,13 @@ MP4Decoder::CanHandleMediaType(const nsACString& aType,
   while (tokenizer.hasMoreTokens()) {
     const nsSubstring& token = tokenizer.nextToken();
     expectMoreTokens = tokenizer.separatorAfterCurrentToken();
-    if (IsSupportedAudioCodec(token) || IsSupportedH264Codec(token)) {
+    if (IsSupportedAudioCodec(token,
+                              aOutContainsAAC,
+                              aOutContainsMP3)) {
+      continue;
+    }
+    if (IsSupportedH264Codec(token)) {
+      aOutContainsH264 = true;
       continue;
     }
     return false;
@@ -122,8 +166,8 @@ MP4Decoder::CanHandleMediaType(const nsACString& aType,
     // Last codec name was empty
     return false;
   }
-  return true;
 
+  return true;
 }
 
 static bool
@@ -158,9 +202,30 @@ IsAppleAvailable()
 }
 
 static bool
+IsAndroidAvailable()
+{
+#ifndef MOZ_WIDGET_ANDROID
+  return false;
+#else
+  // We need android.media.MediaCodec which exists in API level 16 and higher.
+  return AndroidBridge::Bridge()->GetAPIVersion() >= 16;
+#endif
+}
+
+static bool
 IsGonkMP4DecoderAvailable()
 {
+#ifndef MOZ_GONK_MEDIACODEC
+  return false;
+#else
   return Preferences::GetBool("media.fragmented-mp4.gonk.enabled", false);
+#endif
+}
+
+static bool
+IsGMPDecoderAvailable()
+{
+  return Preferences::GetBool("media.fragmented-mp4.gmp.enabled", false);
 }
 
 static bool
@@ -171,13 +236,11 @@ HavePlatformMPEGDecoders()
          // We have H.264/AAC platform decoders on Windows Vista and up.
          IsVistaOrLater() ||
 #endif
-#ifdef MOZ_WIDGET_ANDROID
-         // We need android.media.MediaCodec which exists in API level 16 and higher.
-         (AndroidBridge::Bridge()->GetAPIVersion() >= 16) ||
-#endif
+         IsAndroidAvailable() ||
          IsFFmpegAvailable() ||
          IsAppleAvailable() ||
          IsGonkMP4DecoderAvailable() ||
+         IsGMPDecoderAvailable() ||
          // TODO: Other platforms...
          false;
 }

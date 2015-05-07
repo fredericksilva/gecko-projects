@@ -33,7 +33,10 @@ const NORMAL_FONT_SIZE = 12;
 const SCRATCHPAD_L10N = "chrome://browser/locale/devtools/scratchpad.properties";
 const DEVTOOLS_CHROME_ENABLED = "devtools.chrome.enabled";
 const PREF_RECENT_FILES_MAX = "devtools.scratchpad.recentFilesMax";
+const SHOW_LINE_NUMBERS = "devtools.scratchpad.lineNumbers";
+const WRAP_TEXT = "devtools.scratchpad.wrapText";
 const SHOW_TRAILING_SPACE = "devtools.scratchpad.showTrailingSpace";
+const EDITOR_FONT_SIZE = "devtools.scratchpad.editorFontSize";
 const ENABLE_AUTOCOMPLETION = "devtools.scratchpad.enableAutocompletion";
 const TAB_SIZE = "devtools.editor.tabsize";
 const FALLBACK_CHARSET_LIST = "intl.fallbackCharsetList.ISO-8859-1";
@@ -220,13 +223,13 @@ var Scratchpad = {
         Scratchpad.sidebar.hide();
       },
       "sp-cmd-line-numbers": () => {
-        Scratchpad.toggleEditorOption('lineNumbers');
+        Scratchpad.toggleEditorOption('lineNumbers', SHOW_LINE_NUMBERS);
       },
       "sp-cmd-wrap-text": () => {
-        Scratchpad.toggleEditorOption('lineWrapping');
+        Scratchpad.toggleEditorOption('lineWrapping', WRAP_TEXT);
       },
       "sp-cmd-highlight-trailing-space": () => {
-        Scratchpad.toggleEditorOption('showTrailingSpace');
+        Scratchpad.toggleEditorOption('showTrailingSpace', SHOW_TRAILING_SPACE);
       },
       "sp-cmd-larger-font": () => {
         Scratchpad.increaseFontSize();
@@ -244,6 +247,24 @@ var Scratchpad = {
       if (elem) {
         elem.addEventListener("command", commands[command]);
       }
+    }
+  },
+
+  /**
+   * Check or uncheck view menu items according to stored preferences.
+   */
+  _updateViewMenuItems: function SP_updateViewMenuItems() {
+    this._updateViewMenuItem(SHOW_LINE_NUMBERS, "sp-menu-line-numbers");
+    this._updateViewMenuItem(WRAP_TEXT, "sp-menu-word-wrap");
+    this._updateViewMenuItem(SHOW_TRAILING_SPACE, "sp-menu-highlight-trailing-space");
+  },
+
+  _updateViewMenuItem: function SP_updateViewMenuItem(preferenceName, menuId) {
+    let checked = Services.prefs.getBoolPref(preferenceName);
+    if (checked) {
+        document.getElementById(menuId).setAttribute('checked', true);
+    } else {
+        document.getElementById(menuId).removeAttribute('checked');
     }
   },
 
@@ -468,7 +489,7 @@ var Scratchpad = {
     return connection.then(({ debuggerClient, webConsoleClient }) => {
       let deferred = promise.defer();
 
-      webConsoleClient.evaluateJS(aString, aResponse => {
+      webConsoleClient.evaluateJSAsync(aString, aResponse => {
         this.debuggerClient = debuggerClient;
         this.webConsoleClient = webConsoleClient;
         if (aResponse.error) {
@@ -516,7 +537,7 @@ var Scratchpad = {
       let resolve = () => deferred.resolve([aString, aError, aResult]);
 
       if (aError) {
-        this.writeAsErrorComment(aError.exception).then(resolve, reject);
+        this.writeAsErrorComment(aError).then(resolve, reject);
       }
       else {
         this.editor.dropSelection();
@@ -543,7 +564,7 @@ var Scratchpad = {
       let resolve = () => deferred.resolve([aString, aError, aResult]);
 
       if (aError) {
-        this.writeAsErrorComment(aError.exception).then(resolve, reject);
+        this.writeAsErrorComment(aError).then(resolve, reject);
       }
       else {
         this.editor.dropSelection();
@@ -572,20 +593,11 @@ var Scratchpad = {
       return;
     }
 
-    let browser = this.gBrowser.selectedBrowser;
-
-    this._reloadAndRunEvent = evt => {
-      if (evt.target !== browser.contentDocument) {
-        return;
-      }
-
-      browser.removeEventListener("load", this._reloadAndRunEvent, true);
-
-      this.run().then(aResults => deferred.resolve(aResults));
-    };
-
-    browser.addEventListener("load", this._reloadAndRunEvent, true);
-    browser.contentWindow.location.reload();
+    let target = TargetFactory.forTab(this.gBrowser.selectedTab);
+    target.once("navigate", () => {
+      this.run().then(results => deferred.resolve(results));
+    });
+    target.makeRemote().then(() => target.activeTab.reload());
 
     return deferred.promise;
   },
@@ -608,7 +620,7 @@ var Scratchpad = {
       let resolve = () => deferred.resolve([aString, aError, aResult]);
 
       if (aError) {
-        this.writeAsErrorComment(aError.exception).then(resolve, reject);
+        this.writeAsErrorComment(aError).then(resolve, reject);
       }
       else if (VariablesView.isPrimitive({ value: aResult })) {
         this._writePrimitiveAsComment(aResult).then(resolve, reject);
@@ -669,7 +681,7 @@ var Scratchpad = {
 
       if (data.error) {
         let errorString = DevToolsUtils.safeErrorString(data.error);
-        this.writeAsErrorComment(errorString);
+        this.writeAsErrorComment({ exception: errorString });
         deferred.reject(errorString);
       } else {
         this.editor.setText(data.code);
@@ -696,7 +708,7 @@ var Scratchpad = {
     try {
       return Reflect.parse(aText);
     } catch (e) {
-      this.writeAsErrorComment(DevToolsUtils.safeErrorString(e));
+      this.writeAsErrorComment({ exception: DevToolsUtils.safeErrorString(e) });
       return false;
     }
   },
@@ -752,7 +764,7 @@ var Scratchpad = {
             continue;
           }
           if ((decl.init.type == "FunctionExpression"
-               || decl.init.type == "ArrowExpression")
+               || decl.init.type == "ArrowFunctionExpression")
               && this._containsCursor(decl.loc, aCursorPos)) {
             return decl;
           }
@@ -913,7 +925,9 @@ var Scratchpad = {
   /**
    * Write out an error at the current insertion point as a block comment
    * @param object aValue
-   *        The Error object to write out the message and stack trace
+   *        The error object to write out the message and stack trace. It must
+   *        contain an |exception| property with the actual error thrown, but it
+   *        will often be the entire response of an evaluateJS request.
    * @return Promise
    *         The promise that indicates when writing the comment completes.
    */
@@ -921,8 +935,9 @@ var Scratchpad = {
   {
     let deferred = promise.defer();
 
-    if (VariablesView.isPrimitive({ value: aError })) {
-      let type = aError.type;
+    if (VariablesView.isPrimitive({ value: aError.exception })) {
+      let error = aError.exception;
+      let type = error.type;
       if (type == "undefined" ||
           type == "null" ||
           type == "Infinity" ||
@@ -932,14 +947,22 @@ var Scratchpad = {
         deferred.resolve(type);
       }
       else if (type == "longString") {
-        deferred.resolve(aError.initial + "\u2026");
+        deferred.resolve(error.initial + "\u2026");
       }
       else {
-        deferred.resolve(aError);
+        deferred.resolve(error);
       }
-    }
-    else {
-      let objectClient = new ObjectClient(this.debuggerClient, aError);
+    } else if ("preview" in aError.exception) {
+      let error = aError.exception;
+      let stack = this._constructErrorStack(error.preview);
+      if (typeof aError.exceptionMessage == "string") {
+        deferred.resolve(aError.exceptionMessage + stack);
+      } else {
+        deferred.resolve(stack);
+      }
+    } else {
+      // If there is no preview information, we need to ask the server for more.
+      let objectClient = new ObjectClient(this.debuggerClient, aError.exception);
       objectClient.getPrototypeAndProperties(aResponse => {
         if (aResponse.error) {
           deferred.reject(aResponse);
@@ -958,22 +981,7 @@ var Scratchpad = {
           error[key] = ownProperties[key].value;
         }
 
-        // Assemble the best possible stack we can given the properties we have.
-        let stack;
-        if (typeof error.stack == "string" && error.stack) {
-          stack = error.stack;
-        }
-        else if (typeof error.fileName == "string") {
-          stack = "@" + error.fileName;
-          if (typeof error.lineNumber == "number") {
-            stack += ":" + error.lineNumber;
-          }
-        }
-        else if (typeof error.lineNumber == "number") {
-          stack = "@" + error.lineNumber;
-        }
-
-        stack = stack ? "\n" + stack.replace(/\n$/, "") : "";
+        let stack = this._constructErrorStack(error);
 
         if (typeof error.message == "string") {
           deferred.resolve(error.message + stack);
@@ -998,6 +1006,37 @@ var Scratchpad = {
       console.error(aMessage);
       this.writeAsComment("Exception: " + aMessage);
     });
+  },
+
+  /**
+   * Assembles the best possible stack from the properties of the provided
+   * error.
+   */
+  _constructErrorStack(error) {
+    let stack;
+    if (typeof error.stack == "string" && error.stack) {
+      stack = error.stack;
+    } else if (typeof error.fileName == "string") {
+      stack = "@" + error.fileName;
+      if (typeof error.lineNumber == "number") {
+        stack += ":" + error.lineNumber;
+      }
+    } else if (typeof error.filename == "string") {
+      stack = "@" + error.filename;
+      if (typeof error.lineNumber == "number") {
+        stack += ":" + error.lineNumber;
+        if (typeof error.columnNumber == "number") {
+          stack += ":" + error.columnNumber;
+        }
+      }
+    } else if (typeof error.lineNumber == "number") {
+      stack = "@" + error.lineNumber;
+      if (typeof error.columnNumber == "number") {
+        stack += ":" + error.columnNumber;
+      }
+    }
+
+    return stack ? "\n" + stack.replace(/\n$/, "") : "";
   },
 
   // Menu Operations
@@ -1115,12 +1154,19 @@ var Scratchpad = {
   importFromFile: function SP_importFromFile(aFile, aSilentError, aCallback)
   {
     // Prevent file type detection.
-    let channel = NetUtil.newChannel(aFile);
+    let channel = NetUtil.newChannel2(aFile,
+                                      null,
+                                      null,
+                                      window.document,
+                                      null, // aLoadingPrincipal
+                                      null, // aTriggeringPrincipal
+                                      Ci.nsILoadInfo.SEC_NORMAL,
+                                      Ci.nsIContentPolicy.TYPE_OTHER);
     channel.contentType = "application/javascript";
 
     this.notificationBox.removeAllNotifications(false);
 
-    NetUtil.asyncFetch(channel, (aInputStream, aStatus) => {
+    NetUtil.asyncFetch2(channel, (aInputStream, aStatus) => {
       let content = null;
 
       if (Components.isSuccessCode(aStatus)) {
@@ -1669,16 +1715,19 @@ var Scratchpad = {
     let config = {
       mode: Editor.modes.js,
       value: initialText,
-      lineNumbers: true,
+      lineNumbers: Services.prefs.getBoolPref(SHOW_LINE_NUMBERS),
       contextMenu: "scratchpad-text-popup",
       showTrailingSpace: Services.prefs.getBoolPref(SHOW_TRAILING_SPACE),
       autocomplete: Services.prefs.getBoolPref(ENABLE_AUTOCOMPLETION),
+      lineWrapping: Services.prefs.getBoolPref(WRAP_TEXT),
     };
 
     this.editor = new Editor(config);
     let editorElement = document.querySelector("#scratchpad-editor");
     this.editor.appendTo(editorElement).then(() => {
       var lines = initialText.split("\n");
+
+      this.editor.setFontSize(Services.prefs.getIntPref(EDITOR_FONT_SIZE));
 
       this.editor.on("change", this._onChanged);
       // Keep a reference to the bound version for use in onUnload.
@@ -1705,6 +1754,7 @@ var Scratchpad = {
       CloseObserver.init();
     }).then(null, (err) => console.error(err));
     this._setupCommandListeners();
+    this._updateViewMenuItems();
     this._setupPopupShowingListeners();
   },
 
@@ -1886,10 +1936,11 @@ var Scratchpad = {
   /**
    * Toggle a editor's boolean option.
    */
-  toggleEditorOption: function SP_toggleEditorOption(optionName)
+  toggleEditorOption: function SP_toggleEditorOption(optionName, optionPreference)
   {
     let newOptionValue = !this.editor.getOption(optionName);
     this.editor.setOption(optionName, newOptionValue);
+    Services.prefs.setBoolPref(optionPreference, newOptionValue);
   },
 
   /**
@@ -1900,7 +1951,9 @@ var Scratchpad = {
     let size = this.editor.getFontSize();
 
     if (size < MAXIMUM_FONT_SIZE) {
-      this.editor.setFontSize(size + 1);
+      let newFontSize = size + 1;
+      this.editor.setFontSize(newFontSize);
+      Services.prefs.setIntPref(EDITOR_FONT_SIZE, newFontSize);
     }
   },
 
@@ -1912,7 +1965,9 @@ var Scratchpad = {
     let size = this.editor.getFontSize();
 
     if (size > MINIMUM_FONT_SIZE) {
-      this.editor.setFontSize(size - 1);
+      let newFontSize = size - 1;
+      this.editor.setFontSize(newFontSize);
+      Services.prefs.setIntPref(EDITOR_FONT_SIZE, newFontSize);
     }
   },
 
@@ -1922,6 +1977,7 @@ var Scratchpad = {
   normalFontSize: function SP_normalFontSize()
   {
     this.editor.setFontSize(NORMAL_FONT_SIZE);
+    Services.prefs.setIntPref(EDITOR_FONT_SIZE, NORMAL_FONT_SIZE);
   },
 
   _observers: [],
@@ -2040,8 +2096,8 @@ ScratchpadTab.prototype = {
   /**
    * Initialize a debugger client and connect it to the debugger server.
    *
- * @param object aSubject
- *        The tab or window to obtain the connection for.
+   * @param object aSubject
+   *        The tab or window to obtain the connection for.
    * @return Promise
    *         The promise for the result of connecting to this tab or window.
    */
@@ -2086,8 +2142,8 @@ ScratchpadTab.prototype = {
   /**
    * Attach to this tab.
    *
- * @param object aSubject
- *        The tab or window to obtain the connection for.
+   * @param object aSubject
+   *        The tab or window to obtain the connection for.
    * @return Promise
    *         The promise for the TabTarget for this tab.
    */
@@ -2127,16 +2183,17 @@ ScratchpadWindow.prototype = Heritage.extend(ScratchpadTab.prototype, {
       DebuggerServer.init();
       DebuggerServer.addBrowserActors();
     }
+    DebuggerServer.allowChromeProcess = true;
 
     let client = new DebuggerClient(DebuggerServer.connectPipe());
     client.connect(() => {
-      client.listTabs(aResponse => {
+      client.getProcess().then(aResponse => {
         if (aResponse.error) {
           reportError("listTabs", aResponse);
           deferred.reject(aResponse);
         }
         else {
-          deferred.resolve({ form: aResponse, client: client });
+          deferred.resolve({ form: aResponse.form, client: client });
         }
       });
     });

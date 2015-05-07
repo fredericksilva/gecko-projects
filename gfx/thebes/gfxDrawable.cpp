@@ -13,6 +13,7 @@
 #include "cairo.h"
 #include "gfxXlibSurface.h"
 #endif
+#include "mozilla/gfx/Logging.h"
 
 using namespace mozilla;
 using namespace mozilla::gfx;
@@ -24,6 +25,9 @@ gfxSurfaceDrawable::gfxSurfaceDrawable(SourceSurface* aSurface,
  , mSourceSurface(aSurface)
  , mTransform(aTransform)
 {
+  if (!mSourceSurface) {
+    gfxWarning() << "Creating gfxSurfaceDrawable with null SourceSurface";
+  }
 }
 
 bool
@@ -61,6 +65,10 @@ gfxSurfaceDrawable::Draw(gfxContext* aContext,
                          gfxFloat aOpacity,
                          const gfxMatrix& aTransform)
 {
+  if (!mSourceSurface) {
+    return true;
+  }
+
   DrawInternal(aContext, aFillRect, IntRect(), aRepeat, aFilter, aOpacity, aTransform);
   return true;
 }
@@ -89,10 +97,8 @@ gfxSurfaceDrawable::DrawInternal(gfxContext* aContext,
     Rect fillRect = ToRect(aFillRect);
     DrawTarget* dt = aContext->GetDrawTarget();
 
-    if (aContext->CurrentOperator() == gfxContext::OPERATOR_CLEAR) {
-        dt->ClearRect(fillRect);
-    } else if (aContext->CurrentOperator() == gfxContext::OPERATOR_SOURCE &&
-               aOpacity == 1.0) {
+    if (aContext->CurrentOperator() == gfxContext::OPERATOR_SOURCE &&
+        aOpacity == 1.0) {
         // Emulate cairo operator source which is bound by mask!
         dt->ClearRect(fillRect);
         dt->FillRect(fillRect, pattern);
@@ -117,7 +123,7 @@ gfxCallbackDrawable::MakeSurfaceDrawable(const GraphicsFilter aFilter)
     SurfaceFormat format =
         gfxPlatform::GetPlatform()->Optimal2DFormatForContent(gfxContentType::COLOR_ALPHA);
     RefPtr<DrawTarget> dt =
-        gfxPlatform::GetPlatform()->CreateOffscreenContentDrawTarget(mSize.ToIntSize(),
+        gfxPlatform::GetPlatform()->CreateOffscreenContentDrawTarget(mSize,
                                                                      format);
     if (!dt)
         return nullptr;
@@ -126,8 +132,11 @@ gfxCallbackDrawable::MakeSurfaceDrawable(const GraphicsFilter aFilter)
     Draw(ctx, gfxRect(0, 0, mSize.width, mSize.height), false, aFilter);
 
     RefPtr<SourceSurface> surface = dt->Snapshot();
-    nsRefPtr<gfxSurfaceDrawable> drawable = new gfxSurfaceDrawable(surface, mSize);
-    return drawable.forget();
+    if (surface) {
+        nsRefPtr<gfxSurfaceDrawable> drawable = new gfxSurfaceDrawable(surface, mSize);
+        return drawable.forget();
+    }
+    return nullptr;
 }
 
 bool
@@ -202,6 +211,8 @@ gfxPatternDrawable::Draw(gfxContext* aContext,
                          gfxFloat aOpacity,
                          const gfxMatrix& aTransform)
 {
+    DrawTarget& aDrawTarget = *aContext->GetDrawTarget();
+
     if (!mPattern)
         return false;
 
@@ -218,12 +229,11 @@ gfxPatternDrawable::Draw(gfxContext* aContext,
                                       aOpacity, aTransform);
     }
 
-    aContext->NewPath();
     gfxMatrix oldMatrix = mPattern->GetMatrix();
     mPattern->SetMatrix(aTransform * oldMatrix);
-    aContext->SetPattern(mPattern);
-    aContext->Rectangle(aFillRect);
-    aContext->FillWithOpacity(aOpacity);
+    DrawOptions drawOptions(aOpacity);
+    aDrawTarget.FillRect(ToRect(aFillRect),
+                         *mPattern->GetPattern(&aDrawTarget), drawOptions);
     mPattern->SetMatrix(oldMatrix);
     return true;
 }

@@ -65,6 +65,8 @@ this.PermissionsInstaller = {
             newPermNames = newPermNames.concat(expandedPermNames);
           }
 
+          newPermNames.push("indexedDB");
+
           // Add the appcache related permissions.
           if (newManifest.appcache_path) {
             newPermNames = newPermNames.concat(["offline-app", "pin-app"]);
@@ -115,6 +117,8 @@ this.PermissionsInstaller = {
                         "Cannot determine the app's status. Install cancelled.");
         break;
       }
+
+      this._setPermission("indexedDB", "allow", aApp);
 
       // Add the appcache related permissions. We allow it for all kinds of
       // apps.
@@ -174,7 +178,8 @@ this.PermissionsInstaller = {
       }
     }
     catch (ex) {
-      dump("Caught webapps install permissions error for " + aApp.origin);
+      dump("Caught webapps install permissions error for " + aApp.origin +
+        " : " + ex + "\n");
       Cu.reportError(ex);
       if (aOnError) {
         aOnError();

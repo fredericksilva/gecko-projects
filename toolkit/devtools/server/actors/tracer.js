@@ -8,7 +8,7 @@ const { Cu } = require("chrome");
 const { DebuggerServer } = require("devtools/server/main");
 const { DevToolsUtils } = Cu.import("resource://gre/modules/devtools/DevToolsUtils.jsm", {});
 const Debugger = require("Debugger");
-const { getOffsetColumn } = require("devtools/server/actors/common");
+const { GeneratedLocation, getOffsetColumn } = require("devtools/server/actors/common");
 const promise = require("promise");
 
 Cu.import("resource://gre/modules/Task.jsm");
@@ -20,11 +20,7 @@ function getFrameDepth(frame) {
     if (!frame.older) {
       frame.depth = 0;
     } else {
-      // Hide depth from self-hosted frames.
-      const increment = frame.script && frame.script.url == "self-hosted"
-        ? 0
-        : 1;
-      frame.depth = increment + getFrameDepth(frame.older);
+      frame.depth = getFrameDepth(frame.older) + 1;
     }
   }
 
@@ -265,10 +261,6 @@ TracerActor.prototype = {
    *        The stack frame that was entered.
    */
   onEnterFrame: function(aFrame) {
-    if (aFrame.script && aFrame.script.url == "self-hosted") {
-      return;
-    }
-
     Task.spawn(function*() {
       // This function might request original (i.e. source-mapped) location,
       // which is asynchronous. We need to ensure that packets are sent out
@@ -279,37 +271,6 @@ TracerActor.prototype = {
         type: "enteredFrame",
         sequence: this._sequence++
       };
-
-      let sourceMappedLocation;
-      if (this._requestsForTraceType.name || this._requestsForTraceType.location) {
-        if (aFrame.script) {
-          sourceMappedLocation = yield this._parent.threadActor.sources.getOriginalLocation({
-            url: aFrame.script.url,
-            line: aFrame.script.startLine,
-            // We should return the location of the start of the script, but
-            // Debugger.Script does not provide complete start locations (bug
-            // 901138). Instead, return the current offset (the location of the
-            // first statement in the function).
-            column: getOffsetColumn(aFrame.offset, aFrame.script)
-          });
-        }
-      }
-
-      if (this._requestsForTraceType.name) {
-        if (sourceMappedLocation && sourceMappedLocation.name) {
-          packet.name = sourceMappedLocation.name;
-        } else {
-          packet.name = aFrame.callee
-            ? aFrame.callee.displayName || "(anonymous function)"
-            : "(" + aFrame.type + ")";
-        }
-      }
-
-      if (this._requestsForTraceType.location) {
-        if (sourceMappedLocation && sourceMappedLocation.url) {
-          packet.location = sourceMappedLocation;
-        }
-      }
 
       if (this._requestsForTraceType.hitCount) {
         if (aFrame.script) {
@@ -365,6 +326,51 @@ TracerActor.prototype = {
       aFrame.onPop = function (aCompletion) {
         onExitFrame(this, aCompletion);
       };
+
+      // Async work is done below that doesn't depend on the frame
+      // being live
+
+      let name = aFrame.callee
+          ? aFrame.callee.displayName || "(anonymous function)"
+          : "(" + aFrame.type + ")";
+      let sourceMappedLocation;
+
+      if (this._requestsForTraceType.name || this._requestsForTraceType.location) {
+        if (aFrame.script) {
+          let sources = this._parent.threadActor.sources;
+
+          sourceMappedLocation = yield sources.getOriginalLocation(new GeneratedLocation(
+            sources.createNonSourceMappedActor(aFrame.script.source),
+            aFrame.script.startLine,
+            // We should return the location of the start of the script, but
+            // Debugger.Script does not provide complete start locations (bug
+            // 901138). Instead, return the current offset (the location of the
+            // first statement in the function).
+            getOffsetColumn(aFrame.offset, aFrame.script)
+          ));
+        }
+      }
+
+      if (this._requestsForTraceType.name) {
+        if (sourceMappedLocation && sourceMappedLocation.originalName) {
+          packet.name = sourceMappedLocation.originalName;
+        } else {
+          packet.name = name;
+        }
+        packet.name = name;
+      }
+
+      if (this._requestsForTraceType.location) {
+        if (sourceMappedLocation) {
+          // Don't copy sourceMappedLocation directly because it
+          // contains a reference to the source actor
+          packet.location = {
+            url: sourceMappedLocation.originalUrl,
+            line: sourceMappedLocation.originalLine,
+            column: sourceMappedLocation.originalColumn
+          };
+        }
+      }
 
       runInOrder(() => this._send(packet));
     }.bind(this));

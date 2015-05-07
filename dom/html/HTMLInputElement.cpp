@@ -1,4 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -17,6 +18,7 @@
 #include "nsIRadioVisitor.h"
 #include "nsIPhonetic.h"
 
+#include "mozilla/Telemetry.h"
 #include "nsIControllers.h"
 #include "nsIStringBundle.h"
 #include "nsFocusManager.h"
@@ -107,6 +109,7 @@
 #include "HTMLSplitOnSpacesTokenizer.h"
 #include "nsIController.h"
 #include "nsIMIMEInfo.h"
+#include "nsFrameSelection.h"
 
 // input type=date
 #include "js/Date.h"
@@ -209,7 +212,7 @@ const Decimal HTMLInputElement::kStepAny = Decimal(0);
 #define PROGRESS_STR "progress"
 static const uint32_t kProgressEventInterval = 50; // ms
 
-class HTMLInputElementState MOZ_FINAL : public nsISupports
+class HTMLInputElementState final : public nsISupports
 {
   public:
     NS_DECLARE_STATIC_IID_ACCESSOR(NS_INPUT_ELEMENT_STATE_IID)
@@ -331,7 +334,7 @@ namespace {
  * nsIFile::GetDirectoryEntries, which is not guaranteed to group a directory's
  * subdirectories at the beginning of the list that it returns).
  */
-class DirPickerRecursiveFileEnumerator MOZ_FINAL
+class DirPickerRecursiveFileEnumerator final
   : public nsISimpleEnumerator
 {
   ~DirPickerRecursiveFileEnumerator() {}
@@ -367,7 +370,7 @@ public:
   }
 
   NS_IMETHOD
-  GetNext(nsISupports** aResult)
+  GetNext(nsISupports** aResult) override
   {
     MOZ_ASSERT(!NS_IsMainThread(),
                "Walking the directory tree involves I/O, so using this "
@@ -401,7 +404,7 @@ public:
   }
 
   NS_IMETHOD
-  HasMoreElements(bool* aResult)
+  HasMoreElements(bool* aResult) override
   {
     *aResult = !!mNextFile;
     return NS_OK;
@@ -501,7 +504,7 @@ DOMFileToLocalFile(nsIDOMFile* aDomFile)
 
 } // anonymous namespace
 
-class DirPickerFileListBuilderTask MOZ_FINAL
+class DirPickerFileListBuilderTask final
   : public nsRunnable
 {
 public:
@@ -723,7 +726,7 @@ HTMLInputElement::nsFilePickerShownCallback::Done(int16_t aResult)
 NS_IMPL_ISUPPORTS(HTMLInputElement::nsFilePickerShownCallback,
                   nsIFilePickerShownCallback)
 
-class nsColorPickerShownCallback MOZ_FINAL
+class nsColorPickerShownCallback final
   : public nsIColorPickerShownCallback
 {
   ~nsColorPickerShownCallback() {}
@@ -738,8 +741,8 @@ public:
 
   NS_DECL_ISUPPORTS
 
-  NS_IMETHOD Update(const nsAString& aColor) MOZ_OVERRIDE;
-  NS_IMETHOD Done(const nsAString& aColor) MOZ_OVERRIDE;
+  NS_IMETHOD Update(const nsAString& aColor) override;
+  NS_IMETHOD Done(const nsAString& aColor) override;
 
 private:
   /**
@@ -1177,7 +1180,7 @@ void
 HTMLInputElement::FreeData()
 {
   if (!IsSingleLineTextControl(false)) {
-    nsMemory::Free(mInputData.mValue);
+    free(mInputData.mValue);
     mInputData.mValue = nullptr;
   } else {
     UnbindFromFrame(nullptr);
@@ -1271,7 +1274,8 @@ HTMLInputElement::Clone(mozilla::dom::NodeInfo* aNodeInfo, nsINode** aResult) co
         nsAutoString value;
         GetValueInternal(value);
         // SetValueInternal handles setting the VALUE_CHANGED bit for us
-        it->SetValueInternal(value, false, true);
+        rv = it->SetValueInternal(value, false, true);
+        NS_ENSURE_SUCCESS(rv, rv);
       }
       break;
     case VALUE_MODE_FILENAME:
@@ -1332,6 +1336,16 @@ HTMLInputElement::BeforeSetAttr(int32_t aNameSpaceID, nsIAtom* aName,
                AttrValueIs(kNameSpaceID_None, nsGkAtoms::dir,
                            nsGkAtoms::_auto, eIgnoreCase)) {
       SetDirectionIfAuto(false, aNotify);
+    } else if (mType == NS_FORM_INPUT_RADIO && aName == nsGkAtoms::required) {
+      nsCOMPtr<nsIRadioGroupContainer> container = GetRadioGroupContainer();
+
+      if (container &&
+          ((aValue && !HasAttr(aNameSpaceID, aName)) ||
+           (!aValue && HasAttr(aNameSpaceID, aName)))) {
+        nsAutoString name;
+        GetAttr(kNameSpaceID_None, nsGkAtoms::name, name);
+        container->RadioRequiredWillChange(name, !!aValue);
+      }
     }
   }
 
@@ -1405,16 +1419,6 @@ HTMLInputElement::AfterSetAttr(int32_t aNameSpaceID, nsIAtom* aName,
       }
     }
 
-    if (mType == NS_FORM_INPUT_RADIO && aName == nsGkAtoms::required) {
-      nsCOMPtr<nsIRadioGroupContainer> container = GetRadioGroupContainer();
-
-      if (container) {
-        nsAutoString name;
-        GetAttr(kNameSpaceID_None, nsGkAtoms::name, name);
-        container->RadioRequiredChanged(name, this);
-      }
-    }
-
     if (aName == nsGkAtoms::required || aName == nsGkAtoms::disabled ||
         aName == nsGkAtoms::readonly) {
       UpdateValueMissingValidityState();
@@ -1446,7 +1450,8 @@ HTMLInputElement::AfterSetAttr(int32_t aNameSpaceID, nsIAtom* aName,
         // if @max in the example above were to change from 1 to -1.
         nsAutoString value;
         GetValue(value);
-        SetValueInternal(value, false, false);
+        nsresult rv = SetValueInternal(value, false, false);
+        NS_ENSURE_SUCCESS(rv, rv);
         MOZ_ASSERT(!GetValidityState(VALIDITY_STATE_RANGE_UNDERFLOW),
                    "HTML5 spec does not allow this");
       }
@@ -1458,7 +1463,8 @@ HTMLInputElement::AfterSetAttr(int32_t aNameSpaceID, nsIAtom* aName,
         // See @max comment
         nsAutoString value;
         GetValue(value);
-        SetValueInternal(value, false, false);
+        nsresult rv = SetValueInternal(value, false, false);
+        NS_ENSURE_SUCCESS(rv, rv);
         MOZ_ASSERT(!GetValidityState(VALIDITY_STATE_RANGE_UNDERFLOW),
                    "HTML5 spec does not allow this");
       }
@@ -1468,7 +1474,8 @@ HTMLInputElement::AfterSetAttr(int32_t aNameSpaceID, nsIAtom* aName,
         // See @max comment
         nsAutoString value;
         GetValue(value);
-        SetValueInternal(value, false, false);
+        nsresult rv = SetValueInternal(value, false, false);
+        NS_ENSURE_SUCCESS(rv, rv);
         MOZ_ASSERT(!GetValidityState(VALIDITY_STATE_RANGE_UNDERFLOW),
                    "HTML5 spec does not allow this");
       }
@@ -1603,7 +1610,7 @@ HTMLInputElement::SetHeight(uint32_t aHeight)
 {
   ErrorResult rv;
   SetHeight(aHeight, rv);
-  return rv.ErrorCode();
+  return rv.StealNSResult();
 }
 
 NS_IMETHODIMP
@@ -1657,7 +1664,7 @@ HTMLInputElement::SetWidth(uint32_t aWidth)
 {
   ErrorResult rv;
   SetWidth(aWidth, rv);
-  return rv.ErrorCode();
+  return rv.StealNSResult();
 }
 
 NS_IMETHODIMP
@@ -1687,12 +1694,18 @@ HTMLInputElement::GetValueInternal(nsAString& aValue) const
 
     case VALUE_MODE_FILENAME:
       if (nsContentUtils::IsCallerChrome()) {
+#ifndef MOZ_CHILD_PERMISSIONS
+        aValue.Assign(mFirstFilePath);
+#else
+        // XXX We'd love to assert that this can't happen, but some mochitests
+        // use SpecialPowers to circumvent our more sane security model.
         if (!mFiles.IsEmpty()) {
           return mFiles[0]->GetMozFullPath(aValue);
         }
         else {
           aValue.Truncate();
         }
+#endif
       } else {
         // Just return the leaf name
         if (mFiles.IsEmpty() || NS_FAILED(mFiles[0]->GetName(aValue))) {
@@ -1819,7 +1832,7 @@ HTMLInputElement::SetValue(const nsAString& aValue, ErrorResult& aRv)
       }
       Sequence<nsString> list;
       list.AppendElement(aValue);
-      MozSetFileNameArray(list);
+      MozSetFileNameArray(list, aRv);
       return;
     }
     else {
@@ -1838,13 +1851,21 @@ HTMLInputElement::SetValue(const nsAString& aValue, ErrorResult& aRv)
       nsAutoString currentValue;
       GetValue(currentValue);
 
-      SetValueInternal(aValue, false, true);
+      nsresult rv = SetValueInternal(aValue, false, true);
+      if (NS_FAILED(rv)) {
+        aRv.Throw(rv);
+        return;
+      }
 
       if (mFocusedValue.Equals(currentValue)) {
         GetValue(mFocusedValue);
       }
     } else {
-      SetValueInternal(aValue, false, true);
+      nsresult rv = SetValueInternal(aValue, false, true);
+      if (NS_FAILED(rv)) {
+        aRv.Throw(rv);
+        return;
+      }
     }
   }
 }
@@ -1854,7 +1875,7 @@ HTMLInputElement::SetValue(const nsAString& aValue)
 {
   ErrorResult rv;
   SetValue(aValue, rv);
-  return rv.ErrorCode();
+  return rv.StealNSResult();
 }
 
 nsGenericHTMLElement*
@@ -1873,7 +1894,7 @@ HTMLInputElement::GetList() const
   }
 
   Element* element = doc->GetElementById(dataListId);
-  if (!element || !element->IsHTML(nsGkAtoms::datalist)) {
+  if (!element || !element->IsHTMLElement(nsGkAtoms::datalist)) {
     return nullptr;
   }
 
@@ -1890,7 +1911,7 @@ HTMLInputElement::GetList(nsIDOMHTMLElement** aValue)
     return NS_OK;
   }
 
-  CallQueryInterface(element, aValue);
+  element.forget(aValue);
   return NS_OK;
 }
 
@@ -2068,7 +2089,7 @@ HTMLInputElement::SetValueAsNumber(double aValueAsNumber)
 {
   ErrorResult rv;
   SetValueAsNumber(aValueAsNumber, rv);
-  return rv.ErrorCode();
+  return rv.StealNSResult();
 }
 
 Decimal
@@ -2151,6 +2172,7 @@ HTMLInputElement::GetValueIfStepped(int32_t aStep,
     return NS_ERROR_DOM_INVALID_STATE_ERR;
   }
 
+  Decimal stepBase = GetStepBase();
   Decimal step = GetStep();
   if (step == kStepAny) {
     if (aCallerType != CALLED_FOR_USER_EVENT) {
@@ -2160,47 +2182,44 @@ HTMLInputElement::GetValueIfStepped(int32_t aStep,
     step = GetDefaultStep();
   }
 
-  Decimal value = GetValueAsDecimal();
-  if (value.isNaN()) {
-    value = Decimal(0);
-  }
-
   Decimal minimum = GetMinimum();
-
   Decimal maximum = GetMaximum();
+
   if (!maximum.isNaN()) {
     // "max - (max - stepBase) % step" is the nearest valid value to max.
-    maximum = maximum - NS_floorModulo(maximum - GetStepBase(), step);
-  }
-
-  // Cases where we are clearly going in the wrong way.
-  // We don't use ValidityState because we can be higher than the maximal
-  // allowed value and still not suffer from range overflow in the case of
-  // of the value specified in @max isn't in the step.
-  if ((value <= minimum && aStep < 0) ||
-      (value >= maximum && aStep > 0)) {
-    return NS_OK;
-  }
-
-  // If the current value isn't aligned on a step, then shift the value to the
-  // nearest step that will cause the addition of aStep steps (further below)
-  // to |value| to hit the required value.
-  // (Instead of using GetValidityState(VALIDITY_STATE_STEP_MISMATCH) we have
-  // to check HasStepMismatch and pass true as its aUseZeroIfValueNaN argument
-  // since we need to treat the value "" as zero for stepping purposes even
-  // though we don't suffer from a step mismatch when our value is the empty
-  // string.)
-  if (HasStepMismatch(true) &&
-      value != minimum && value != maximum) {
-    if (aStep > 0) {
-      value -= NS_floorModulo(value - GetStepBase(), step);
-    } else if (aStep < 0) {
-      value -= NS_floorModulo(value - GetStepBase(), step);
-      value += step;
+    maximum = maximum - NS_floorModulo(maximum - stepBase, step);
+    if (!minimum.isNaN()) {
+      if (minimum > maximum) {
+        // Either the minimum was greater than the maximum prior to our
+        // adjustment to align maximum on a step, or else (if we adjusted
+        // maximum) there is no valid step between minimum and the unadjusted
+        // maximum.
+        return NS_OK;
+      }
     }
   }
 
-  value += step * Decimal(aStep);
+  Decimal value = GetValueAsDecimal();
+  bool valueWasNaN = false;
+  if (value.isNaN()) {
+    value = Decimal(0);
+    valueWasNaN = true;
+  }
+  Decimal valueBeforeStepping = value;
+
+  Decimal deltaFromStep = NS_floorModulo(value - stepBase, step);
+
+  if (deltaFromStep != Decimal(0)) {
+    if (aStep > 0) {
+      value += step - deltaFromStep;      // partial step
+      value += step * Decimal(aStep - 1); // then remaining steps
+    } else if (aStep < 0) {
+      value -= deltaFromStep;             // partial step
+      value += step * Decimal(aStep + 1); // then remaining steps
+    }
+  } else {
+    value += step * Decimal(aStep);
+  }
 
   // For date inputs, the value can hold a string that is not a day. We do not
   // want to round it, as it might result in a step mismatch. Instead we want to
@@ -2218,27 +2237,30 @@ HTMLInputElement::GetValueIfStepped(int32_t aStep,
     }
   }
 
-  // When stepUp() is called and the value is below minimum, we should clamp on
-  // minimum unless stepUp() moves us higher than minimum.
-  if (GetValidityState(VALIDITY_STATE_RANGE_UNDERFLOW) && aStep > 0 &&
-      value <= minimum) {
-    MOZ_ASSERT(!minimum.isNaN(), "Can't be NaN if we are here");
+  if (value < minimum) {
     value = minimum;
-  // Same goes for stepDown() and maximum.
-  } else if (GetValidityState(VALIDITY_STATE_RANGE_OVERFLOW) && aStep < 0 &&
-             value >= maximum) {
-    MOZ_ASSERT(!maximum.isNaN(), "Can't be NaN if we are here");
+    deltaFromStep = NS_floorModulo(value - stepBase, step);
+    if (deltaFromStep != Decimal(0)) {
+      value += step - deltaFromStep;
+    }
+  }
+  if (value > maximum) {
     value = maximum;
-  // If we go down, we want to clamp on min.
-  } else if (aStep < 0 && minimum == minimum) {
-    value = std::max(value, minimum);
-  // If we go up, we want to clamp on max.
-  } else if (aStep > 0 && maximum == maximum) {
-    value = std::min(value, maximum);
+    deltaFromStep = NS_floorModulo(value - stepBase, step);
+    if (deltaFromStep != Decimal(0)) {
+      value -= deltaFromStep;
+    }
+  }
+
+  if (!valueWasNaN && // value="", resulting in us using "0"
+      ((aStep > 0 && value < valueBeforeStepping) ||
+       (aStep < 0 && value > valueBeforeStepping))) {
+    // We don't want step-up to effectively step down, or step-down to
+    // effectively step up, so return;
+    return NS_OK;
   }
 
   *aNextStep = value;
-
   return NS_OK;
 }
 
@@ -2301,7 +2323,7 @@ HTMLInputElement::MozGetFileNameArray(uint32_t* aLength, char16_t*** aFileNames)
 
   *aLength = array.Length();
   char16_t** ret =
-    static_cast<char16_t**>(NS_Alloc(*aLength * sizeof(char16_t*)));
+    static_cast<char16_t**>(moz_xmalloc(*aLength * sizeof(char16_t*)));
   if (!ret) {
     return NS_ERROR_OUT_OF_MEMORY;
   }
@@ -2316,8 +2338,28 @@ HTMLInputElement::MozGetFileNameArray(uint32_t* aLength, char16_t*** aFileNames)
 }
 
 void
-HTMLInputElement::MozSetFileNameArray(const Sequence< nsString >& aFileNames)
+HTMLInputElement::MozSetFileArray(const Sequence<OwningNonNull<File>>& aFiles)
 {
+  nsCOMPtr<nsIGlobalObject> global = OwnerDoc()->GetScopeObject();
+  MOZ_ASSERT(global);
+  if (!global) {
+    return;
+  }
+  nsTArray<nsRefPtr<File>> files;
+  for (uint32_t i = 0; i < aFiles.Length(); ++i) {
+    files.AppendElement(new File(global, aFiles[i].get()->Impl()));
+  }
+  SetFiles(files, true);
+}
+
+void
+HTMLInputElement::MozSetFileNameArray(const Sequence< nsString >& aFileNames, ErrorResult& aRv)
+{
+  if (XRE_GetProcessType() == GeckoProcessType_Content) {
+    aRv.Throw(NS_ERROR_DOM_NOT_SUPPORTED_ERR);
+    return;
+  }
+
   nsTArray<nsRefPtr<File>> files;
   for (uint32_t i = 0; i < aFileNames.Length(); ++i) {
     nsCOMPtr<nsIFile> file;
@@ -2361,8 +2403,9 @@ HTMLInputElement::MozSetFileNameArray(const char16_t** aFileNames, uint32_t aLen
     list.AppendElement(nsDependentString(aFileNames[i]));
   }
 
-  MozSetFileNameArray(list);
-  return NS_OK;
+  ErrorResult rv;
+  MozSetFileNameArray(list, rv);
+  return rv.StealNSResult();
 }
 
 bool
@@ -2409,10 +2452,12 @@ HTMLInputElement::SetUserInput(const nsAString& aValue)
   {
     Sequence<nsString> list;
     list.AppendElement(aValue);
-    MozSetFileNameArray(list);
-    return NS_OK;
+    ErrorResult rv;
+    MozSetFileNameArray(list, rv);
+    return rv.StealNSResult();
   } else {
-    SetValueInternal(aValue, true, true);
+    nsresult rv = SetValueInternal(aValue, true, true);
+    NS_ENSURE_SUCCESS(rv, rv);
   }
 
   nsContentUtils::DispatchTrustedEvent(OwnerDoc(),
@@ -2621,6 +2666,19 @@ HTMLInputElement::AfterSetFiles(bool aSetValueChanged)
     GetDisplayFileName(readableValue);
     formControlFrame->SetFormProperty(nsGkAtoms::value, readableValue);
   }
+
+#ifndef MOZ_CHILD_PERMISSIONS
+  // Grab the full path here for any chrome callers who access our .value via a
+  // CPOW. This path won't be called from a CPOW meaning the potential sync IPC
+  // call under GetMozFullPath won't be rejected for not being urgent.
+  // XXX Protected by the ifndef because the blob code doesn't allow us to send
+  // this message in b2g.
+  if (mFiles.IsEmpty()) {
+    mFirstFilePath.Truncate();
+  } else {
+    mFiles[0]->GetMozFullPath(mFirstFilePath);
+  }
+#endif
 
   UpdateFileList();
 
@@ -2838,12 +2896,14 @@ HTMLInputElement::SetValueInternal(const nsAString& aValue,
       }
 
       if (IsSingleLineTextControl(false)) {
-        mInputData.mState->SetValue(value, aUserInput, aSetValueChanged);
+        if (!mInputData.mState->SetValue(value, aUserInput, aSetValueChanged)) {
+          return NS_ERROR_OUT_OF_MEMORY;
+        }
         if (mType == NS_FORM_INPUT_EMAIL) {
           UpdateAllValidityStates(mParserCreating);
         }
       } else {
-        nsMemory::Free(mInputData.mValue);
+        free(mInputData.mValue);
         mInputData.mValue = ToNewUnicode(value);
         if (aSetValueChanged) {
           SetValueChanged(true);
@@ -3195,6 +3255,13 @@ HTMLInputElement::Focus(ErrorResult& aError)
   return;
 }
 
+bool
+HTMLInputElement::IsInteractiveHTMLContent(bool aIgnoreTabindex) const
+{
+  return mType != NS_FORM_INPUT_HIDDEN ||
+         nsGenericHTMLFormElementWithState::IsInteractiveHTMLContent(aIgnoreTabindex);
+}
+
 NS_IMETHODIMP
 HTMLInputElement::Select()
 {
@@ -3217,6 +3284,19 @@ HTMLInputElement::Select()
   FocusTristate state = FocusState();
   if (state == eUnfocusable) {
     return NS_OK;
+  }
+
+  nsTextEditorState* tes = GetEditorState();
+  if (tes) {
+    nsFrameSelection* fs = tes->GetConstFrameSelection();
+    if (fs && fs->MouseDownRecorded()) {
+      // This means that we're being called while the frame selection has a mouse
+      // down event recorded to adjust the caret during the mouse up event.
+      // We are probably called from the focus event handler.  We should override
+      // the delayed caret data in this case to ensure that this select() call
+      // takes effect.
+      fs->SetDelayedCaretData(nullptr);
+    }
   }
 
   nsIFocusManager* fm = nsFocusManager::GetFocusManager();
@@ -3290,10 +3370,10 @@ HTMLInputElement::NeedToInitializeEditorForEvent(
 
   switch (aVisitor.mEvent->message) {
   case NS_MOUSE_MOVE:
-  case NS_MOUSE_ENTER:
-  case NS_MOUSE_EXIT:
-  case NS_MOUSE_ENTER_SYNTH:
-  case NS_MOUSE_EXIT_SYNTH:
+  case NS_MOUSE_ENTER_WIDGET:
+  case NS_MOUSE_EXIT_WIDGET:
+  case NS_MOUSE_OVER:
+  case NS_MOUSE_OUT:
   case NS_SCROLLPORT_UNDERFLOW:
   case NS_SCROLLPORT_OVERFLOW:
     return false;
@@ -3433,7 +3513,8 @@ HTMLInputElement::PreHandleEvent(EventChainPreVisitor& aVisitor)
     if (IsExperimentalMobileType(mType)) {
       nsAutoString aValue;
       GetValueInternal(aValue);
-      SetValueInternal(aValue, false, false);
+      nsresult rv = SetValueInternal(aValue, false, false);
+      NS_ENSURE_SUCCESS(rv, rv);
     }
     FireChangeEventIfNeeded();
   }
@@ -3553,7 +3634,8 @@ HTMLInputElement::PreHandleEvent(EventChainPreVisitor& aVisitor)
         numberControlFrame->GetValueOfAnonTextControl(value);
         numberControlFrame->HandlingInputEvent(true);
         nsWeakFrame weakNumberControlFrame(numberControlFrame);
-        SetValueInternal(value, true, true);
+        rv = SetValueInternal(value, true, true);
+        NS_ENSURE_SUCCESS(rv, rv);
         if (weakNumberControlFrame.IsAlive()) {
           numberControlFrame->HandlingInputEvent(false);
         }
@@ -3627,6 +3709,8 @@ HTMLInputElement::CancelRangeThumbDrag(bool aIsForUserEvent)
     // TODO: decide what we should do here - bug 851782.
     nsAutoString val;
     ConvertNumberToString(mRangeThumbDragStartValue, val);
+    // TODO: What should we do if SetValueInternal fails?  (The allocation
+    // is small, so we should be fine here.)
     SetValueInternal(val, true, true);
     nsRangeFrame* frame = do_QueryFrame(GetPrimaryFrame());
     if (frame) {
@@ -3645,6 +3729,8 @@ HTMLInputElement::SetValueOfRangeForUserEvent(Decimal aValue)
 
   nsAutoString val;
   ConvertNumberToString(aValue, val);
+  // TODO: What should we do if SetValueInternal fails?  (The allocation
+  // is small, so we should be fine here.)
   SetValueInternal(val, true, true);
   nsRangeFrame* frame = do_QueryFrame(GetPrimaryFrame());
   if (frame) {
@@ -3701,7 +3787,10 @@ HTMLInputElement::StopNumberControlSpinnerSpin()
 void
 HTMLInputElement::StepNumberControlForUserEvent(int32_t aDirection)
 {
-  if (!IsValid()) {
+  // We can't use GetValidityState here because the validity state is not set
+  // if the user hasn't previously taken an action to set or change the value,
+  // according to the specs.
+  if (HasBadInput()) {
     // If the user has typed a value into the control and inadvertently made a
     // mistake (e.g. put a thousand separator at the wrong point) we do not
     // want to wipe out what they typed if they try to increment/decrement the
@@ -3733,6 +3822,8 @@ HTMLInputElement::StepNumberControlForUserEvent(int32_t aDirection)
 
   nsAutoString newVal;
   ConvertNumberToString(newValue, newVal);
+  // TODO: What should we do if SetValueInternal fails?  (The allocation
+  // is small, so we should be fine here.)
   SetValueInternal(newVal, true, true);
 
   nsContentUtils::DispatchTrustedEvent(OwnerDoc(),
@@ -4453,6 +4544,12 @@ HTMLInputElement::BindToTree(nsIDocument* aDocument, nsIContent* aParent,
   // And now make sure our state is up to date
   UpdateState(false);
 
+#ifdef EARLY_BETA_OR_EARLIER
+  if (mType == NS_FORM_INPUT_PASSWORD) {
+    Telemetry::Accumulate(Telemetry::PWMGR_PASSWORD_INPUT_IN_FORM, !!mForm);
+  }
+#endif
+
   return rv;
 }
 
@@ -4529,6 +4626,9 @@ HTMLInputElement::HandleTypeChange(uint8_t aNewType)
         } else {
           value = aOldValue;
         }
+        // TODO: What should we do if SetValueInternal fails?  (The allocation
+        // may potentially be big, but most likely we've failed to allocate
+        // before the type change.)
         SetValueInternal(value, false, false);
       }
       break;
@@ -5087,7 +5187,7 @@ HTMLInputElement::GetControllers(nsIControllers** aResult)
   ErrorResult rv;
   nsRefPtr<nsIControllers> controller = GetControllers(rv);
   controller.forget(aResult);
-  return rv.ErrorCode();
+  return rv.StealNSResult();
 }
 
 int32_t
@@ -5103,7 +5203,7 @@ HTMLInputElement::GetTextLength(int32_t* aTextLength)
 {
   ErrorResult rv;
   *aTextLength = GetTextLength(rv);
-  return rv.ErrorCode();
+  return rv.StealNSResult();
 }
 
 void
@@ -5144,7 +5244,7 @@ HTMLInputElement::SetSelectionRange(int32_t aSelectionStart,
   direction = &aDirection;
 
   SetSelectionRange(aSelectionStart, aSelectionEnd, direction, rv);
-  return rv.ErrorCode();
+  return rv.StealNSResult();
 }
 
 void
@@ -5212,7 +5312,11 @@ HTMLInputElement::SetRangeText(const nsAString& aReplacement, uint32_t aStart,
 
   if (aStart <= aEnd) {
     value.Replace(aStart, aEnd - aStart, aReplacement);
-    SetValueInternal(value, false, false);
+    nsresult rv = SetValueInternal(value, false, false);
+    if (NS_FAILED(rv)) {
+      aRv.Throw(rv);
+      return;
+    }
   }
 
   uint32_t newEnd = aStart + aReplacement.Length();
@@ -5282,7 +5386,7 @@ HTMLInputElement::GetSelectionStart(int32_t* aSelectionStart)
 
   ErrorResult rv;
   *aSelectionStart = GetSelectionStart(rv);
-  return rv.ErrorCode();
+  return rv.StealNSResult();
 }
 
 void
@@ -5319,7 +5423,7 @@ HTMLInputElement::SetSelectionStart(int32_t aSelectionStart)
 {
   ErrorResult rv;
   SetSelectionStart(aSelectionStart, rv);
-  return rv.ErrorCode();
+  return rv.StealNSResult();
 }
 
 int32_t
@@ -5346,7 +5450,7 @@ HTMLInputElement::GetSelectionEnd(int32_t* aSelectionEnd)
 
   ErrorResult rv;
   *aSelectionEnd = GetSelectionEnd(rv);
-  return rv.ErrorCode();
+  return rv.StealNSResult();
 }
 
 void
@@ -5383,7 +5487,7 @@ HTMLInputElement::SetSelectionEnd(int32_t aSelectionEnd)
 {
   ErrorResult rv;
   SetSelectionEnd(aSelectionEnd, rv);
-  return rv.ErrorCode();
+  return rv.StealNSResult();
 }
 
 NS_IMETHODIMP
@@ -5453,7 +5557,7 @@ HTMLInputElement::GetSelectionDirection(nsAString& aDirection)
 {
   ErrorResult rv;
   GetSelectionDirection(aDirection, rv);
-  return rv.ErrorCode();
+  return rv.StealNSResult();
 }
 
 void
@@ -5483,7 +5587,7 @@ HTMLInputElement::SetSelectionDirection(const nsAString& aDirection)
 {
   ErrorResult rv;
   SetSelectionDirection(aDirection, rv);
-  return rv.ErrorCode();
+  return rv.StealNSResult();
 }
 
 NS_IMETHODIMP
@@ -5659,13 +5763,13 @@ HTMLInputElement::SubmitNamesValues(nsFormSubmission* aFormSubmission)
     const nsTArray<nsRefPtr<File>>& files = GetFilesInternal();
 
     for (uint32_t i = 0; i < files.Length(); ++i) {
-      aFormSubmission->AddNameFilePair(name, files[i], NullString());
+      aFormSubmission->AddNameFilePair(name, files[i]);
     }
 
     if (files.IsEmpty()) {
       // If no file was selected, pretend we had an empty file with an
       // empty filename.
-      aFormSubmission->AddNameFilePair(name, nullptr, NullString());
+      aFormSubmission->AddNameFilePair(name, nullptr);
 
     }
 
@@ -5771,6 +5875,9 @@ HTMLInputElement::DoneCreatingElement()
   if (GetValueMode() == VALUE_MODE_VALUE) {
     nsAutoString aValue;
     GetValue(aValue);
+    // TODO: What should we do if SetValueInternal fails?  (The allocation
+    // may potentially be big, but most likely we've failed to allocate
+    // before the type change.)
     SetValueInternal(aValue, false, false);
   }
 
@@ -5925,8 +6032,10 @@ HTMLInputElement::RestoreState(nsPresState* aState)
           break;
         }
 
+        // TODO: What should we do if SetValueInternal fails?  (The allocation
+        // may potentially be big, but most likely we've failed to allocate
+        // before the type change.)
         SetValueInternal(inputState->GetValue(), false, true);
-        break;
         break;
     }
   }
@@ -6566,27 +6675,32 @@ HTMLInputElement::HasStepMismatch(bool aUseZeroIfValueNaN) const
 }
 
 /**
- * Splits the string on the first "@" character and punycode encodes the first
- * and second parts separately before rejoining them with an "@" and returning
- * the result via the aEncodedEmail out-param. Returns false if there is no
- * "@" caracter, if the "@" character is at the start or end, or if the
- * conversion to punycode fails.
+ * Takes aEmail and attempts to convert everything after the first "@"
+ * character (if anything) to punycode before returning the complete result via
+ * the aEncodedEmail out-param. The aIndexOfAt out-param is set to the index of
+ * the "@" character.
  *
- * This function exists because ConvertUTF8toACE() treats 'username@domain' as
- * a single label, but we need to encode the username and domain parts
- * separately.
+ * If no "@" is found in aEmail, aEncodedEmail is simply set to aEmail and
+ * the aIndexOfAt out-param is set to kNotFound.
+ *
+ * Returns true in all cases unless an attempt to punycode encode fails. If
+ * false is returned, aEncodedEmail has not been set.
+ *
+ * This function exists because ConvertUTF8toACE() splits on ".", meaning that
+ * for 'user.name@sld.tld' it would treat "name@sld" as a label. We want to
+ * encode the domain part only.
  */
 static bool PunycodeEncodeEmailAddress(const nsAString& aEmail,
                                        nsAutoCString& aEncodedEmail,
                                        uint32_t* aIndexOfAt)
 {
   nsAutoCString value = NS_ConvertUTF16toUTF8(aEmail);
-  uint32_t length = value.Length();
+  *aIndexOfAt = (uint32_t)value.FindChar('@');
 
-  uint32_t atPos = (uint32_t)value.FindChar('@');
-  // Email addresses must contain a '@', but can't begin or end with it.
-  if (atPos == (uint32_t)kNotFound || atPos == 0 || atPos == length - 1) {
-    return false;
+  if (*aIndexOfAt == (uint32_t)kNotFound ||
+      *aIndexOfAt == value.Length() - 1) {
+    aEncodedEmail = value;
+    return true;
   }
 
   nsCOMPtr<nsIIDNService> idnSrv = do_GetService(NS_IDNSERVICE_CONTRACTID);
@@ -6595,29 +6709,19 @@ static bool PunycodeEncodeEmailAddress(const nsAString& aEmail,
     return false;
   }
 
-  const nsDependentCSubstring username = Substring(value, 0, atPos);
-  bool ace;
-  if (NS_SUCCEEDED(idnSrv->IsACE(username, &ace)) && !ace) {
-    nsAutoCString usernameACE;
-    // TODO: Bug 901347: Usernames longer than 63 chars are not converted by
-    // ConvertUTF8toACE(). For now, continue on even if the conversion fails.
-    if (NS_SUCCEEDED(idnSrv->ConvertUTF8toACE(username, usernameACE))) {
-      value.Replace(0, atPos, usernameACE);
-      atPos = usernameACE.Length();
-    }
-  }
+  uint32_t indexOfDomain = *aIndexOfAt + 1;
 
-  const nsDependentCSubstring domain = Substring(value, atPos + 1);
+  const nsDependentCSubstring domain = Substring(value, indexOfDomain);
+  bool ace;
   if (NS_SUCCEEDED(idnSrv->IsACE(domain, &ace)) && !ace) {
     nsAutoCString domainACE;
     if (NS_FAILED(idnSrv->ConvertUTF8toACE(domain, domainACE))) {
       return false;
     }
-    value.Replace(atPos + 1, domain.Length(), domainACE);
+    value.Replace(indexOfDomain, domain.Length(), domainACE);
   }
 
   aEncodedEmail = value;
-  *aIndexOfAt = atPos;
   return true;
 }
 
@@ -6844,6 +6948,9 @@ HTMLInputElement::GetValidationMessage(nsAString& aValidationMessage,
         case NS_FORM_INPUT_RADIO:
           key.AssignLiteral("FormValidationRadioMissing");
           break;
+        case NS_FORM_INPUT_NUMBER:
+          key.AssignLiteral("FormValidationBadInputNumber");
+          break;
         default:
           key.AssignLiteral("FormValidationValueMissing");
       }
@@ -7067,8 +7174,10 @@ HTMLInputElement::IsValidEmailAddress(const nsAString& aValue)
 
   uint32_t atPos;
   nsAutoCString value;
-  // This call also checks whether aValue contains a correctly-placed '@' sign.
-  if (!PunycodeEncodeEmailAddress(aValue, value, &atPos)) {
+  if (!PunycodeEncodeEmailAddress(aValue, value, &atPos) ||
+      atPos == (uint32_t)kNotFound || atPos == 0 || atPos == value.Length() - 1) {
+    // Could not encode, or "@" was not found, or it was at the start or end
+    // of the input - in all cases, not a valid email address.
     return false;
   }
 
@@ -7164,7 +7273,7 @@ HTMLInputElement::GetCols()
 NS_IMETHODIMP_(int32_t)
 HTMLInputElement::GetWrapCols()
 {
-  return -1; // only textarea's can have wrap cols
+  return 0; // only textarea's can have wrap cols
 }
 
 NS_IMETHODIMP_(int32_t)
@@ -7283,7 +7392,8 @@ HTMLInputElement::SetFilePickerFiltersFromAccept(nsIFilePicker* filePicker)
   nsTArray<nsFilePickerFilter> filters;
   nsString allExtensionsList;
 
-  bool allFiltersAreValid = true;
+  bool allMimeTypeFiltersAreValid = true;
+  bool atLeastOneFileExtensionFilter = false;
 
   // Retrieve all filters
   while (tokenizer.hasMoreTokens()) {
@@ -7310,6 +7420,10 @@ HTMLInputElement::SetFilePickerFiltersFromAccept(nsIFilePicker* filePicker)
       filterMask = nsIFilePicker::filterVideo;
       filterBundle->GetStringFromName(MOZ_UTF16("videoFilter"),
                                       getter_Copies(extensionListStr));
+    } else if (token.First() == '.') {
+      extensionListStr = NS_LITERAL_STRING("*") + token;
+      filterName = extensionListStr + NS_LITERAL_STRING("; ");
+      atLeastOneFileExtensionFilter = true;
     } else {
       //... if no image/audio/video filter is found, check mime types filters
       nsCOMPtr<nsIMIMEInfo> mimeInfo;
@@ -7318,7 +7432,7 @@ HTMLInputElement::SetFilePickerFiltersFromAccept(nsIFilePicker* filePicker)
                       EmptyCString(), // No extension
                       getter_AddRefs(mimeInfo))) ||
           !mimeInfo) {
-        allFiltersAreValid =  false;
+        allMimeTypeFiltersAreValid =  false;
         continue;
       }
 
@@ -7351,7 +7465,7 @@ HTMLInputElement::SetFilePickerFiltersFromAccept(nsIFilePicker* filePicker)
 
     if (!filterMask && (extensionListStr.IsEmpty() || filterName.IsEmpty())) {
       // No valid filter found
-      allFiltersAreValid = false;
+      allMimeTypeFiltersAreValid = false;
       continue;
     }
 
@@ -7373,6 +7487,28 @@ HTMLInputElement::SetFilePickerFiltersFromAccept(nsIFilePicker* filePicker)
     }
   }
 
+  // Remove similar filters
+  // Iterate over a copy, as we might modify the original filters list
+  nsTArray<nsFilePickerFilter> filtersCopy;
+  filtersCopy = filters;
+  for (uint32_t i = 0; i < filtersCopy.Length(); ++i) {
+    const nsFilePickerFilter& filterToCheck = filtersCopy[i];
+    if (filterToCheck.mFilterMask) {
+      continue;
+    }
+    for (uint32_t j = 0; j < filtersCopy.Length(); ++j) {
+      if (i == j) {
+        continue;
+      }
+      if (FindInReadable(filterToCheck.mFilter, filtersCopy[j].mFilter)) {
+        // We already have a similar, less restrictive filter (i.e.
+        // filterToCheck extensionList is just a subset of another filter
+        // extension list): remove this one
+        filters.RemoveElement(filterToCheck);
+      }
+    }
+  }
+
   // Add "All Supported Types" filter
   if (filters.Length() > 1) {
     nsXPIDLString title;
@@ -7391,9 +7527,8 @@ HTMLInputElement::SetFilePickerFiltersFromAccept(nsIFilePicker* filePicker)
     }
   }
 
-  // If all filters are known/valid, select the first filter as default;
-  // otherwise filterAll will remain the default filter
-  if (filters.Length() >= 1 && allFiltersAreValid) {
+  if (filters.Length() >= 1 &&
+      (allMimeTypeFiltersAreValid || atLeastOneFileExtensionFilter)) {
     // |filterAll| will always use index=0 so we need to set index=1 as the
     // current filter.
     filePicker->SetFilterIndex(1);
@@ -7488,9 +7623,9 @@ HTMLInputElement::PickerClosed()
 }
 
 JSObject*
-HTMLInputElement::WrapNode(JSContext* aCx)
+HTMLInputElement::WrapNode(JSContext* aCx, JS::Handle<JSObject*> aGivenProto)
 {
-  return HTMLInputElementBinding::Wrap(aCx, this);
+  return HTMLInputElementBinding::Wrap(aCx, this, aGivenProto);
 }
 
 } // namespace dom

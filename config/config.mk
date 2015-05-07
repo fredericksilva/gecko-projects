@@ -34,18 +34,6 @@ ifndef EXTERNALLY_MANAGED_MAKE_FILE
 # scenarios.
 _current_makefile = $(CURDIR)/$(firstword $(MAKEFILE_LIST))
 
-CHECK_MOZBUILD_VARIABLES = $(foreach var,$(_MOZBUILD_EXTERNAL_VARIABLES), \
-  $(if $(subst $($(var)_FROZEN),,'$($(var))'), \
-	  $(error Variable $(var) is defined in $(_current_makefile). It should only be defined in moz.build files),\
-  )) $(foreach var,$(_DEPRECATED_VARIABLES), \
-	$(if $(subst $($(var)_FROZEN),,'$($(var))'), \
-    $(error Variable $(var) is defined in $(_current_makefile). This variable has been deprecated. It does nothing. It must be removed in order to build),\
-    ))
-
-# Check variables set after autoconf.mk (included at the top of Makefiles) is
-# included and before config.mk is included.
-_eval_for_side_effects := $(CHECK_MOZBUILD_VARIABLES)
-
 # Import the automatically generated backend file. If this file doesn't exist,
 # the backend hasn't been properly configured. We want this to be a fatal
 # error, hence not using "-include".
@@ -54,8 +42,6 @@ GLOBAL_DEPS += backend.mk
 include backend.mk
 endif
 
-# Freeze the values specified by moz.build to catch them if they fail.
-$(foreach var,$(_MOZBUILD_EXTERNAL_VARIABLES) $(_DEPRECATED_VARIABLES),$(eval $(var)_FROZEN := '$($(var))'))
 endif
 
 space = $(NULL) $(NULL)
@@ -94,7 +80,7 @@ check-variable = $(if $(filter-out 0 1,$(words $($(x))z)),$(error Spaces are not
 $(foreach x,$(CHECK_VARS),$(check-variable))
 
 ifndef INCLUDED_FUNCTIONS_MK
-include $(topsrcdir)/config/makefiles/functions.mk
+include $(MOZILLA_DIR)/config/makefiles/functions.mk
 endif
 
 RM = rm -f
@@ -122,15 +108,23 @@ endif
 VERSION_NUMBER		= 50
 
 ifeq ($(HOST_OS_ARCH),WINNT)
-win_srcdir	:= $(subst $(topsrcdir),$(WIN_TOP_SRC),$(srcdir))
-BUILD_TOOLS	= $(WIN_TOP_SRC)/build/unix
+  ifeq ($(MOZILLA_DIR),$(topsrcdir))
+    win_srcdir := $(subst $(topsrcdir),$(WIN_TOP_SRC),$(srcdir))
+  else
+    # This means we're in comm-central's topsrcdir, so we need to adjust
+    # WIN_TOP_SRC (which points to mozilla's topsrcdir) for the substitution
+    # to win_srcdir.
+		cc_WIN_TOP_SRC := $(WIN_TOP_SRC:%/mozilla=%)
+    win_srcdir := $(subst $(topsrcdir),$(cc_WIN_TOP_SRC),$(srcdir))
+  endif
+  BUILD_TOOLS = $(WIN_TOP_SRC)/build/unix
 else
-win_srcdir	:= $(srcdir)
-BUILD_TOOLS	= $(topsrcdir)/build/unix
+  win_srcdir := $(srcdir)
+  BUILD_TOOLS = $(MOZILLA_DIR)/build/unix
 endif
 
 CONFIG_TOOLS	= $(MOZ_BUILD_ROOT)/config
-AUTOCONF_TOOLS	= $(topsrcdir)/build/autoconf
+AUTOCONF_TOOLS	= $(MOZILLA_DIR)/build/autoconf
 
 #
 # Strip off the excessively long version numbers on these platforms,
@@ -220,17 +214,17 @@ endif
 endif
 
 #
-# Handle trace-malloc and DMD in optimized builds.
+# Handle DMD in optimized builds.
 # No opt to give sane callstacks.
 #
-ifneq (,$(NS_TRACE_MALLOC)$(MOZ_DMD))
+ifdef MOZ_DMD
 MOZ_OPTIMIZE_FLAGS=-Zi -Od -UDEBUG -DNDEBUG
 ifdef HAVE_64BIT_BUILD
 OS_LDFLAGS = -DEBUG -OPT:REF,ICF
 else
 OS_LDFLAGS = -DEBUG -OPT:REF
 endif
-endif # NS_TRACE_MALLOC || MOZ_DMD
+endif # MOZ_DMD
 
 endif # MOZ_DEBUG
 
@@ -304,11 +298,6 @@ MY_RULES	:= $(DEPTH)/config/myrules.mk
 #
 CCC = $(CXX)
 
-# Java macros
-JAVA_GEN_DIR  = _javagen
-JAVA_DIST_DIR = $(DEPTH)/$(JAVA_GEN_DIR)
-JAVA_IFACES_PKG_NAME = org/mozilla/interfaces
-
 INCLUDES = \
   -I$(srcdir) \
   -I. \
@@ -329,7 +318,7 @@ OS_INCLUDES := \
   $(NULL)
 endif
 
-include $(topsrcdir)/config/static-checking-config.mk
+include $(MOZILLA_DIR)/config/static-checking-config.mk
 
 CFLAGS		= $(OS_CPPFLAGS) $(OS_CFLAGS)
 CXXFLAGS	= $(OS_CPPFLAGS) $(OS_CXXFLAGS)
@@ -378,23 +367,15 @@ endif # CROSS_COMPILE
 CFLAGS += $(MOZ_FRAMEPTR_FLAGS)
 CXXFLAGS += $(MOZ_FRAMEPTR_FLAGS)
 
-# Check for FAIL_ON_WARNINGS & FAIL_ON_WARNINGS_DEBUG (Shorthand for Makefiles
-# to request that we use the 'warnings as errors' compile flags)
+# Check for FAIL_ON_WARNINGS (Shorthand for Makefiles to request that we use
+# the 'warnings as errors' compile flags)
 
 # NOTE: First, we clear FAIL_ON_WARNINGS[_DEBUG] if we're doing a Windows PGO
 # build, since WARNINGS_AS_ERRORS has been suspected of causing isuses in that
 # situation. (See bug 437002.)
 ifeq (WINNT_1,$(OS_ARCH)_$(MOZ_PROFILE_GENERATE)$(MOZ_PROFILE_USE))
-FAIL_ON_WARNINGS_DEBUG=
 FAIL_ON_WARNINGS=
 endif # WINNT && (MOS_PROFILE_GENERATE ^ MOZ_PROFILE_USE)
-
-# Now, check for debug version of flag; it turns on normal flag in debug builds.
-ifdef FAIL_ON_WARNINGS_DEBUG
-ifdef MOZ_DEBUG
-FAIL_ON_WARNINGS = 1
-endif # MOZ_DEBUG
-endif # FAIL_ON_WARNINGS_DEBUG
 
 # Check for normal version of flag, and add WARNINGS_AS_ERRORS if it's set to 1.
 ifdef FAIL_ON_WARNINGS
@@ -413,20 +394,20 @@ ifeq ($(OS_ARCH)_$(GNU_CC),WINNT_)
 #//------------------------------------------------------------------------
 ifdef USE_STATIC_LIBS
 RTL_FLAGS=-MT          # Statically linked multithreaded RTL
-ifneq (,$(MOZ_DEBUG)$(NS_TRACE_MALLOC))
+ifdef MOZ_DEBUG
 ifndef MOZ_NO_DEBUG_RTL
 RTL_FLAGS=-MTd         # Statically linked multithreaded MSVC4.0 debug RTL
 endif
-endif # MOZ_DEBUG || NS_TRACE_MALLOC
+endif # MOZ_DEBUG
 
 else # !USE_STATIC_LIBS
 
 RTL_FLAGS=-MD          # Dynamically linked, multithreaded RTL
-ifneq (,$(MOZ_DEBUG)$(NS_TRACE_MALLOC))
+ifdef MOZ_DEBUG
 ifndef MOZ_NO_DEBUG_RTL
 RTL_FLAGS=-MDd         # Dynamically linked, multithreaded MSVC4.0 debug RTL
 endif
-endif # MOZ_DEBUG || NS_TRACE_MALLOC
+endif # MOZ_DEBUG
 endif # USE_STATIC_LIBS
 endif # WINNT && !GNU_CC
 
@@ -520,7 +501,7 @@ endif
 PWD := $(CURDIR)
 endif
 
-NSINSTALL_PY := $(PYTHON) $(abspath $(topsrcdir)/config/nsinstall.py)
+NSINSTALL_PY := $(PYTHON) $(abspath $(MOZILLA_DIR)/config/nsinstall.py)
 # For Pymake, wherever we use nsinstall.py we're also going to try to make it
 # a native command where possible. Since native commands can't be used outside
 # of single-line commands, we continue to provide INSTALL for general use.
@@ -606,6 +587,13 @@ MERGE_FILE = $(LOCALE_SRCDIR)/$(1)
 endif
 MERGE_FILES = $(foreach f,$(1),$(call MERGE_FILE,$(f)))
 
+# These marcros are similar to MERGE_FILE, but no merging, and en-US first.
+# They're used for searchplugins, for example.
+EN_US_OR_L10N_FILE = $(firstword \
+  $(wildcard $(srcdir)/en-US/$(1)) \
+  $(LOCALE_SRCDIR)/$(1) )
+EN_US_OR_L10N_FILES = $(foreach f,$(1),$(call EN_US_OR_L10N_FILE,$(f)))
+
 ifneq (WINNT,$(OS_ARCH))
 RUN_TEST_PROGRAM = $(LIBXUL_DIST)/bin/run-mozilla.sh
 endif # ! WINNT
@@ -621,13 +609,13 @@ ifdef MOZ_DEBUG
 JAVAC_FLAGS += -g
 endif
 
-CREATE_PRECOMPLETE_CMD = $(PYTHON) $(abspath $(topsrcdir)/config/createprecomplete.py)
+CREATE_PRECOMPLETE_CMD = $(PYTHON) $(abspath $(MOZILLA_DIR)/config/createprecomplete.py)
 
 # MDDEPDIR is the subdirectory where dependency files are stored
 MDDEPDIR := .deps
 
-EXPAND_LIBS_EXEC = $(PYTHON) $(topsrcdir)/config/expandlibs_exec.py
-EXPAND_LIBS_GEN = $(PYTHON) $(topsrcdir)/config/expandlibs_gen.py
+EXPAND_LIBS_EXEC = $(PYTHON) $(MOZILLA_DIR)/config/expandlibs_exec.py
+EXPAND_LIBS_GEN = $(PYTHON) $(MOZILLA_DIR)/config/expandlibs_gen.py
 EXPAND_AR = $(EXPAND_LIBS_EXEC) --extract -- $(AR)
 EXPAND_CC = $(EXPAND_LIBS_EXEC) --uselist -- $(CC)
 EXPAND_CCC = $(EXPAND_LIBS_EXEC) --uselist -- $(CCC)
@@ -640,7 +628,7 @@ EXPAND_MKSHLIB = $(EXPAND_LIBS_EXEC) $(EXPAND_MKSHLIB_ARGS) -- $(MKSHLIB)
 
 ifneq (,$(MOZ_LIBSTDCXX_TARGET_VERSION)$(MOZ_LIBSTDCXX_HOST_VERSION))
 ifneq ($(OS_ARCH),Darwin)
-CHECK_STDCXX = @$(TOOLCHAIN_PREFIX)objdump -p $(1) | grep -v -e 'GLIBCXX_3\.4\.\(9\|[1-9][0-9]\)' > /dev/null || ( echo 'TEST-UNEXPECTED-FAIL | check_stdcxx | We do not want these libstdc++ symbols to be used:' && $(TOOLCHAIN_PREFIX)objdump -T $(1) | grep -e 'GLIBCXX_3\.4\.\(9\|[1-9][0-9]\)' && false)
+CHECK_STDCXX = @$(TOOLCHAIN_PREFIX)objdump -p $(1) | grep -e 'GLIBCXX_3\.4\.\(9\|[1-9][0-9]\)' > /dev/null && echo 'TEST-UNEXPECTED-FAIL | check_stdcxx | We do not want these libstdc++ symbols to be used:' && $(TOOLCHAIN_PREFIX)objdump -T $(1) | grep -e 'GLIBCXX_3\.4\.\(9\|[1-9][0-9]\)' && exit 1 || true
 endif
 endif
 
@@ -681,7 +669,7 @@ endif
 endif
 endif
 
-PLY_INCLUDE = -I$(topsrcdir)/other-licenses/ply
+PLY_INCLUDE = -I$(MOZILLA_DIR)/other-licenses/ply
 
 export CL_INCLUDES_PREFIX
 # Make sure that the build system can handle non-ASCII characters
@@ -690,6 +678,3 @@ export CL_INCLUDES_PREFIX
 export NONASCII
 
 DEFINES += -DNO_NSPR_10_SUPPORT
-
-# Freeze the values specified by moz.build to catch them if they fail.
-$(foreach var,$(_MOZBUILD_EXTERNAL_VARIABLES) $(_DEPRECATED_VARIABLES),$(eval $(var)_FROZEN := '$($(var))'))

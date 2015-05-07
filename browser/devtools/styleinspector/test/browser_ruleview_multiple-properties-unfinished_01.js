@@ -7,7 +7,7 @@
 // Test that the rule-view behaves correctly when entering mutliple and/or
 // unfinished properties/values in inplace-editors
 
-let test = asyncTest(function*() {
+add_task(function*() {
   yield addTab("data:text/html;charset=utf-8,test rule view user changes");
   content.document.body.innerHTML = "<h1>Testing Multiple Properties</h1>";
   let {toolbox, inspector, view} = yield openRuleView();
@@ -23,8 +23,10 @@ let test = asyncTest(function*() {
 });
 
 function* testCreateNewMultiUnfinished(inspector, ruleEditor, view) {
+  let onMutation = inspector.once("markupmutation");
   yield createNewRuleViewProperty(ruleEditor,
     "color:blue;background : orange   ; text-align:center; border-color: ");
+  yield onMutation;
 
   is(ruleEditor.rule.textProps.length, 4, "Should have created new text properties.");
   is(ruleEditor.propertyList.children.length, 4, "Should have created property editors.");
@@ -48,6 +50,4 @@ function* testCreateNewMultiUnfinished(inspector, ruleEditor, view) {
 
   is(ruleEditor.rule.textProps[3].name, "border-color", "Should have correct property name");
   is(ruleEditor.rule.textProps[3].value, "red", "Should have correct property value");
-
-  yield inspector.once("inspector-updated");
 }

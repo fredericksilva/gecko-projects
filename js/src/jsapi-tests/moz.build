@@ -30,18 +30,20 @@ UNIFIED_SOURCES += [
     'testExternalStrings.cpp',
     'testFindSCCs.cpp',
     'testForOfIterator.cpp',
+    'testForwardSetProperty.cpp',
     'testFreshGlobalEvalRedefinition.cpp',
-    'testFuncCallback.cpp',
     'testFunctionProperties.cpp',
     'testGCAllocator.cpp',
+    'testGCCellPtr.cpp',
+    'testGCChunkPool.cpp',
     'testGCExactRooting.cpp',
     'testGCFinalizeCallback.cpp',
     'testGCHeapPostBarriers.cpp',
     'testGCMarking.cpp',
     'testGCOutOfMemory.cpp',
     'testGCStoreBufferRemoval.cpp',
+    'testGetPropertyDescriptor.cpp',
     'testHashTable.cpp',
-    'testHashTableInit.cpp',
     'testIndexToString.cpp',
     'testIntern.cpp',
     'testIntString.cpp',
@@ -92,13 +94,11 @@ if CONFIG['ENABLE_ION']:
         'testJitMoveEmitterCycles-mips.cpp',
         'testJitMoveEmitterCycles.cpp',
         'testJitRangeAnalysis.cpp',
+        'testJitRegisterSet.cpp',
         'testJitRValueAlloc.cpp',
     ]
 
 DEFINES['EXPORT_JS_API'] = True
-# Building against js_static requires that we declare mfbt sybols "exported"
-# on its behalf.
-DEFINES['IMPL_MFBT'] = True
 
 LOCAL_INCLUDES += ['..']
 GENERATED_INCLUDES += ['..']
@@ -108,3 +108,6 @@ USE_LIBS += [
 ]
 
 OS_LIBS += CONFIG['MOZ_ZLIB_LIBS']
+
+if CONFIG['GNU_CXX']:
+    FAIL_ON_WARNINGS = True

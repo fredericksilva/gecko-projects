@@ -25,8 +25,12 @@ class nsPresContext;
 class nsRenderingContext;
 class nsBlockInFlowLineIterator;
 class nsStyleContext;
+struct nsSize;
 template<class T> class nsTHashtable;
-namespace mozilla { class WritingMode; }
+namespace mozilla {
+  class WritingMode;
+  class LogicalMargin;
+}
 
 /**
  * A structure representing some continuation state for each frame on the line,
@@ -107,15 +111,15 @@ public:
      * @remark The reason that the function gives a string instead of an index
      *  is that ProcessText copies and modifies the string passed to it, so
      *  passing an index would be impossible.
-     * 
+     *
      * @param aText The string of text.
      * @param aLength The length of the string of text.
      * @param aDirection The direction of the text. The string will never have
      *  mixed direction.
      */
     virtual void SetText(const char16_t*   aText,
-                         int32_t            aLength,
-                         nsBidiDirection    aDirection) = 0;
+                         int32_t           aLength,
+                         nsBidiDirection   aDirection) = 0;
 
     /**
      * Returns the measured width of the text given in SetText. If SetText was
@@ -158,11 +162,11 @@ public:
    * 
    * @lina 05/02/2000
    */
-  static void ReorderFrames(nsIFrame*            aFirstFrameOnLine,
-                            int32_t              aNumFramesOnLine,
+  static void ReorderFrames(nsIFrame* aFirstFrameOnLine,
+                            int32_t aNumFramesOnLine,
                             mozilla::WritingMode aLineWM,
-                            nscoord              aLineWidth,
-                            nscoord              aStart);
+                            const nsSize& aContainerSize,
+                            nscoord aStart);
 
   /**
    * Format Unicode text, taking into account bidi capabilities
@@ -171,11 +175,11 @@ public:
    *
    * @lina 06/18/2000 
    */
-  static nsresult FormatUnicodeText(nsPresContext* aPresContext,
-                                    char16_t*      aText,
+  static nsresult FormatUnicodeText(nsPresContext*  aPresContext,
+                                    char16_t*       aText,
                                     int32_t&        aTextLength,
                                     nsCharType      aCharType,
-                                    bool            aIsOddLevel);
+                                    nsBidiDirection aDir);
 
   /**
    * Reorder plain text using the Unicode Bidi algorithm and send it to
@@ -286,6 +290,30 @@ public:
    */
   static nsBidiLevel GetFrameBaseLevel(nsIFrame* aFrame);
 
+  /**
+   * Get an nsBidiDirection representing the direction implied by the
+   * bidi base level of the frame.
+   * @return NSBIDI_LTR (left-to-right) or NSBIDI_RTL (right-to-left)
+   *  NSBIDI_MIXED will never be returned.
+   */
+  static nsBidiDirection ParagraphDirection(nsIFrame* aFrame) {
+    return DIRECTION_FROM_LEVEL(GetFrameBaseLevel(aFrame));
+  }
+
+  /**
+   * Get an nsBidiDirection representing the direction implied by the
+   * bidi embedding level of the frame.
+   * @return NSBIDI_LTR (left-to-right) or NSBIDI_RTL (right-to-left)
+   *  NSBIDI_MIXED will never be returned.
+   */
+  static nsBidiDirection FrameDirection(nsIFrame* aFrame) {
+    return DIRECTION_FROM_LEVEL(GetFrameEmbeddingLevel(aFrame));
+  }
+
+  static bool IsFrameInParagraphDirection(nsIFrame* aFrame) {
+    return ParagraphDirection(aFrame) == FrameDirection(aFrame);
+  }
+
   enum Mode { MODE_DRAW, MODE_MEASURE };
 
   /**
@@ -388,6 +416,15 @@ private:
                              BidiParagraphData*         aBpd);
 
   /*
+   * Position ruby frames. Called from RepositionFrame.
+   */
+  static nscoord RepositionRubyFrame(
+    nsIFrame* aFrame,
+    const nsContinuationStates* aContinuationStates,
+    const mozilla::WritingMode aContainerWM,
+    const mozilla::LogicalMargin& aBorderPadding);
+
+  /*
    * Position aFrame and its descendants to their visual places. Also if aFrame
    * is not leaf, resize it to embrace its children.
    *
@@ -395,18 +432,21 @@ private:
    *                             going to be repositioned
    * @param aIsEvenLevel         TRUE means the embedding level of this frame
    *                             is even (LTR)
-   * @param[in,out] aStart       IN value is the starting position of aFrame
-   *                             (without considering its inline-start margin)
-   *                             OUT value will be the ending position of aFrame
-   *                             (after adding its inline-end margin)
+   * @param aStartOrEnd          The distance to the start or the end of aFrame
+   *                             without considering its inline margin. If the
+   *                             container is reordering frames in reverse
+   *                             direction, it's the distance to the end,
+   *                             otherwise, it's the distance to the start.
    * @param aContinuationStates  A map from nsIFrame* to nsFrameContinuationState
+   * @return                     The isize aFrame takes, including margins.
    */
-  static void RepositionFrame(nsIFrame*              aFrame,
-                              bool                   aIsEvenLevel,
-                              nscoord&               aStart,
-                              nsContinuationStates*  aContinuationStates,
-                              mozilla::WritingMode   aContainerWM,
-                              nscoord                aContainerWidth);
+  static nscoord RepositionFrame(nsIFrame* aFrame,
+                                 bool aIsEvenLevel,
+                                 nscoord aStartOrEnd,
+                                 const nsContinuationStates* aContinuationStates,
+                                 mozilla::WritingMode aContainerWM,
+                                 bool aContainerReverseOrder,
+                                 const nsSize& aContainerSize);
 
   /*
    * Initialize the continuation state(nsFrameContinuationState) to
@@ -443,11 +483,11 @@ private:
    * @param[out] aIsLast               TRUE means aFrame is last frame
    *                                    or continuation
    */
-   static void IsFirstOrLast(nsIFrame*              aFrame,
-                             nsContinuationStates*  aContinuationStates,
-                             bool                   aSpanInLineOrder /* in */,
-                             bool&                  aIsFirst /* out */,
-                             bool&                  aIsLast /* out */);
+   static void IsFirstOrLast(nsIFrame* aFrame,
+                             const nsContinuationStates* aContinuationStates,
+                             bool aSpanInLineOrder /* in */,
+                             bool& aIsFirst /* out */,
+                             bool& aIsLast /* out */);
 
   /**
    *  Adjust frame positions following their visual order
@@ -459,7 +499,7 @@ private:
   static void RepositionInlineFrames(BidiLineData* aBld,
                                      nsIFrame* aFirstChild,
                                      mozilla::WritingMode aLineWM,
-                                     nscoord aLineWidth,
+                                     const nsSize& aContainerSize,
                                      nscoord aStart);
   
   /**

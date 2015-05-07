@@ -18,19 +18,22 @@ template <int V>
 class FFmpegDecoderModule : public PlatformDecoderModule
 {
 public:
-  static PlatformDecoderModule* Create() { return new FFmpegDecoderModule(); }
+  static already_AddRefed<PlatformDecoderModule>
+  Create()
+  {
+    nsRefPtr<PlatformDecoderModule> pdm = new FFmpegDecoderModule();
+    return pdm.forget();
+  }
 
   FFmpegDecoderModule() {}
   virtual ~FFmpegDecoderModule() {}
 
-  virtual nsresult Shutdown() MOZ_OVERRIDE { return NS_OK; }
-
   virtual already_AddRefed<MediaDataDecoder>
-  CreateH264Decoder(const mp4_demuxer::VideoDecoderConfig& aConfig,
-                    layers::LayersBackend aLayersBackend,
-                    layers::ImageContainer* aImageContainer,
-                    MediaTaskQueue* aVideoTaskQueue,
-                    MediaDataDecoderCallback* aCallback) MOZ_OVERRIDE
+  CreateVideoDecoder(const VideoInfo& aConfig,
+                     layers::LayersBackend aLayersBackend,
+                     layers::ImageContainer* aImageContainer,
+                     FlushableMediaTaskQueue* aVideoTaskQueue,
+                     MediaDataDecoderCallback* aCallback) override
   {
     nsRefPtr<MediaDataDecoder> decoder =
       new FFmpegH264Decoder<V>(aVideoTaskQueue, aCallback, aConfig,
@@ -39,19 +42,33 @@ public:
   }
 
   virtual already_AddRefed<MediaDataDecoder>
-  CreateAudioDecoder(const mp4_demuxer::AudioDecoderConfig& aConfig,
-                     MediaTaskQueue* aAudioTaskQueue,
-                     MediaDataDecoderCallback* aCallback) MOZ_OVERRIDE
+  CreateAudioDecoder(const AudioInfo& aConfig,
+                     FlushableMediaTaskQueue* aAudioTaskQueue,
+                     MediaDataDecoderCallback* aCallback) override
   {
     nsRefPtr<MediaDataDecoder> decoder =
       new FFmpegAudioDecoder<V>(aAudioTaskQueue, aCallback, aConfig);
     return decoder.forget();
   }
 
-  virtual bool SupportsAudioMimeType(const char* aMimeType) MOZ_OVERRIDE
+  virtual bool SupportsMimeType(const nsACString& aMimeType) override
   {
-    return FFmpegAudioDecoder<V>::GetCodecId(aMimeType) != AV_CODEC_ID_NONE;
+    return FFmpegAudioDecoder<V>::GetCodecId(aMimeType) != AV_CODEC_ID_NONE ||
+      FFmpegH264Decoder<V>::GetCodecId(aMimeType) != AV_CODEC_ID_NONE;
   }
+
+  virtual ConversionRequired
+  DecoderNeedsConversion(const TrackInfo& aConfig) const override
+  {
+    if (aConfig.IsVideo() &&
+        (aConfig.mMimeType.EqualsLiteral("video/avc") ||
+         aConfig.mMimeType.EqualsLiteral("video/mp4"))) {
+      return PlatformDecoderModule::kNeedAVCC;
+    } else {
+      return kNeedNone;
+    }
+  }
+
 };
 
 } // namespace mozilla

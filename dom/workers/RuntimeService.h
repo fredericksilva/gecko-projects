@@ -1,5 +1,5 @@
-/* -*- Mode: c++; c-basic-offset: 2; indent-tabs-mode: nil; tab-width: 40 -*- */
-/* vim: set ts=2 et sw=2 tw=80: */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -8,33 +8,24 @@
 #define mozilla_dom_workers_runtimeservice_h__
 
 #include "Workers.h"
-#include "WorkerPrivate.h" // For the WorkerType enum.
 
 #include "nsIObserver.h"
 
-#include "mozilla/TimeStamp.h"
 #include "mozilla/dom/BindingDeclarations.h"
 #include "nsClassHashtable.h"
 #include "nsHashKeys.h"
 #include "nsTArray.h"
-#include "WorkerPrivate.h"
 
-class nsIRunnable;
-class nsIThread;
 class nsITimer;
 class nsPIDOMWindow;
 
 BEGIN_WORKERS_NAMESPACE
 
-class ServiceWorker;
 class SharedWorker;
+class WorkerThread;
 
-class RuntimeService MOZ_FINAL : public nsIObserver
+class RuntimeService final : public nsIObserver
 {
-public:
-  class WorkerThread;
-
-private:
   struct SharedWorkerInfo
   {
     WorkerPrivate* mWorkerPrivate;
@@ -67,11 +58,7 @@ private:
     }
   };
 
-  struct IdleThreadInfo
-  {
-    nsRefPtr<WorkerThread> mThread;
-    mozilla::TimeStamp mExpirationTime;
-  };
+  struct IdleThreadInfo;
 
   struct MatchSharedWorkerInfo
   {
@@ -141,10 +128,10 @@ public:
   CancelWorkersForWindow(nsPIDOMWindow* aWindow);
 
   void
-  SuspendWorkersForWindow(nsPIDOMWindow* aWindow);
+  FreezeWorkersForWindow(nsPIDOMWindow* aWindow);
 
   void
-  ResumeWorkersForWindow(nsPIDOMWindow* aWindow);
+  ThawWorkersForWindow(nsPIDOMWindow* aWindow);
 
   nsresult
   CreateSharedWorker(const GlobalObject& aGlobal,
@@ -157,17 +144,15 @@ public:
   }
 
   nsresult
-  CreateServiceWorker(const GlobalObject& aGlobal,
-                      const nsAString& aScriptURL,
-                      const nsACString& aScope,
-                      ServiceWorker** aServiceWorker);
-
-  nsresult
-  CreateServiceWorkerFromLoadInfo(JSContext* aCx,
-                                  WorkerPrivate::LoadInfo aLoadInfo,
-                                  const nsAString& aScriptURL,
-                                  const nsACString& aScope,
-                                  ServiceWorker** aServiceWorker);
+  CreateSharedWorkerForServiceWorkerFromLoadInfo(JSContext* aCx,
+                                                 WorkerLoadInfo* aLoadInfo,
+                                                 const nsAString& aScriptURL,
+                                                 const nsACString& aScope,
+                                                 SharedWorker** aSharedWorker)
+  {
+    return CreateSharedWorkerFromLoadInfo(aCx, aLoadInfo, aScriptURL, aScope,
+                                          WorkerTypeService, aSharedWorker);
+  }
 
   void
   ForgetSharedWorker(WorkerPrivate* aWorkerPrivate);
@@ -317,7 +302,7 @@ private:
 
   nsresult
   CreateSharedWorkerFromLoadInfo(JSContext* aCx,
-                                 WorkerPrivate::LoadInfo aLoadInfo,
+                                 WorkerLoadInfo* aLoadInfo,
                                  const nsAString& aScriptURL,
                                  const nsACString& aName,
                                  WorkerType aType,

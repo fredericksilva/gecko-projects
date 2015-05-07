@@ -84,7 +84,11 @@ this.SystemMessagePermissionsTable = {
   "push-register": {
   	"push": []
   },
+  "request-sync": { },
   "sms-delivery-success": {
+    "sms": []
+  },
+  "sms-delivery-error": {
     "sms": []
   },
   "sms-read-success": {
@@ -94,6 +98,9 @@ this.SystemMessagePermissionsTable = {
     "sms": []
   },
   "sms-sent": {
+    "sms": []
+  },
+  "sms-failed": {
     "sms": []
   },
   "telephony-new-call": {
@@ -123,7 +130,9 @@ this.SystemMessagePermissionsTable = {
   "nfc-manager-send-file": {
     "nfc-manager": []
   },
-  "wifip2p-pairing-request": { },
+  "wifip2p-pairing-request": {
+    "wifi-manage": []
+  },
   "first-run-with-sim": {
     "settings": ["read", "write"]
   }

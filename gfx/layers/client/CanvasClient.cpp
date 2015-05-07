@@ -72,8 +72,8 @@ CanvasClient2D::Update(gfx::IntSize aSize, ClientCanvasLayer* aLayer)
     gfxImageFormat format
       = gfxPlatform::GetPlatform()->OptimalFormatForContent(contentType);
     TextureFlags flags = TextureFlags::DEFAULT;
-    if (mTextureFlags & TextureFlags::NEEDS_Y_FLIP) {
-      flags |= TextureFlags::NEEDS_Y_FLIP;
+    if (mTextureFlags & TextureFlags::ORIGIN_BOTTOM_LEFT) {
+      flags |= TextureFlags::ORIGIN_BOTTOM_LEFT;
     }
 
     gfx::SurfaceFormat surfaceFormat = gfx::ImageFormatToSurfaceFormat(format);
@@ -110,8 +110,8 @@ CanvasClient2D::Update(gfx::IntSize aSize, ClientCanvasLayer* aLayer)
   }
 
   if (updated) {
-    GetForwarder()->UpdatedTexture(this, mBuffer, nullptr);
     GetForwarder()->UseTexture(this, mBuffer);
+    mBuffer->SyncWithObject(GetForwarder()->GetSyncObject());
   }
 }
 
@@ -127,7 +127,7 @@ CanvasClient2D::CreateTextureClientForCanvas(gfx::SurfaceFormat aFormat,
     // the most effective way to make this work.
     return TextureClient::CreateForRawBufferAccess(GetForwarder(),
                                                    aFormat, aSize, BackendType::CAIRO,
-                                                   mTextureInfo.mTextureFlags | aFlags);
+                                                   mTextureFlags | aFlags);
   }
 
   gfx::BackendType backend = gfxPlatform::GetPlatform()->GetPreferredCanvasBackend();
@@ -138,7 +138,7 @@ CanvasClient2D::CreateTextureClientForCanvas(gfx::SurfaceFormat aFormat,
   // to use double buffering.
   return TextureClient::CreateForRawBufferAccess(GetForwarder(),
                                                  aFormat, aSize, backend,
-                                                 mTextureInfo.mTextureFlags | aFlags);
+                                                 mTextureFlags | aFlags);
 #endif
 }
 
@@ -154,7 +154,8 @@ CanvasClientSharedSurface::CanvasClientSharedSurface(CompositableForwarder* aLay
 // Accelerated backends
 
 static TemporaryRef<TextureClient>
-TexClientFromShSurf(SharedSurface* surf, TextureFlags flags)
+TexClientFromShSurf(ISurfaceAllocator* aAllocator, SharedSurface* surf,
+                    TextureFlags flags)
 {
   switch (surf->mType) {
     case SharedSurfaceType::Basic:
@@ -166,7 +167,7 @@ TexClientFromShSurf(SharedSurface* surf, TextureFlags flags)
 #endif
 
     default:
-      return new SharedSurfaceTextureClient(flags, surf);
+      return new SharedSurfaceTextureClient(aAllocator, flags, surf);
   }
 }
 
@@ -331,6 +332,9 @@ static TemporaryRef<gl::ShSurfHandle>
 CloneSurface(gl::SharedSurface* src, gl::SurfaceFactory* factory)
 {
     RefPtr<gl::ShSurfHandle> dest = factory->NewShSurfHandle(src->mSize);
+    if (!dest) {
+        return nullptr;
+    }
     SharedSurface::ProdCopy(src, dest->Surf(), factory);
     return dest.forget();
 }
@@ -352,10 +356,11 @@ CanvasClientSharedSurface::Update(gfx::IntSize aSize, ClientCanvasLayer* aLayer)
       mFront->Surf()->Fence();
   } else {
     mFront = gl->Screen()->Front();
-    if (!mFront)
-      return;
   }
-  MOZ_ASSERT(mFront);
+  if (!mFront) {
+    gfxCriticalError() << "Invalid canvas front buffer";
+    return;
+  }
 
   // Alright, now sort out the IPC goop.
   SharedSurface* surf = mFront->Surf();
@@ -363,7 +368,7 @@ CanvasClientSharedSurface::Update(gfx::IntSize aSize, ClientCanvasLayer* aLayer)
   auto flags = GetTextureFlags() | TextureFlags::IMMUTABLE;
 
   // Get a TexClient from our surf.
-  RefPtr<TextureClient> newTex = TexClientFromShSurf(surf, flags);
+  RefPtr<TextureClient> newTex = TexClientFromShSurf(GetForwarder(), surf, flags);
   if (!newTex) {
     auto manager = aLayer->ClientManager();
     auto shadowForwarder = manager->AsShadowForwarder();
@@ -371,7 +376,12 @@ CanvasClientSharedSurface::Update(gfx::IntSize aSize, ClientCanvasLayer* aLayer)
 
     newTex = TexClientFromReadback(surf, forwarder, flags, layersBackend);
   }
-  MOZ_ASSERT(newTex);
+
+  if (!newTex) {
+    // May happen in a release build in case of memory pressure.
+    gfxCriticalError() << "Failed to allocate a TextureClient for SharedSurface Canvas. size: " << aSize;
+    return;
+  }
 
   // Add the new TexClient.
   MOZ_ALWAYS_TRUE( AddTextureClient(newTex) );
@@ -392,8 +402,16 @@ CanvasClientSharedSurface::Update(gfx::IntSize aSize, ClientCanvasLayer* aLayer)
   // Use the new TexClient.
   mFrontTex = newTex;
 
-  forwarder->UpdatedTexture(this, mFrontTex, nullptr);
   forwarder->UseTexture(this, mFrontTex);
+}
+
+void
+CanvasClientSharedSurface::ClearSurfaces()
+{
+  mFrontTex = nullptr;
+  // It is important to destroy the SharedSurface *after* the TextureClient.
+  mFront = nullptr;
+  mPrevFront = nullptr;
 }
 
 }

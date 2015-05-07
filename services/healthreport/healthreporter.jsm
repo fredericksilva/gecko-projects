@@ -28,6 +28,8 @@ Cu.import("resource://gre/modules/Task.jsm");
 Cu.import("resource://gre/modules/TelemetryStopwatch.jsm");
 Cu.import("resource://gre/modules/XPCOMUtils.jsm");
 
+XPCOMUtils.defineLazyModuleGetter(this, "TelemetryController",
+                                  "resource://gre/modules/TelemetryController.jsm");
 XPCOMUtils.defineLazyModuleGetter(this, "UpdateChannel",
                                   "resource://gre/modules/UpdateChannel.jsm");
 
@@ -285,7 +287,7 @@ HealthReporterState.prototype = Object.freeze({
       yield this.save();
       prefs.reset(["lastSubmitID", "lastPingTime"]);
     } else {
-      this._log.warn("No prefs data found.");
+      this._log.debug("No prefs data found.");
     }
   },
 });
@@ -337,6 +339,13 @@ function AbstractHealthReporter(branch, policy, sessionRecorder) {
   let hasFirstRun = this._prefs.get("service.firstRun", false);
   this._initHistogram = hasFirstRun ? TELEMETRY_INIT : TELEMETRY_INIT_FIRSTRUN;
   this._dbOpenHistogram = hasFirstRun ? TELEMETRY_DB_OPEN : TELEMETRY_DB_OPEN_FIRSTRUN;
+
+  // This is set to the name for the provider that we are currently initializing,
+  // shutting down or collecting data from, if any.
+  // This is used for AsyncShutdownTimeout diagnostics.
+  this._currentProviderInShutdown = null;
+  this._currentProviderInInit = null;
+  this._currentProviderInCollect = null;
 }
 
 AbstractHealthReporter.prototype = Object.freeze({
@@ -407,7 +416,10 @@ AbstractHealthReporter.prototype = Object.freeze({
             storageInProgress: this._storageInProgress,
             hasProviderManager: !!this._providerManager,
             hasStorage: !!this._storage,
-            shutdownComplete: this._shutdownComplete
+            shutdownComplete: this._shutdownComplete,
+            currentProviderInShutdown: this._currentProviderInShutdown,
+            currentProviderInInit: this._currentProviderInInit,
+            currentProviderInCollect: this._currentProviderInCollect,
           }));
 
       try {
@@ -495,8 +507,10 @@ AbstractHealthReporter.prototype = Object.freeze({
     let catString = this._prefs.get("service.providerCategories") || "";
     if (catString.length) {
       for (let category of catString.split(",")) {
-        yield this._providerManager.registerProvidersFromCategoryManager(category);
+        yield this._providerManager.registerProvidersFromCategoryManager(category,
+                     providerName => this._currentProviderInInit = providerName);
       }
+      this._currentProviderInInit = null;
     }
   }),
 
@@ -533,7 +547,7 @@ AbstractHealthReporter.prototype = Object.freeze({
       // HealthReporter instances, we need to encode a unique identifier in
       // the timer ID.
       try {
-        let timerName = this._branch.replace(".", "-", "g") + "lastDailyCollection";
+        let timerName = this._branch.replace(/\./g, "-") + "lastDailyCollection";
         let tm = Cc["@mozilla.org/updates/timer-manager;1"]
                    .getService(Ci.nsIUpdateTimerManager);
         tm.registerTimer(timerName, this.collectMeasurements.bind(this),
@@ -612,6 +626,8 @@ AbstractHealthReporter.prototype = Object.freeze({
           this._log.info("Shutting down provider manager.");
           for (let provider of this._providerManager.providers) {
             try {
+              this._log.info("Shutting down provider: " + provider.name);
+              this._currentProviderInShutdown = provider.name;
               yield provider.shutdown();
             } catch (ex) {
               this._log.warn("Error when shutting down provider: " +
@@ -620,6 +636,7 @@ AbstractHealthReporter.prototype = Object.freeze({
           }
           this._log.info("Provider manager shut down.");
           this._providerManager = null;
+          this._currentProviderInShutdown = null;
           this._onProviderManagerShutdown();
         }
         if (this._storage) {
@@ -747,16 +764,21 @@ AbstractHealthReporter.prototype = Object.freeze({
     // where UAppData is underneath the profile directory (or vice-versa) so we
     // don't substitute incomplete strings.
 
+    // Return a /g regex that matches the provided string exactly.
+    function regexify(s) {
+      return new RegExp(s.replace(/[-\\^$*+?.()|[\]{}]/g, "\\$&"), "g");
+    }
+
     function replace(uri, path, thing) {
       // Try is because .spec can throw on invalid URI.
       try {
-        recordMessage = recordMessage.replace(uri.spec, '<' + thing + 'URI>', 'g');
+        recordMessage = recordMessage.replace(regexify(uri.spec), "<" + thing + "URI>");
       } catch (ex) { }
 
-      recordMessage = recordMessage.replace(path, '<' + thing + 'Path>', 'g');
+      recordMessage = recordMessage.replace(regexify(path), "<" + thing + "Path>");
     }
 
-    if (appData.path.contains(profile.path)) {
+    if (appData.path.includes(profile.path)) {
       replace(appDataURI, appData.path, 'AppData');
       replace(profileURI, profile.path, 'Profile');
     } else {
@@ -781,7 +803,8 @@ AbstractHealthReporter.prototype = Object.freeze({
 
       try {
         TelemetryStopwatch.start(TELEMETRY_COLLECT_CONSTANT, this);
-        yield this._providerManager.collectConstantData();
+        yield this._providerManager.collectConstantData(name => this._currentProviderInCollect = name);
+        this._currentProviderInCollect = null;
         TelemetryStopwatch.finish(TELEMETRY_COLLECT_CONSTANT, this);
       } catch (ex) {
         TelemetryStopwatch.cancel(TELEMETRY_COLLECT_CONSTANT, this);
@@ -801,7 +824,8 @@ AbstractHealthReporter.prototype = Object.freeze({
         try {
           TelemetryStopwatch.start(TELEMETRY_COLLECT_DAILY, this);
           this._lastDailyDate = new Date();
-          yield this._providerManager.collectDailyData();
+          yield this._providerManager.collectDailyData(name => this._currentProviderInCollect = name);
+          this._currentProviderInCollect = null;
           TelemetryStopwatch.finish(TELEMETRY_COLLECT_DAILY, this);
         } catch (ex) {
           TelemetryStopwatch.cancel(TELEMETRY_COLLECT_DAILY, this);
@@ -1165,11 +1189,11 @@ AbstractHealthReporter.prototype = Object.freeze({
  * @param policy
  *        (HealthReportPolicy) Policy driving execution of HealthReporter.
  */
-this.HealthReporter = function (branch, policy, sessionRecorder, stateLeaf=null) {
+this.HealthReporter = function (branch, policy, stateLeaf=null) {
   this._stateLeaf = stateLeaf;
   this._uploadInProgress = false;
 
-  AbstractHealthReporter.call(this, branch, policy, sessionRecorder);
+  AbstractHealthReporter.call(this, branch, policy, TelemetryController.getSessionRecorder());
 
   if (!this.serverURI) {
     throw new Error("No server URI defined. Did you forget to define the pref?");

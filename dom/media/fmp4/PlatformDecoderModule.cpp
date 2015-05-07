@@ -5,6 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "PlatformDecoderModule.h"
+
 #ifdef XP_WIN
 #include "WMFDecoderModule.h"
 #endif
@@ -20,6 +21,7 @@
 #ifdef MOZ_WIDGET_ANDROID
 #include "AndroidDecoderModule.h"
 #endif
+#include "GMPDecoderModule.h"
 
 #include "mozilla/Preferences.h"
 #ifdef MOZ_EME
@@ -29,15 +31,19 @@
 #include "SharedThreadPool.h"
 #include "MediaTaskQueue.h"
 
+#include "MediaInfo.h"
+#include "H264Converter.h"
+
 namespace mozilla {
 
-extern PlatformDecoderModule* CreateBlankDecoderModule();
+extern already_AddRefed<PlatformDecoderModule> CreateBlankDecoderModule();
 
 bool PlatformDecoderModule::sUseBlankDecoder = false;
 bool PlatformDecoderModule::sFFmpegDecoderEnabled = false;
 bool PlatformDecoderModule::sGonkDecoderEnabled = false;
 bool PlatformDecoderModule::sAndroidMCDecoderEnabled = false;
 bool PlatformDecoderModule::sAndroidMCDecoderPreferred = false;
+bool PlatformDecoderModule::sGMPDecoderEnabled = false;
 
 /* static */
 void
@@ -66,6 +72,9 @@ PlatformDecoderModule::Init()
                                "media.fragmented-mp4.android-media-codec.preferred", false);
 #endif
 
+  Preferences::AddBoolVarCache(&sGMPDecoderEnabled,
+                               "media.fragmented-mp4.gmp.enabled", false);
+
 #ifdef XP_WIN
   WMFDecoderModule::Init();
 #endif
@@ -75,32 +84,11 @@ PlatformDecoderModule::Init()
 }
 
 #ifdef MOZ_EME
-class CreateTaskQueueTask : public nsRunnable {
-public:
-  NS_IMETHOD Run() {
-    MOZ_ASSERT(NS_IsMainThread());
-    mTaskQueue = new MediaTaskQueue(GetMediaDecodeThreadPool());
-    return NS_OK;
-  }
-  nsRefPtr<MediaTaskQueue> mTaskQueue;
-};
-
-static already_AddRefed<MediaTaskQueue>
-CreateTaskQueue()
-{
-  // We must create the MediaTaskQueue/SharedThreadPool on the main thread.
-  nsRefPtr<CreateTaskQueueTask> t(new CreateTaskQueueTask());
-  nsresult rv = NS_DispatchToMainThread(t, NS_DISPATCH_SYNC);
-  NS_ENSURE_SUCCESS(rv, nullptr);
-  return t->mTaskQueue.forget();
-}
-
 /* static */
-PlatformDecoderModule*
+already_AddRefed<PlatformDecoderModule>
 PlatformDecoderModule::CreateCDMWrapper(CDMProxy* aProxy,
                                         bool aHasAudio,
-                                        bool aHasVideo,
-                                        MediaTaskQueue* aTaskQueue)
+                                        bool aHasVideo)
 {
   bool cdmDecodesAudio;
   bool cdmDecodesVideo;
@@ -110,7 +98,7 @@ PlatformDecoderModule::CreateCDMWrapper(CDMProxy* aProxy,
     cdmDecodesVideo = caps.CanDecryptAndDecodeVideo();
   }
 
-  nsAutoPtr<PlatformDecoderModule> pdm;
+  nsRefPtr<PlatformDecoderModule> pdm;
   if ((!cdmDecodesAudio && aHasAudio) || (!cdmDecodesVideo && aHasVideo)) {
     // The CDM itself can't decode. We need to wrap a PDM to decode the
     // decrypted output of the CDM.
@@ -120,66 +108,117 @@ PlatformDecoderModule::CreateCDMWrapper(CDMProxy* aProxy,
     }
   }
 
-  return new EMEDecoderModule(aProxy,
-                              pdm.forget(),
-                              cdmDecodesAudio,
-                              cdmDecodesVideo,
-                              CreateTaskQueue());
+  nsRefPtr<PlatformDecoderModule> emepdm(
+    new EMEDecoderModule(aProxy, pdm, cdmDecodesAudio, cdmDecodesVideo));
+  return emepdm.forget();
 }
 #endif
 
 /* static */
-PlatformDecoderModule*
+already_AddRefed<PlatformDecoderModule>
 PlatformDecoderModule::Create()
 {
-  // Note: This runs on the decode thread.
-  MOZ_ASSERT(!NS_IsMainThread());
+  // Note: This (usually) runs on the decode thread.
 
+  nsRefPtr<PlatformDecoderModule> m(CreatePDM());
+
+  if (m && NS_SUCCEEDED(m->Startup())) {
+    return m.forget();
+  }
+  return nullptr;
+}
+
+/* static */
+already_AddRefed<PlatformDecoderModule>
+PlatformDecoderModule::CreatePDM()
+{
 #ifdef MOZ_WIDGET_ANDROID
   if(sAndroidMCDecoderPreferred && sAndroidMCDecoderEnabled){
-    return new AndroidDecoderModule();
+    nsRefPtr<PlatformDecoderModule> m(new AndroidDecoderModule());
+    return m.forget();
   }
 #endif
   if (sUseBlankDecoder) {
     return CreateBlankDecoderModule();
   }
 #ifdef XP_WIN
-  nsAutoPtr<WMFDecoderModule> m(new WMFDecoderModule());
-  if (NS_SUCCEEDED(m->Startup())) {
-    return m.forget();
-  }
+  nsRefPtr<PlatformDecoderModule> m(new WMFDecoderModule());
+  return m.forget();
 #endif
 #ifdef MOZ_FFMPEG
   if (sFFmpegDecoderEnabled) {
-    nsAutoPtr<PlatformDecoderModule> m(FFmpegRuntimeLinker::CreateDecoderModule());
+    nsRefPtr<PlatformDecoderModule> m = FFmpegRuntimeLinker::CreateDecoderModule();
     if (m) {
       return m.forget();
     }
   }
 #endif
 #ifdef MOZ_APPLEMEDIA
-  nsAutoPtr<AppleDecoderModule> m(new AppleDecoderModule());
-  if (NS_SUCCEEDED(m->Startup())) {
-    return m.forget();
-  }
+  nsRefPtr<PlatformDecoderModule> m(new AppleDecoderModule());
+  return m.forget();
 #endif
 #ifdef MOZ_GONK_MEDIACODEC
   if (sGonkDecoderEnabled) {
-    return new GonkDecoderModule();
+    nsRefPtr<PlatformDecoderModule> m(new GonkDecoderModule());
+    return m.forget();
   }
 #endif
 #ifdef MOZ_WIDGET_ANDROID
   if(sAndroidMCDecoderEnabled){
-    return new AndroidDecoderModule();
+    nsRefPtr<PlatformDecoderModule> m(new AndroidDecoderModule());
+    return m.forget();
   }
 #endif
+  if (sGMPDecoderEnabled) {
+    nsRefPtr<PlatformDecoderModule> m(new GMPDecoderModule());
+    return m.forget();
+  }
   return nullptr;
 }
 
-bool
-PlatformDecoderModule::SupportsAudioMimeType(const char* aMimeType)
+already_AddRefed<MediaDataDecoder>
+PlatformDecoderModule::CreateDecoder(const TrackInfo& aConfig,
+                                     FlushableMediaTaskQueue* aTaskQueue,
+                                     MediaDataDecoderCallback* aCallback,
+                                     layers::LayersBackend aLayersBackend,
+                                     layers::ImageContainer* aImageContainer)
 {
-  return !strcmp(aMimeType, "audio/mp4a-latm");
+  nsRefPtr<MediaDataDecoder> m;
+
+  if (aConfig.GetAsAudioInfo()) {
+    m = CreateAudioDecoder(*aConfig.GetAsAudioInfo(),
+                           aTaskQueue,
+                           aCallback);
+    return m.forget();
+  }
+
+  if (!aConfig.GetAsVideoInfo()) {
+    return nullptr;
+  }
+
+  if (H264Converter::IsH264(aConfig)) {
+    m = new H264Converter(this,
+                          *aConfig.GetAsVideoInfo(),
+                          aLayersBackend,
+                          aImageContainer,
+                          aTaskQueue,
+                          aCallback);
+  } else {
+    m = CreateVideoDecoder(*aConfig.GetAsVideoInfo(),
+                           aLayersBackend,
+                           aImageContainer,
+                           aTaskQueue,
+                           aCallback);
+  }
+  return m.forget();
+}
+
+bool
+PlatformDecoderModule::SupportsMimeType(const nsACString& aMimeType)
+{
+  return aMimeType.EqualsLiteral("audio/mp4a-latm") ||
+    aMimeType.EqualsLiteral("video/mp4") ||
+    aMimeType.EqualsLiteral("video/avc");
 }
 
 } // namespace mozilla

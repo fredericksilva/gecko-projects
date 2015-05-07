@@ -1,5 +1,5 @@
-/* -*- Mode: c++; c-basic-offset: 2; indent-tabs-mode: nil; tab-width: 40 -*- */
-/* vim: set ts=2 et sw=2 tw=80: */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -16,13 +16,14 @@ BEGIN_BLUETOOTH_NAMESPACE
 
 class BluetoothHALInterface;
 
-class BluetoothHandsfreeHALInterface MOZ_FINAL
+class BluetoothHandsfreeHALInterface final
   : public BluetoothHandsfreeInterface
 {
 public:
   friend class BluetoothHALInterface;
 
   void Init(BluetoothHandsfreeNotificationHandler* aNotificationHandler,
+            int aMaxNumClients,
             BluetoothHandsfreeResultHandler* aRes);
   void Cleanup(BluetoothHandsfreeResultHandler* aRes);
 
@@ -39,12 +40,15 @@ public:
 
   /* Voice Recognition */
 
-  void StartVoiceRecognition(BluetoothHandsfreeResultHandler* aRes);
-  void StopVoiceRecognition(BluetoothHandsfreeResultHandler* aRes);
+  void StartVoiceRecognition(const nsAString& aBdAddr,
+                             BluetoothHandsfreeResultHandler* aRes);
+  void StopVoiceRecognition(const nsAString& aBdAddr,
+                            BluetoothHandsfreeResultHandler* aRes);
 
   /* Volume */
 
   void VolumeControl(BluetoothHandsfreeVolumeType aType, int aVolume,
+                     const nsAString& aBdAddr,
                      BluetoothHandsfreeResultHandler* aRes);
 
   /* Device status */
@@ -56,15 +60,16 @@ public:
 
   /* Responses */
 
-  void CopsResponse(const char* aCops,
+  void CopsResponse(const char* aCops, const nsAString& aBdAddr,
                     BluetoothHandsfreeResultHandler* aRes);
   void CindResponse(int aSvc, int aNumActive, int aNumHeld,
                     BluetoothHandsfreeCallState aCallSetupState, int aSignal,
-                    int aRoam, int aBattChg,
+                    int aRoam, int aBattChg, const nsAString& aBdAddr,
                     BluetoothHandsfreeResultHandler* aRes);
-  void FormattedAtResponse(const char* aRsp,
+  void FormattedAtResponse(const char* aRsp, const nsAString& aBdAddr,
                            BluetoothHandsfreeResultHandler* aRes);
   void AtResponse(BluetoothHandsfreeAtResponse aResponseCode, int aErrorCode,
+                  const nsAString& aBdAddr,
                   BluetoothHandsfreeResultHandler* aRes);
   void ClccResponse(int aIndex, BluetoothHandsfreeCallDirection aDir,
                     BluetoothHandsfreeCallState aState,
@@ -72,6 +77,7 @@ public:
                     BluetoothHandsfreeCallMptyType aMpty,
                     const nsAString& aNumber,
                     BluetoothHandsfreeCallAddressType aType,
+                    const nsAString& aBdAddr,
                     BluetoothHandsfreeResultHandler* aRes);
 
   /* Phone State */
@@ -81,6 +87,12 @@ public:
                         const nsAString& aNumber,
                         BluetoothHandsfreeCallAddressType aType,
                         BluetoothHandsfreeResultHandler* aRes);
+
+  /* Wide Band Speech */
+
+  void ConfigureWbs(const nsAString& aBdAddr,
+                    BluetoothHandsfreeWbsConfig aConfig,
+                    BluetoothHandsfreeResultHandler* aRes);
 
 protected:
   BluetoothHandsfreeHALInterface(const bthf_interface_t* aInterface);

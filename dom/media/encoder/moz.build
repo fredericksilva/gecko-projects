@@ -4,6 +4,9 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
+with Files('*'):
+    BUG_COMPONENT = ('Core', 'Video/Audio: Recording')
+
 if CONFIG['MOZ_WIDGET_TOOLKIT'] == 'gonk':
     DIRS += ['fmp4_muxer']
 
@@ -11,22 +14,20 @@ EXPORTS += [
     'ContainerWriter.h',
     'EncodedFrameContainer.h',
     'MediaEncoder.h',
+    'OpusTrackEncoder.h',
     'TrackEncoder.h',
     'TrackMetadataBase.h',
 ]
 
 UNIFIED_SOURCES += [
     'MediaEncoder.cpp',
+    'OpusTrackEncoder.cpp',
     'TrackEncoder.cpp',
 ]
 
 if CONFIG['MOZ_OMX_ENCODER']:
     EXPORTS += ['OmxTrackEncoder.h']
     UNIFIED_SOURCES += ['OmxTrackEncoder.cpp']
-
-if CONFIG['MOZ_OPUS']:
-    EXPORTS += ['OpusTrackEncoder.h']
-    UNIFIED_SOURCES += ['OpusTrackEncoder.cpp']
 
 if CONFIG['MOZ_WEBM_ENCODER']:
     EXPORTS += ['VorbisTrackEncoder.h',
@@ -52,3 +53,9 @@ CXXFLAGS += [
 ]
 
 include('/ipc/chromium/chromium-config.mozbuild')
+
+# Suppress some GCC warnings being treated as errors:
+#  - about attributes on forward declarations for types that are already
+#    defined, which complains about an important MOZ_EXPORT for android::AString
+if CONFIG['GNU_CC']:
+  CXXFLAGS += ['-Wno-error=attributes']

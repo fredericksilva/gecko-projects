@@ -8,7 +8,6 @@
 #include "mozilla/gfx/2D.h"
 #include "mozilla/RefPtr.h"
 #include "nsGlobalWindow.h"
-#include "nsDOMWindowUtils.h"
 #include "nsIDOMClientRect.h"
 #include "nsIDocShell.h"
 #include "nsIPresShell.h"
@@ -28,12 +27,11 @@
 namespace mozilla {
 
 using namespace mozilla::gfx;
-using dom::ConstrainLongRange;
 
 NS_IMPL_ISUPPORTS(MediaEngineTabVideoSource, nsIDOMEventListener, nsITimerCallback)
 
 MediaEngineTabVideoSource::MediaEngineTabVideoSource()
-: mMonitor("MediaEngineTabVideoSource"), mTabSource(nullptr)
+: mData(NULL), mDataSize(0), mMonitor("MediaEngineTabVideoSource"), mTabSource(nullptr)
 {
 }
 
@@ -80,7 +78,6 @@ MediaEngineTabVideoSource::Notify(nsITimer*) {
 nsresult
 MediaEngineTabVideoSource::InitRunnable::Run()
 {
-  mVideoSource->mData = (unsigned char*)malloc(mVideoSource->mBufW * mVideoSource->mBufH * 4);
   if (mVideoSource->mWindowId != -1) {
     nsCOMPtr<nsPIDOMWindow> window  = nsGlobalWindow::GetOuterWindowWithId(mVideoSource->mWindowId);
     if (window) {
@@ -117,54 +114,31 @@ MediaEngineTabVideoSource::GetUUID(nsAString_internal& aUuid)
   aUuid.AssignLiteral(MOZ_UTF16("uuid"));
 }
 
+#define DEFAULT_TABSHARE_VIDEO_MAX_WIDTH 4096
+#define DEFAULT_TABSHARE_VIDEO_MAX_HEIGHT 4096
+#define DEFAULT_TABSHARE_VIDEO_FRAMERATE 30
+
 nsresult
-MediaEngineTabVideoSource::Allocate(const VideoTrackConstraintsN& aConstraints,
+MediaEngineTabVideoSource::Allocate(const dom::MediaTrackConstraints& aConstraints,
                                     const MediaEnginePrefs& aPrefs)
 {
+  // windowId and scrollWithPage are not proper constraints, so just read them.
+  // They have no well-defined behavior in advanced, so ignore them there.
 
-  ConstrainLongRange cWidth(aConstraints.mRequired.mWidth);
-  ConstrainLongRange cHeight(aConstraints.mRequired.mHeight);
+  mWindowId = aConstraints.mBrowserWindow.WasPassed() ?
+              aConstraints.mBrowserWindow.Value() : -1;
+  mScrollWithPage = aConstraints.mScrollWithPage.WasPassed() ?
+                    aConstraints.mScrollWithPage.Value() : true;
 
-  mWindowId = aConstraints.mBrowserWindow.WasPassed() ? aConstraints.mBrowserWindow.Value() : -1;
-  bool haveScrollWithPage = aConstraints.mScrollWithPage.WasPassed();
-  mScrollWithPage =  haveScrollWithPage ? aConstraints.mScrollWithPage.Value() : true;
+  FlattenedConstraints c(aConstraints);
 
-  if (aConstraints.mAdvanced.WasPassed()) {
-    const auto& advanced = aConstraints.mAdvanced.Value();
-    for (uint32_t i = 0; i < advanced.Length(); i++) {
-      if (cWidth.mMax >= advanced[i].mWidth.mMin && cWidth.mMin <= advanced[i].mWidth.mMax &&
-         cHeight.mMax >= advanced[i].mHeight.mMin && cHeight.mMin <= advanced[i].mHeight.mMax) {
-        cWidth.mMin = std::max(cWidth.mMin, advanced[i].mWidth.mMin);
-        cHeight.mMin = std::max(cHeight.mMin, advanced[i].mHeight.mMin);
-      }
-
-      if (mWindowId == -1 && advanced[i].mBrowserWindow.WasPassed()) {
-        mWindowId = advanced[i].mBrowserWindow.Value();
-      }
-
-      if (!haveScrollWithPage && advanced[i].mScrollWithPage.WasPassed()) {
-        mScrollWithPage = advanced[i].mScrollWithPage.Value();
-        haveScrollWithPage = true;
-      }
-    }
-  }
-
-  mBufW = aPrefs.GetWidth(false);
-  mBufH = aPrefs.GetHeight(false);
-
-  if (cWidth.mMin > mBufW) {
-    mBufW = cWidth.mMin;
-  } else if (cWidth.mMax < mBufW) {
-    mBufW = cWidth.mMax;
-  }
-
-  if (cHeight.mMin > mBufH) {
-    mBufH = cHeight.mMin;
-  } else if (cHeight.mMax < mBufH) {
-    mBufH = cHeight.mMax;
-  }
-
-  mTimePerFrame = aPrefs.mFPS ? 1000 / aPrefs.mFPS : aPrefs.mFPS;
+  mBufWidthMax = c.mWidth.Clamp(c.mWidth.mIdeal.WasPassed() ?
+    c.mWidth.mIdeal.Value() : DEFAULT_TABSHARE_VIDEO_MAX_WIDTH);
+  mBufHeightMax = c.mHeight.Clamp(c.mHeight.mIdeal.WasPassed() ?
+    c.mHeight.mIdeal.Value() : DEFAULT_TABSHARE_VIDEO_MAX_HEIGHT);
+  double frameRate = c.mFrameRate.Clamp(c.mFrameRate.mIdeal.WasPassed() ?
+    c.mFrameRate.mIdeal.Value() : DEFAULT_TABSHARE_VIDEO_FRAMERATE);
+  mTimePerFrame = std::max(10, int(1000.0 / (frameRate > 0? frameRate : 1)));
   return NS_OK;
 }
 
@@ -175,7 +149,7 @@ MediaEngineTabVideoSource::Deallocate()
 }
 
 nsresult
-MediaEngineTabVideoSource::Start(mozilla::SourceMediaStream* aStream, mozilla::TrackID aID)
+MediaEngineTabVideoSource::Start(SourceMediaStream* aStream, TrackID aID)
 {
   nsCOMPtr<nsIRunnable> runnable;
   if (!mWindow)
@@ -183,91 +157,76 @@ MediaEngineTabVideoSource::Start(mozilla::SourceMediaStream* aStream, mozilla::T
   else
     runnable = new StartRunnable(this);
   NS_DispatchToMainThread(runnable);
-  aStream->AddTrack(aID, USECS_PER_S, 0, new VideoSegment());
-  aStream->AdvanceKnownTracksTime(STREAM_TIME_MAX);
+  aStream->AddTrack(aID, 0, new VideoSegment());
 
   return NS_OK;
 }
 
 void
-MediaEngineTabVideoSource::
-NotifyPull(MediaStreamGraph*, SourceMediaStream* aSource, mozilla::TrackID aID, mozilla::StreamTime aDesiredTime, mozilla::TrackTicks& aLastEndTime)
+MediaEngineTabVideoSource::NotifyPull(MediaStreamGraph*,
+                                      SourceMediaStream* aSource,
+                                      TrackID aID, StreamTime aDesiredTime)
 {
   VideoSegment segment;
   MonitorAutoLock mon(mMonitor);
 
   // Note: we're not giving up mImage here
   nsRefPtr<layers::CairoImage> image = mImage;
-  TrackTicks target = aSource->TimeToTicksRoundUp(USECS_PER_S, aDesiredTime);
-  TrackTicks delta = target - aLastEndTime;
+  StreamTime delta = aDesiredTime - aSource->GetEndOfAppendedData(aID);
   if (delta > 0) {
     // nullptr images are allowed
     gfx::IntSize size = image ? image->GetSize() : IntSize(0, 0);
     segment.AppendFrame(image.forget().downcast<layers::Image>(), delta, size);
     // This can fail if either a) we haven't added the track yet, or b)
     // we've removed or finished the track.
-    if (aSource->AppendToTrack(aID, &(segment))) {
-      aLastEndTime = target;
-    }
+    aSource->AppendToTrack(aID, &(segment));
   }
 }
 
 void
 MediaEngineTabVideoSource::Draw() {
-
-  IntSize size(mBufW, mBufH);
-
-  nsresult rv;
-  float scale = 1.0;
-
   nsCOMPtr<nsPIDOMWindow> win = do_QueryInterface(mWindow);
 
   if (!win) {
     return;
   }
 
-  // take a screenshot, as wide as possible, proportional to the destination size
-  nsCOMPtr<nsIDOMWindowUtils> utils = do_GetInterface(win);
-  if (!utils) {
+  int32_t innerWidth, innerHeight;
+  win->GetInnerWidth(&innerWidth);
+  win->GetInnerHeight(&innerHeight);
+
+  if (innerWidth == 0 || innerHeight == 0) {
     return;
   }
 
-  nsCOMPtr<nsIDOMClientRect> rect;
-  rv = utils->GetRootBounds(getter_AddRefs(rect));
-  NS_ENSURE_SUCCESS_VOID(rv);
-  if (!rect) {
-    return;
-  }
+  float pixelRatio;
+  win->GetDevicePixelRatio(&pixelRatio);
+  const int deviceInnerWidth = (int)(pixelRatio * innerWidth);
+  const int deviceInnerHeight = (int)(pixelRatio * innerHeight);
 
-  float left, top, width, height;
-  rect->GetLeft(&left);
-  rect->GetTop(&top);
-  rect->GetWidth(&width);
-  rect->GetHeight(&height);
+  IntSize size;
 
-  if (mScrollWithPage) {
-    nsPoint point;
-    utils->GetScrollXY(false, &point.x, &point.y);
-    left += point.x;
-    top += point.y;
-  }
-
-  if (width == 0 || height == 0) {
-    return;
-  }
-
-  int32_t srcX = left;
-  int32_t srcY = top;
-  int32_t srcW;
-  int32_t srcH;
-
-  float aspectRatio = ((float) size.width) / size.height;
-  if (width / aspectRatio < height) {
-    srcW = width;
-    srcH = width / aspectRatio;
+  if ((deviceInnerWidth <= mBufWidthMax) && (deviceInnerHeight <= mBufHeightMax)) {
+    size = IntSize(deviceInnerWidth, deviceInnerHeight);
   } else {
-    srcW = height * aspectRatio;
-    srcH = height;
+
+    const float scaleWidth = (float)mBufWidthMax / (float)deviceInnerWidth;
+    const float scaleHeight = (float)mBufHeightMax / (float)deviceInnerHeight;
+    const float scale = scaleWidth < scaleHeight ? scaleWidth : scaleHeight;
+
+    size = IntSize((int)(scale * deviceInnerWidth), (int)(scale * deviceInnerHeight));
+  }
+
+  gfxImageFormat format = gfxImageFormat::RGB24;
+  uint32_t stride = gfxASurface::FormatStrideForWidth(format, size.width);
+
+  if (mDataSize < static_cast<size_t>(stride * size.height)) {
+    mDataSize = stride * size.height;
+    mData = static_cast<unsigned char*>(malloc(mDataSize));
+  }
+
+  if (!mData) {
+    return;
   }
 
   nsRefPtr<nsPresContext> presContext;
@@ -278,17 +237,15 @@ MediaEngineTabVideoSource::Draw() {
   if (!presContext) {
     return;
   }
+
   nscolor bgColor = NS_RGB(255, 255, 255);
   nsCOMPtr<nsIPresShell> presShell = presContext->PresShell();
-  uint32_t renderDocFlags = (nsIPresShell::RENDER_IGNORE_VIEWPORT_SCROLLING |
-                             nsIPresShell::RENDER_DOCUMENT_RELATIVE);
-  nsRect r(nsPresContext::CSSPixelsToAppUnits(srcX / scale),
-           nsPresContext::CSSPixelsToAppUnits(srcY / scale),
-           nsPresContext::CSSPixelsToAppUnits(srcW / scale),
-           nsPresContext::CSSPixelsToAppUnits(srcH / scale));
-
-  gfxImageFormat format = gfxImageFormat::RGB24;
-  uint32_t stride = gfxASurface::FormatStrideForWidth(format, size.width);
+  uint32_t renderDocFlags = 0;
+  if (!mScrollWithPage) {
+    renderDocFlags |= nsIPresShell::RENDER_IGNORE_VIEWPORT_SCROLLING;
+  }
+  nsRect r(0, 0, nsPresContext::CSSPixelsToAppUnits((float)innerWidth),
+           nsPresContext::CSSPixelsToAppUnits((float)innerHeight));
 
   nsRefPtr<layers::ImageContainer> container = layers::LayerManager::CreateImageContainer();
   RefPtr<DrawTarget> dt =
@@ -301,12 +258,10 @@ MediaEngineTabVideoSource::Draw() {
     return;
   }
   nsRefPtr<gfxContext> context = new gfxContext(dt);
-  context->SetMatrix(
-    context->CurrentMatrix().Scale(scale * size.width / srcW,
-                                   scale * size.height / srcH));
-  rv = presShell->RenderDocument(r, renderDocFlags, bgColor, context);
+  context->SetMatrix(context->CurrentMatrix().Scale((((float) size.width)/innerWidth),
+                                                    (((float) size.height)/innerHeight)));
 
-  NS_ENSURE_SUCCESS_VOID(rv);
+  NS_ENSURE_SUCCESS_VOID(presShell->RenderDocument(r, renderDocFlags, bgColor, context));
 
   RefPtr<SourceSurface> surface = dt->Snapshot();
   if (!surface) {

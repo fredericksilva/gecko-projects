@@ -20,7 +20,6 @@
   locale/@AB_CD@/browser/aboutHome.dtd            (%chrome/aboutHome.dtd)
   locale/@AB_CD@/browser/aboutHome.properties     (%chrome/aboutHome.properties)
   locale/@AB_CD@/browser/aboutPrivateBrowsing.dtd (%chrome/aboutPrivateBrowsing.dtd)
-  locale/@AB_CD@/browser/aboutReader.properties   (%chrome/aboutReader.properties)
 #ifdef MOZ_SERVICES_HEALTHREPORT
   locale/@AB_CD@/browser/aboutHealthReport.dtd    (%chrome/aboutHealthReport.dtd)
 #endif
@@ -40,6 +39,8 @@
   locale/@AB_CD@/browser/handling.properties      (%chrome/handling.properties)
   locale/@AB_CD@/browser/webapp.properties        (%chrome/webapp.properties)
 #ifdef NIGHTLY_BUILD
+  locale/@AB_CD@/browser/aboutPasswords.dtd       (%chrome/aboutPasswords.dtd)
+  locale/@AB_CD@/browser/aboutPasswords.properties (%chrome/aboutPasswords.properties)
   locale/@AB_CD@/browser/webcompatReporter.properties (%chrome/webcompatReporter.properties)
 #endif
 
@@ -68,6 +69,8 @@ relativesrcdir toolkit/locales:
 #about:telemetry
   locale/@AB_CD@/browser/overrides/global/aboutTelemetry.dtd         (%chrome/global/aboutTelemetry.dtd)
   locale/@AB_CD@/browser/overrides/global/aboutTelemetry.properties  (%chrome/global/aboutTelemetry.properties)
+#about:webrtc
+  locale/@AB_CD@/browser/overrides/global/aboutWebrtc.properties  (%chrome/global/aboutWebrtc.properties)
 
 % override chrome://global/locale/about.dtd chrome://browser/locale/overrides/about.dtd
 % override chrome://global/locale/aboutAbout.dtd chrome://browser/locale/overrides/aboutAbout.dtd
@@ -88,6 +91,7 @@ relativesrcdir toolkit/locales:
 % override chrome://global/locale/mozilla.dtd chrome://browser/locale/overrides/global/mozilla.dtd
 % override chrome://global/locale/aboutTelemetry.dtd chrome://browser/locale/overrides/global/aboutTelemetry.dtd
 % override chrome://global/locale/aboutTelemetry.properties chrome://browser/locale/overrides/global/aboutTelemetry.properties
+% override chrome://global/locale/aboutWebrtc.properties chrome://browser/locale/overrides/global/aboutWebrtc.properties
 
 # overrides for dom l10n, also for en-US
 relativesrcdir dom/locales:

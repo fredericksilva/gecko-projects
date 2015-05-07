@@ -64,7 +64,6 @@ UNIFIED_SOURCES += [
     'KeyPath.cpp',
     'PermissionRequestBase.cpp',
     'ReportInternalError.cpp',
-    'TransactionThreadPool.cpp',
 ]
 
 SOURCES += [
@@ -94,6 +93,7 @@ LOCAL_INCLUDES += [
     '/db/sqlite3/src',
     '/dom/base',
     '/dom/storage',
+    '/dom/workers',
     '/ipc/glue',
     '/xpcom/build',
 ]

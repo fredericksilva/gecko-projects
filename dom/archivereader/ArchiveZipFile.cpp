@@ -1,5 +1,5 @@
 /* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=2 et sw=2 tw=80: */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -20,8 +20,8 @@ USING_ARCHIVEREADER_NAMESPACE
 /**
  * Input stream object for zip files
  */
-class ArchiveInputStream MOZ_FINAL : public nsIInputStream,
-                                     public nsISeekableStream
+class ArchiveInputStream final : public nsIInputStream,
+                                 public nsISeekableStream
 {
 public:
   ArchiveInputStream(uint64_t aParentSize,
@@ -362,13 +362,15 @@ ArchiveZipFileImpl::GetInternalStream(nsIInputStream** aStream)
     return NS_ERROR_FAILURE;
   }
 
-  uint64_t size;
-  nsresult rv = mArchiveReader->GetSize(&size);
-  NS_ENSURE_SUCCESS(rv, rv);
+  ErrorResult rv;
+  uint64_t size = mFileImpl->GetSize(rv);
+  if (NS_WARN_IF(rv.Failed())) {
+    return rv.StealNSResult();
+  }
 
   nsCOMPtr<nsIInputStream> inputStream;
-  rv = mArchiveReader->GetInputStream(getter_AddRefs(inputStream));
-  if (NS_FAILED(rv) || !inputStream) {
+  rv = mFileImpl->GetInternalStream(getter_AddRefs(inputStream));
+  if (NS_WARN_IF(rv.Failed()) || !inputStream) {
     return NS_ERROR_UNEXPECTED;
   }
 
@@ -378,24 +380,9 @@ ArchiveZipFileImpl::GetInternalStream(nsIInputStream** aStream)
                                                                mStart,
                                                                mLength,
                                                                mCentral);
-  NS_ADDREF(stream);
 
-  *aStream = stream;
+  stream.forget(aStream);
   return NS_OK;
-}
-
-void
-ArchiveZipFileImpl::Unlink()
-{
-  ArchiveZipFileImpl* tmp = this;
-  NS_IMPL_CYCLE_COLLECTION_UNLINK(mArchiveReader);
-}
-
-void
-ArchiveZipFileImpl::Traverse(nsCycleCollectionTraversalCallback &cb)
-{
-  ArchiveZipFileImpl* tmp = this;
-  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mArchiveReader);
 }
 
 already_AddRefed<mozilla::dom::FileImpl>
@@ -406,7 +393,7 @@ ArchiveZipFileImpl::CreateSlice(uint64_t aStart,
 {
   nsRefPtr<FileImpl> impl =
     new ArchiveZipFileImpl(mFilename, mContentType, aStart, mLength, mCentral,
-                           mArchiveReader);
+                           mFileImpl);
   return impl.forget();
 }
 

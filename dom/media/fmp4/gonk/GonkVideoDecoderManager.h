@@ -21,8 +21,8 @@
 using namespace android;
 
 namespace android {
-struct MOZ_EXPORT ALooper;
-class MOZ_EXPORT MediaBuffer;
+struct ALooper;
+class MediaBuffer;
 struct MOZ_EXPORT AString;
 class GonkNativeWindow;
 } // namespace android
@@ -39,18 +39,23 @@ typedef mozilla::layers::TextureClient TextureClient;
 
 public:
   GonkVideoDecoderManager(mozilla::layers::ImageContainer* aImageContainer,
-		          const mp4_demuxer::VideoDecoderConfig& aConfig);
+                          const VideoInfo& aConfig);
 
-  ~GonkVideoDecoderManager();
+  virtual ~GonkVideoDecoderManager() override;
 
-  virtual android::sp<MediaCodecProxy> Init(MediaDataDecoderCallback* aCallback) MOZ_OVERRIDE;
+  virtual android::sp<MediaCodecProxy> Init(MediaDataDecoderCallback* aCallback) override;
 
-  virtual nsresult Input(mp4_demuxer::MP4Sample* aSample) MOZ_OVERRIDE;
+  virtual nsresult Input(MediaRawData* aSample) override;
 
   virtual nsresult Output(int64_t aStreamOffset,
-                          nsAutoPtr<MediaData>& aOutput) MOZ_OVERRIDE;
+                          nsRefPtr<MediaData>& aOutput) override;
+
+  virtual nsresult Flush() override;
+
+  virtual bool HasQueuedSample() override;
 
   static void RecycleCallback(TextureClient* aClient, void* aClosure);
+
 private:
   struct FrameInfo
   {
@@ -74,9 +79,9 @@ private:
 
   private:
     // Forbidden
-    MessageHandler() MOZ_DELETE;
-    MessageHandler(const MessageHandler &rhs) MOZ_DELETE;
-    const MessageHandler &operator=(const MessageHandler &rhs) MOZ_DELETE;
+    MessageHandler() = delete;
+    MessageHandler(const MessageHandler &rhs) = delete;
+    const MessageHandler &operator=(const MessageHandler &rhs) = delete;
 
     GonkVideoDecoderManager *mManager;
   };
@@ -88,14 +93,14 @@ private:
     VideoResourceListener(GonkVideoDecoderManager *aManager);
     ~VideoResourceListener();
 
-    virtual void codecReserved() MOZ_OVERRIDE;
-    virtual void codecCanceled() MOZ_OVERRIDE;
+    virtual void codecReserved() override;
+    virtual void codecCanceled() override;
 
   private:
     // Forbidden
-    VideoResourceListener() MOZ_DELETE;
-    VideoResourceListener(const VideoResourceListener &rhs) MOZ_DELETE;
-    const VideoResourceListener &operator=(const VideoResourceListener &rhs) MOZ_DELETE;
+    VideoResourceListener() = delete;
+    VideoResourceListener(const VideoResourceListener &rhs) = delete;
+    const VideoResourceListener &operator=(const VideoResourceListener &rhs) = delete;
 
     GonkVideoDecoderManager *mManager;
   };
@@ -112,10 +117,9 @@ private:
   void codecCanceled();
   void onMessageReceived(const sp<AMessage> &aMessage);
 
-  void ReleaseAllPendingVideoBuffersLocked();
+  void ReleaseAllPendingVideoBuffers();
   void PostReleaseVideoBuffer(android::MediaBuffer *aBuffer);
 
-  const mp4_demuxer::VideoDecoderConfig& mConfig;
   uint32_t mVideoWidth;
   uint32_t mVideoHeight;
   uint32_t mDisplayWidth;
@@ -123,9 +127,7 @@ private:
   nsIntRect mPicture;
   nsIntSize mInitialFrame;
 
-  android::sp<MediaCodecProxy> mDecoder;
   nsRefPtr<layers::ImageContainer> mImageContainer;
-  MediaDataDecoderCallback* mCallback;
 
   android::MediaBuffer* mVideoBuffer;
 
@@ -136,6 +138,8 @@ private:
   android::sp<ALooper> mLooper;
   android::sp<ALooper> mManagerLooper;
   FrameInfo mFrameInfo;
+
+  int64_t mLastDecodedTime;  // The last decoded frame presentation time.
 
   // color converter
   android::I420ColorConverterHelper mColorConverter;
@@ -153,6 +157,16 @@ private:
   // The lock protects mPendingVideoBuffers.
   Mutex mPendingVideoBuffersLock;
 
+  // MediaCodedc's wrapper that performs the decoding.
+  android::sp<android::MediaCodecProxy> mDecoder;
+
+  // This monitor protects mQueueSample.
+  Monitor mMonitor;
+
+  // An queue with the MP4 samples which are waiting to be sent into OMX.
+  // If an element is an empty MP4Sample, that menas EOS. There should not
+  // any sample be queued after EOS.
+  nsTArray<nsRefPtr<MediaRawData>> mQueueSample;
 };
 
 } // namespace mozilla

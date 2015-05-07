@@ -9,64 +9,54 @@
 
 #include <AudioToolbox/AudioToolbox.h>
 #include "PlatformDecoderModule.h"
-#include "mozilla/RefPtr.h"
 #include "mozilla/ReentrantMonitor.h"
+#include "mozilla/Vector.h"
 #include "nsIThread.h"
 
 namespace mozilla {
 
-class MediaTaskQueue;
+class FlushableMediaTaskQueue;
 class MediaDataDecoderCallback;
 
 class AppleATDecoder : public MediaDataDecoder {
 public:
-  AppleATDecoder(const mp4_demuxer::AudioDecoderConfig& aConfig,
-                 MediaTaskQueue* aVideoTaskQueue,
+  AppleATDecoder(const AudioInfo& aConfig,
+                 FlushableMediaTaskQueue* aVideoTaskQueue,
                  MediaDataDecoderCallback* aCallback);
-  ~AppleATDecoder();
+  virtual ~AppleATDecoder();
 
-  virtual nsresult Init() MOZ_OVERRIDE;
-  virtual nsresult Input(mp4_demuxer::MP4Sample* aSample) MOZ_OVERRIDE;
-  virtual nsresult Flush() MOZ_OVERRIDE;
-  virtual nsresult Drain() MOZ_OVERRIDE;
-  virtual nsresult Shutdown() MOZ_OVERRIDE;
-
-
-  // Internal callbacks for the platform C api. Don't call externally.
-  void MetadataCallback(AudioFileStreamID aFileStream,
-                        AudioFileStreamPropertyID aPropertyID,
-                        UInt32* aFlags);
-  void SampleCallback(uint32_t aNumBytes,
-                      uint32_t aNumPackets,
-                      const void* aData,
-                      AudioStreamPacketDescription* aPackets);
+  virtual nsresult Init() override;
+  virtual nsresult Input(MediaRawData* aSample) override;
+  virtual nsresult Flush() override;
+  virtual nsresult Drain() override;
+  virtual nsresult Shutdown() override;
 
   // Callbacks also need access to the config.
-  const mp4_demuxer::AudioDecoderConfig& mConfig;
+  const AudioInfo& mConfig;
+
+  // Use to extract magic cookie for HE-AAC detection.
+  nsTArray<uint8_t> mMagicCookie;
+  // Will be set to true should an error occurred while attempting to retrieve
+  // the magic cookie property.
+  bool mFileStreamError;
 
 private:
-  RefPtr<MediaTaskQueue> mTaskQueue;
+  nsRefPtr<FlushableMediaTaskQueue> mTaskQueue;
   MediaDataDecoderCallback* mCallback;
   AudioConverterRef mConverter;
-  AudioFileStreamID mStream;
-  // Timestamp of the next audio frame going to be output by the decoder.
-  CheckedInt<Microseconds> mCurrentAudioTimestamp;
-  // Estimated timestamp of the next compressed audio packet to be supplied by
-  // the MP4 demuxer.
-  CheckedInt<Microseconds> mNextAudioTimestamp;
-  int64_t mSamplePosition;
-  // Compressed data size that has been processed by the decoder since the last
-  // output.
-  int64_t mSizeDecoded;
   AudioStreamBasicDescription mOutputFormat;
-  AudioFileTypeID mFileType;
-  // Array containing the queued decoded audio frames, about to be output.
-  nsTArray<AudioDataValue> mOutputData;
-  OSStatus mLastError;
+  UInt32 mFormatID;
+  AudioFileStreamID mStream;
+  nsTArray<nsRefPtr<MediaRawData>> mQueuedSamples;
 
-  void SetupDecoder();
-  void SubmitSample(nsAutoPtr<mp4_demuxer::MP4Sample> aSample);
-  void SignalFlush();
+  void SubmitSample(MediaRawData* aSample);
+  nsresult DecodeSample(MediaRawData* aSample);
+  nsresult GetInputAudioDescription(AudioStreamBasicDescription& aDesc,
+                                    const nsTArray<uint8_t>& aExtraData);
+  // Setup AudioConverter once all information required has been gathered.
+  // Will return NS_ERROR_NOT_INITIALIZED if more data is required.
+  nsresult SetupDecoder(MediaRawData* aSample);
+  nsresult GetImplicitAACMagicCookie(const MediaRawData* aSample);
 };
 
 } // namespace mozilla

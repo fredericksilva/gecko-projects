@@ -28,7 +28,6 @@
 #include <sys/time.h>
 #include <sys/resource.h>
 #include <sys/prctl.h>
-#include "Zip.h"
 #include "sqlite3.h"
 #include "SQLiteBridge.h"
 #include "NSSBridge.h"
@@ -210,15 +209,11 @@ report_mapping(char *name, void *base, uint32_t len, uint32_t offset)
 static mozglueresult
 loadGeckoLibs(const char *apkName)
 {
-  chdir(getenv("GRE_HOME"));
-
   uint64_t t0 = TimeStamp_Now();
   struct rusage usage1_thread, usage1;
   getrusage(RUSAGE_THREAD, &usage1_thread);
   getrusage(RUSAGE_SELF, &usage1);
   
-  RefPtr<Zip> zip = ZipCollection::GetZip(apkName);
-
   char *file = new char[strlen(apkName) + sizeof("!/assets/" ANDROID_CPU_ARCH "/libxul.so")];
   sprintf(file, "%s!/assets/" ANDROID_CPU_ARCH "/libxul.so", apkName);
   xul_handle = __wrap_dlopen(file, RTLD_GLOBAL | RTLD_LAZY);
@@ -271,9 +266,6 @@ loadSQLiteLibs(const char *apkName)
   if (loadNSSLibs(apkName) != SUCCESS)
     return FAILURE;
 #else
-  chdir(getenv("GRE_HOME"));
-
-  RefPtr<Zip> zip = ZipCollection::GetZip(apkName);
   if (!lib_mapping) {
     lib_mapping = (struct mapping_info *)calloc(MAX_MAPPING_INFO, sizeof(*lib_mapping));
   }
@@ -299,9 +291,6 @@ loadNSSLibs(const char *apkName)
   if (nss_handle && nspr_handle && plc_handle)
     return SUCCESS;
 
-  chdir(getenv("GRE_HOME"));
-
-  RefPtr<Zip> zip = ZipCollection::GetZip(apkName);
   if (!lib_mapping) {
     lib_mapping = (struct mapping_info *)calloc(MAX_MAPPING_INFO, sizeof(*lib_mapping));
   }
@@ -414,7 +403,9 @@ Java_org_mozilla_gecko_mozglue_GeckoLoader_nativeRun(JNIEnv *jenv, jclass jc, js
   char *args = (char *) malloc(len + 1);
   jenv->GetStringUTFRegion(jargs, 0, len, args);
   args[len] = '\0';
+  ElfLoader::Singleton.ExpectShutdown(false);
   GeckoStart(args, &sAppData);
+  ElfLoader::Singleton.ExpectShutdown(true);
   free(args);
 }
 

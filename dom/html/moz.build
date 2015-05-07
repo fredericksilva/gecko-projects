@@ -215,9 +215,12 @@ SOURCES += [
     'PluginDocument.cpp',
 ]
 
-FAIL_ON_WARNINGS = True
+EXTRA_COMPONENTS += [
+    'htmlMenuBuilder.js',
+    'htmlMenuBuilder.manifest'
+]
 
-MSVC_ENABLE_PGO = True
+FAIL_ON_WARNINGS = True
 
 include('/ipc/chromium/chromium-config.mozbuild')
 
@@ -236,7 +239,7 @@ LOCAL_INCLUDES += [
     '/layout/style',
     '/layout/tables',
     '/layout/xul',
-    '/netwerk/base/src',
+    '/netwerk/base',
 ]
 
 FINAL_LIBRARY = 'xul'

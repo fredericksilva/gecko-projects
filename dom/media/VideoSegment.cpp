@@ -39,6 +39,7 @@ VideoFrame::TakeFrom(VideoFrame* aFrame)
   mForceBlack = aFrame->GetForceBlack();
 }
 
+#if !defined(MOZILLA_XPCOMRT_API)
 /* static */ already_AddRefed<Image>
 VideoFrame::CreateBlackImage(const gfxIntSize& aSize)
 {
@@ -83,6 +84,7 @@ VideoFrame::CreateBlackImage(const gfxIntSize& aSize)
 
   return image.forget();
 }
+#endif // !defined(MOZILLA_XPCOMRT_API)
 
 VideoChunk::VideoChunk()
 {}
@@ -92,12 +94,12 @@ VideoChunk::~VideoChunk()
 
 void
 VideoSegment::AppendFrame(already_AddRefed<Image>&& aImage,
-                          TrackTicks aDuration,
+                          StreamTime aDuration,
                           const IntSize& aIntrinsicSize,
                           bool aForceBlack)
 {
   VideoChunk* chunk = AppendChunk(aDuration);
-  VideoFrame frame(aImage, ThebesIntSize(aIntrinsicSize));
+  VideoFrame frame(aImage, aIntrinsicSize);
   frame.SetForceBlack(aForceBlack);
   chunk->mFrame.TakeFrom(&frame);
 }

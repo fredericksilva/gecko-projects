@@ -89,6 +89,7 @@ template<TimerResolution res>
 struct AccumulateDelta_impl
 {
   static void compute(ID id, TimeStamp start, TimeStamp end = TimeStamp::Now());
+  static void compute(ID id, const nsCString& key, TimeStamp start, TimeStamp end = TimeStamp::Now());
 };
 
 template<>
@@ -97,6 +98,9 @@ struct AccumulateDelta_impl<Millisecond>
   static void compute(ID id, TimeStamp start, TimeStamp end = TimeStamp::Now()) {
     Accumulate(id, static_cast<uint32_t>((end - start).ToMilliseconds()));
   }
+  static void compute(ID id, const nsCString& key, TimeStamp start, TimeStamp end = TimeStamp::Now()) {
+    Accumulate(id, key, static_cast<uint32_t>((end - start).ToMilliseconds()));
+  }
 };
 
 template<>
@@ -104,6 +108,9 @@ struct AccumulateDelta_impl<Microsecond>
 {
   static void compute(ID id, TimeStamp start, TimeStamp end = TimeStamp::Now()) {
     Accumulate(id, static_cast<uint32_t>((end - start).ToMicroseconds()));
+  }
+  static void compute(ID id, const nsCString& key, TimeStamp start, TimeStamp end = TimeStamp::Now()) {
+    Accumulate(id, key, static_cast<uint32_t>((end - start).ToMicroseconds()));
   }
 };
 
@@ -117,12 +124,24 @@ public:
     MOZ_GUARD_OBJECT_NOTIFIER_INIT;
   }
 
+  explicit AutoTimer(const nsCString& aKey, TimeStamp aStart = TimeStamp::Now() MOZ_GUARD_OBJECT_NOTIFIER_PARAM)
+    : start(aStart)
+    , key(aKey)
+  {
+    MOZ_GUARD_OBJECT_NOTIFIER_INIT;
+  }
+
   ~AutoTimer() {
-    AccumulateDelta_impl<res>::compute(id, start);
+    if (key.IsEmpty()) {
+      AccumulateDelta_impl<res>::compute(id, start);
+    } else {
+      AccumulateDelta_impl<res>::compute(id, key, start);
+    }
   }
 
 private:
   const TimeStamp start;
+  const nsCString key;
   MOZ_DECL_USE_GUARD_OBJECT_NOTIFIER
 };
 
@@ -155,11 +174,15 @@ private:
 };
 
 /**
- * Indicates whether Telemetry recording is turned on.  This is intended
- * to guard calls to Accumulate when the statistic being recorded is
- * expensive to compute.
+ * Indicates whether Telemetry base data recording is turned on. Added for future uses.
  */
-bool CanRecord();
+bool CanRecordBase();
+
+/**
+ * Indicates whether Telemetry extended data recording is turned on.  This is intended
+ * to guard calls to Accumulate when the statistic being recorded is expensive to compute.
+ */
+bool CanRecordExtended();
 
 /**
  * Records slow SQL statements for Telemetry reporting.
@@ -214,12 +237,13 @@ class ProcessedStack;
  * @param aFirefoxUptime - Firefox uptime at the time of the hang, in minutes
  * @param aAnnotations - Any annotations to be added to the report
  */
-#if defined(MOZ_ENABLE_PROFILER_SPS)
+#if defined(MOZ_ENABLE_PROFILER_SPS) && !defined(MOZILLA_XPCOMRT_API)
 void RecordChromeHang(uint32_t aDuration,
                       ProcessedStack &aStack,
                       int32_t aSystemUptime,
                       int32_t aFirefoxUptime,
-                      mozilla::HangMonitor::HangAnnotations* aAnnotations = nullptr);
+                      mozilla::UniquePtr<mozilla::HangMonitor::HangAnnotations>
+                              aAnnotations);
 #endif
 
 class ThreadHangStats;

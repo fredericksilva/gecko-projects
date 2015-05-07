@@ -17,15 +17,19 @@ describe("loop.webapp", function() {
       standaloneMedia = loop.standaloneMedia,
       sandbox,
       notifications,
-      feedbackApiClient,
       stubGetPermsAndCacheMedia,
-      fakeAudioXHR;
+      fakeAudioXHR,
+      dispatcher,
+      WEBSOCKET_REASONS = loop.shared.utils.WEBSOCKET_REASONS;
 
   beforeEach(function() {
     sandbox = sinon.sandbox.create();
+    dispatcher = new loop.Dispatcher();
     notifications = new sharedModels.NotificationCollection();
-    feedbackApiClient = new loop.FeedbackAPIClient("http://invalid", {
-      product: "Loop"
+    loop.store.StoreMixin.register({
+      feedbackStore: new loop.store.FeedbackStore(dispatcher, {
+        feedbackClient: {}
+      })
     });
 
     stubGetPermsAndCacheMedia = sandbox.stub(
@@ -51,7 +55,7 @@ describe("loop.webapp", function() {
 
   describe("#init", function() {
     beforeEach(function() {
-      sandbox.stub(React, "renderComponent");
+      sandbox.stub(React, "render");
       loop.config.feedbackApiUrl = "http://fake.invalid";
       sandbox.stub(loop.Dispatcher.prototype, "dispatch");
     });
@@ -59,33 +63,18 @@ describe("loop.webapp", function() {
     it("should create the WebappRootView", function() {
       loop.webapp.init();
 
-      sinon.assert.calledOnce(React.renderComponent);
-      sinon.assert.calledWith(React.renderComponent,
+      sinon.assert.calledOnce(React.render);
+      sinon.assert.calledWith(React.render,
         sinon.match(function(value) {
-          return TestUtils.isDescriptorOfType(value,
+          return TestUtils.isCompositeComponentElement(value,
             loop.webapp.WebappRootView);
       }));
     });
 
-    it("should dispatch a ExtractTokenInfo action with the hash", function() {
-      sandbox.stub(loop.shared.utils.Helper.prototype, "locationData").returns({
-        hash: "#call/faketoken",
-        pathname: "invalid"
-      });
-
-      loop.webapp.init();
-
-      sinon.assert.calledOnce(loop.Dispatcher.prototype.dispatch);
-      sinon.assert.calledWithExactly(loop.Dispatcher.prototype.dispatch,
-        new sharedActions.ExtractTokenInfo({
-          windowPath: "#call/faketoken"
-        }));
-    });
-
-    it("should dispatch a ExtractTokenInfo action with the path if there is no hash",
+    it("should dispatch a ExtractTokenInfo action with the path and hash",
       function() {
-        sandbox.stub(loop.shared.utils.Helper.prototype, "locationData").returns({
-          hash: "",
+        sandbox.stub(loop.shared.utils, "locationData").returns({
+          hash: "#fakeKey",
           pathname: "/c/faketoken"
         });
 
@@ -94,7 +83,8 @@ describe("loop.webapp", function() {
       sinon.assert.calledOnce(loop.Dispatcher.prototype.dispatch);
       sinon.assert.calledWithExactly(loop.Dispatcher.prototype.dispatch,
         new sharedActions.ExtractTokenInfo({
-          windowPath: "/c/faketoken"
+          windowPath: "/c/faketoken",
+          windowHash: "#fakeKey"
         }));
     });
   });
@@ -104,7 +94,8 @@ describe("loop.webapp", function() {
 
     function mountTestComponent(props) {
       return TestUtils.renderIntoDocument(
-        loop.webapp.OutgoingConversationView(props));
+        React.createElement(
+          loop.webapp.OutgoingConversationView, props));
     }
 
     beforeEach(function() {
@@ -118,12 +109,13 @@ describe("loop.webapp", function() {
       });
       conversation.set("loopToken", "fakeToken");
       ocView = mountTestComponent({
-        helper: new sharedUtils.Helper(),
         client: client,
         conversation: conversation,
         notifications: notifications,
-        sdk: {},
-        feedbackApiClient: feedbackApiClient
+        sdk: {
+          on: sandbox.stub()
+        },
+        dispatcher: dispatcher
       });
     });
 
@@ -239,7 +231,7 @@ describe("loop.webapp", function() {
             it("should display the FailedConversationView", function() {
               ocView._websocket.trigger("progress", {
                 state: "terminated",
-                reason: "reject"
+                reason: WEBSOCKET_REASONS.REJECT
               });
 
               TestUtils.findRenderedComponentWithType(ocView,
@@ -254,17 +246,17 @@ describe("loop.webapp", function() {
 
                 ocView._websocket.trigger("progress", {
                   state: "terminated",
-                  reason: "reject"
+                  reason: WEBSOCKET_REASONS.REJECT
                 });
 
                 sinon.assert.calledOnce(multiplexGum.reset);
               });
 
-            it("should display an error message if the reason is not 'cancel'",
+            it("should display an error message if the reason is not WEBSOCKET_REASONS.CANCEL",
               function() {
                 ocView._websocket.trigger("progress", {
                   state: "terminated",
-                  reason: "reject"
+                  reason: WEBSOCKET_REASONS.REJECT
                 });
 
                 sinon.assert.calledOnce(notifications.errorL10n);
@@ -272,11 +264,11 @@ describe("loop.webapp", function() {
                   "call_timeout_notification_text");
               });
 
-            it("should not display an error message if the reason is 'cancel'",
+            it("should not display an error message if the reason is WEBSOCKET_REASONS.CANCEL",
               function() {
                 ocView._websocket.trigger("progress", {
                   state: "terminated",
-                  reason: "cancel"
+                  reason: WEBSOCKET_REASONS.CANCEL
                 });
 
                 sinon.assert.notCalled(notifications.errorL10n);
@@ -363,6 +355,16 @@ describe("loop.webapp", function() {
       });
 
       describe("session:ended", function() {
+        it("should call multiplexGum.reset", function() {
+          var multiplexGum = new standaloneMedia._MultiplexGum();
+          standaloneMedia.setSingleton(multiplexGum);
+          sandbox.stub(standaloneMedia._MultiplexGum.prototype, "reset");
+
+          conversation.trigger("session:ended");
+
+          sinon.assert.calledOnce(multiplexGum.reset);
+        });
+
         it("should display the StartConversationView", function() {
           conversation.trigger("session:ended");
 
@@ -468,14 +470,14 @@ describe("loop.webapp", function() {
           });
 
           it("should display the FailedConversationView", function() {
-            conversation.setupOutgoingCall();
+            ocView.setupOutgoingCall();
 
             TestUtils.findRenderedComponentWithType(ocView,
               loop.webapp.FailedConversationView);
           });
 
           it("should display an error", function() {
-            conversation.setupOutgoingCall();
+            ocView.setupOutgoingCall();
 
             sinon.assert.calledOnce(notifications.errorL10n);
           });
@@ -488,7 +490,8 @@ describe("loop.webapp", function() {
 
           it("should call requestCallInfo on the client",
             function() {
-              conversation.setupOutgoingCall("audio-video");
+              conversation.set("selectedCallType", "audio-video");
+              ocView.setupOutgoingCall();
 
               sinon.assert.calledOnce(client.requestCallInfo);
               sinon.assert.calledWith(client.requestCallInfo, "fakeToken",
@@ -500,7 +503,7 @@ describe("loop.webapp", function() {
                function() {
                 client.requestCallInfo.callsArgWith(2, {errno: 105});
 
-                conversation.setupOutgoingCall();
+                ocView.setupOutgoingCall();
 
                 TestUtils.findRenderedComponentWithType(ocView,
                   loop.webapp.CallUrlExpiredView);
@@ -510,7 +513,7 @@ describe("loop.webapp", function() {
                function() {
                 client.requestCallInfo.callsArgWith(2, {errno: 104});
 
-                conversation.setupOutgoingCall();
+                ocView.setupOutgoingCall();
 
                 TestUtils.findRenderedComponentWithType(ocView,
                   loop.webapp.FailedConversationView);
@@ -519,7 +522,7 @@ describe("loop.webapp", function() {
             it("should notify the user on any other error", function() {
               client.requestCallInfo.callsArgWith(2, {errno: 104});
 
-              conversation.setupOutgoingCall();
+              ocView.setupOutgoingCall();
 
               sinon.assert.calledOnce(notifications.errorL10n);
             });
@@ -528,7 +531,7 @@ describe("loop.webapp", function() {
                "are successfully received", function() {
                 client.requestCallInfo.callsArgWith(2, null, fakeSessionData);
 
-                conversation.setupOutgoingCall();
+                ocView.setupOutgoingCall();
 
                 sinon.assert.calledOnce(conversation.outgoing);
                 sinon.assert.calledWithExactly(conversation.outgoing, fakeSessionData);
@@ -536,6 +539,52 @@ describe("loop.webapp", function() {
           });
         });
       });
+
+      describe("getMediaPrivs", function() {
+        var multiplexGum;
+
+        beforeEach(function() {
+          multiplexGum = new standaloneMedia._MultiplexGum();
+          standaloneMedia.setSingleton(multiplexGum);
+          sandbox.stub(standaloneMedia._MultiplexGum.prototype, "reset");
+
+          sandbox.stub(conversation, "gotMediaPrivs");
+        });
+
+        it("should call getPermsAndCacheMedia", function() {
+          conversation.trigger("call:outgoing:get-media-privs");
+
+          sinon.assert.calledOnce(stubGetPermsAndCacheMedia);
+        });
+
+        it("should call gotMediaPrevs on the model when successful", function() {
+          stubGetPermsAndCacheMedia.callsArgWith(1, {});
+
+          conversation.trigger("call:outgoing:get-media-privs");
+
+          sinon.assert.calledOnce(conversation.gotMediaPrivs);
+        });
+
+        it("should call multiplexGum.reset when getPermsAndCacheMedia fails",
+          function() {
+            stubGetPermsAndCacheMedia.callsArgWith(2, "FAKE_ERROR");
+
+            conversation.trigger("call:outgoing:get-media-privs");
+
+            sinon.assert.calledOnce(multiplexGum.reset);
+          });
+
+        it("should set state to `failure` when getPermsAndCacheMedia fails",
+          function() {
+            stubGetPermsAndCacheMedia.callsArgWith(2, "FAKE_ERROR");
+
+            conversation.trigger("call:outgoing:get-media-privs");
+
+            expect(ocView.state.callStatus).eql("failure");
+          });
+      });
+
+
     });
 
     describe("FailedConversationView", function() {
@@ -561,11 +610,12 @@ describe("loop.webapp", function() {
 
         sandbox.stub(client, "requestCallUrlInfo");
         view = React.addons.TestUtils.renderIntoDocument(
-          loop.webapp.FailedConversationView({
-            conversation: conversation,
-            client: client,
-            notifications: notifications
-          }));
+          React.createElement(
+            loop.webapp.FailedConversationView, {
+              conversation: conversation,
+              client: client,
+              notifications: notifications
+            }));
       });
 
       it("should play a failure sound, once", function() {
@@ -581,25 +631,24 @@ describe("loop.webapp", function() {
   });
 
   describe("WebappRootView", function() {
-    var helper, sdk, conversationModel, client, props, standaloneAppStore;
-    var dispatcher, activeRoomStore;
+    var sdk, conversationModel, client, props, standaloneAppStore;
+    var activeRoomStore;
 
     function mountTestComponent() {
       return TestUtils.renderIntoDocument(
-        loop.webapp.WebappRootView({
-        client: client,
-        helper: helper,
-        notifications: notifications,
-        sdk: sdk,
-        conversation: conversationModel,
-        feedbackApiClient: feedbackApiClient,
-        standaloneAppStore: standaloneAppStore,
-        activeRoomStore: activeRoomStore
-      }));
+        React.createElement(
+          loop.webapp.WebappRootView, {
+            client: client,
+            dispatcher: dispatcher,
+            notifications: notifications,
+            sdk: sdk,
+            conversation: conversationModel,
+            standaloneAppStore: standaloneAppStore,
+            activeRoomStore: activeRoomStore
+          }));
     }
 
     beforeEach(function() {
-      helper = new sharedUtils.Helper();
       sdk = {
         checkSystemRequirements: function() { return true; }
       };
@@ -609,16 +658,13 @@ describe("loop.webapp", function() {
       client = new loop.StandaloneClient({
         baseServerUrl: "fakeUrl"
       });
-      dispatcher = new loop.Dispatcher();
-      activeRoomStore = new loop.store.ActiveRoomStore({
-        dispatcher: dispatcher,
+      activeRoomStore = new loop.store.ActiveRoomStore(dispatcher, {
         mozLoop: {},
         sdkDriver: {}
       });
       standaloneAppStore = new loop.store.StandaloneAppStore({
         dispatcher: dispatcher,
         sdk: sdk,
-        helper: helper,
         conversation: conversationModel
       });
       // Stub this to stop the StartConversationView kicking in the request and
@@ -682,14 +728,15 @@ describe("loop.webapp", function() {
       standaloneMedia.setSingleton(multiplexGum);
       sandbox.stub(standaloneMedia._MultiplexGum.prototype, "reset");
 
-      TestUtils.renderIntoDocument(loop.webapp.HomeView());
+      TestUtils.renderIntoDocument(
+        React.createElement(loop.webapp.HomeView));
 
       sinon.assert.calledOnce(multiplexGum.reset);
       sinon.assert.calledWithExactly(multiplexGum.reset);
     });
   });
 
-  describe("PendingConversationView", function() {
+  describe("WaitingConversationView", function() {
     var view, websocket, fakeAudio;
 
     beforeEach(function() {
@@ -709,9 +756,10 @@ describe("loop.webapp", function() {
       sandbox.stub(window, "XMLHttpRequest").returns(fakeAudioXHR);
 
       view = React.addons.TestUtils.renderIntoDocument(
-        loop.webapp.PendingConversationView({
-          websocket: websocket
-        })
+        React.createElement(
+          loop.webapp.WaitingConversationView, {
+            websocket: websocket
+          })
       );
     });
 
@@ -792,32 +840,13 @@ describe("loop.webapp", function() {
         };
 
         view = React.addons.TestUtils.renderIntoDocument(
-            loop.webapp.StartConversationView({
+          React.createElement(
+            loop.webapp.StartConversationView, {
               conversation: conversation,
               notifications: notifications,
               client: standaloneClientStub
-            })
-        );
-
-        // default to succeeding with a null local media object
-        stubGetPermsAndCacheMedia.callsArgWith(1, {});
+            }));
       });
-
-      it("should fire multiplexGum.reset when getPermsAndCacheMedia calls" +
-        " back an error",
-        function() {
-          var setupOutgoingCall = sinon.stub(conversation, "setupOutgoingCall");
-          var multiplexGum = new standaloneMedia._MultiplexGum();
-          standaloneMedia.setSingleton(multiplexGum);
-          sandbox.stub(standaloneMedia._MultiplexGum.prototype, "reset");
-          stubGetPermsAndCacheMedia.callsArgWith(2, "FAKE_ERROR");
-
-          var button = view.getDOMNode().querySelector(".btn-accept");
-          React.addons.TestUtils.Simulate.click(button);
-
-          sinon.assert.calledOnce(multiplexGum.reset);
-          sinon.assert.calledWithExactly(multiplexGum.reset);
-        });
 
       it("should start the audio-video conversation establishment process",
         function() {
@@ -907,12 +936,12 @@ describe("loop.webapp", function() {
         requestCallUrlInfo = sandbox.stub();
 
         view = React.addons.TestUtils.renderIntoDocument(
-            loop.webapp.StartConversationView({
-              conversation: conversation,
-              notifications: notifications,
-              client: {requestCallUrlInfo: requestCallUrlInfo}
-            })
-          );
+            React.createElement(
+              loop.webapp.StartConversationView, {
+                conversation: conversation,
+                notifications: notifications,
+                client: {requestCallUrlInfo: requestCallUrlInfo}
+              }));
 
         loop.config.marketplaceUrl = "http://market/";
       });
@@ -992,12 +1021,12 @@ describe("loop.webapp", function() {
         var tos;
 
         view = React.addons.TestUtils.renderIntoDocument(
-          loop.webapp.StartConversationView({
-            conversation: conversation,
-            notifications: notifications,
-            client: {requestCallUrlInfo: requestCallUrlInfo}
-          })
-        );
+          React.createElement(
+            loop.webapp.StartConversationView, {
+              conversation: conversation,
+              notifications: notifications,
+              client: {requestCallUrlInfo: requestCallUrlInfo}
+            }));
         tos = view.getDOMNode().querySelector(".terms-service");
 
         expect(tos.classList.contains("hide")).to.equal(false);
@@ -1008,12 +1037,12 @@ describe("loop.webapp", function() {
 
         localStorage.setItem("has-seen-tos", "true");
         view = React.addons.TestUtils.renderIntoDocument(
-          loop.webapp.StartConversationView({
-            conversation: conversation,
-            notifications: notifications,
-            client: {requestCallUrlInfo: requestCallUrlInfo}
-          })
-        );
+          React.createElement(
+            loop.webapp.StartConversationView, {
+              conversation: conversation,
+              notifications: notifications,
+              client: {requestCallUrlInfo: requestCallUrlInfo}
+            }));
         tos = view.getDOMNode().querySelector(".terms-service");
 
         expect(tos.classList.contains("hide")).to.equal(true);
@@ -1037,13 +1066,12 @@ describe("loop.webapp", function() {
       });
       sandbox.stub(window, "XMLHttpRequest").returns(fakeAudioXHR);
       view = React.addons.TestUtils.renderIntoDocument(
-        loop.webapp.EndedConversationView({
-          conversation: conversation,
-          sdk: {},
-          feedbackApiClient: feedbackApiClient,
-          onAfterFeedbackReceived: function(){}
-        })
-      );
+        React.createElement(
+          loop.webapp.EndedConversationView, {
+            conversation: conversation,
+            sdk: {},
+            onAfterFeedbackReceived: function(){}
+          }));
     });
 
     it("should render a ConversationView", function() {
@@ -1053,38 +1081,25 @@ describe("loop.webapp", function() {
     it("should render a FeedbackView", function() {
       TestUtils.findRenderedComponentWithType(view, sharedViews.FeedbackView);
     });
-
-    describe("#componentDidMount", function() {
-
-      it("should play a terminating sound, once", function() {
-        fakeAudioXHR.onload();
-
-        sinon.assert.called(fakeAudioXHR.open);
-        sinon.assert.calledWithExactly(
-          fakeAudioXHR.open, "GET", "shared/sounds/terminated.ogg", true);
-
-        sinon.assert.calledOnce(fakeAudio.play);
-        expect(fakeAudio.loop).to.not.equal(true);
-      });
-
-    });
-
   });
 
   describe("PromoteFirefoxView", function() {
     describe("#render", function() {
       it("should not render when using Firefox", function() {
-        var comp = TestUtils.renderIntoDocument(loop.webapp.PromoteFirefoxView({
-          helper: {isFirefox: function() { return true; }}
-        }));
+        var comp = TestUtils.renderIntoDocument(
+          React.createElement(loop.webapp.PromoteFirefoxView, {
+            isFirefox: true
+          }));
 
         expect(comp.getDOMNode().querySelectorAll("h3").length).eql(0);
       });
 
       it("should render when not using Firefox", function() {
-        var comp = TestUtils.renderIntoDocument(loop.webapp.PromoteFirefoxView({
-          helper: {isFirefox: function() { return false; }}
-        }));
+        var comp = TestUtils.renderIntoDocument(
+          React.createElement(
+            loop.webapp.PromoteFirefoxView, {
+              isFirefox: false
+            }));
 
         expect(comp.getDOMNode().querySelectorAll("h3").length).eql(1);
       });
@@ -1122,12 +1137,12 @@ describe("loop.webapp", function() {
         };
 
         view = React.addons.TestUtils.renderIntoDocument(
-            loop.webapp.StartConversationView({
+          React.createElement(
+            loop.webapp.StartConversationView, {
               conversation: conversation,
               notifications: notifications,
               client: standaloneClientStub
-            })
-        );
+            }));
 
         // default to succeeding with a null local media object
         stubGetPermsAndCacheMedia.callsArgWith(1, {});
@@ -1147,8 +1162,7 @@ describe("loop.webapp", function() {
       before(function() {
         model = new loop.webapp.FxOSConversationModel({
           loopToken: "fakeToken",
-          callerId: "callerId",
-          callType: "callType"
+          callerId: "callerId"
         });
 
         realMozActivity = window.MozActivity;
@@ -1192,13 +1206,44 @@ describe("loop.webapp", function() {
 
         beforeEach(function() {
           trigger = sandbox.stub(model, "trigger");
+          _activityProps = undefined;
         });
 
         afterEach(function() {
           trigger.restore();
         });
 
-        it("Activity properties", function() {
+        it("Activity properties with video call", function() {
+          expect(_activityProps).to.not.exist;
+          model.setupOutgoingCall("audio-video");
+          expect(_activityProps).to.exist;
+          expect(_activityProps).eql({
+            name: "loop-call",
+            data: {
+              type: "loop/token",
+              token: "fakeToken",
+              callerId: "callerId",
+              video: true
+            }
+          });
+        });
+
+        it("Activity properties with audio call", function() {
+          expect(_activityProps).to.not.exist;
+          model.setupOutgoingCall("audio");
+          expect(_activityProps).to.exist;
+          expect(_activityProps).eql({
+            name: "loop-call",
+            data: {
+              type: "loop/token",
+              token: "fakeToken",
+              callerId: "callerId",
+              video: false
+            }
+          });
+        });
+
+        it("Activity properties by default", function() {
           expect(_activityProps).to.not.exist;
           model.setupOutgoingCall();
           expect(_activityProps).to.exist;
@@ -1208,7 +1253,7 @@ describe("loop.webapp", function() {
               type: "loop/token",
               token: "fakeToken",
               callerId: "callerId",
-              callType: "callType"
+              video: false
             }
           });
         });
@@ -1240,12 +1285,12 @@ describe("loop.webapp", function() {
 
         before(function() {
           view = React.addons.TestUtils.renderIntoDocument(
-            loop.webapp.StartConversationView({
-              conversation: model,
-              notifications: notifications,
-              client: {requestCallUrlInfo: sandbox.stub()}
-            })
-          );
+            React.createElement(
+              loop.webapp.StartConversationView, {
+                conversation: model,
+                notifications: notifications,
+                client: {requestCallUrlInfo: sandbox.stub()}
+              }));
         });
 
         beforeEach(function() {

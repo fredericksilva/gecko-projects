@@ -50,6 +50,14 @@ class gfxTextContextPaint;
 
 #define SMALL_CAPS_SCALE_FACTOR        0.8
 
+// The skew factor used for synthetic-italic [oblique] fonts;
+// we use a platform-dependent value to harmonize with the platform's own APIs.
+#ifdef XP_WIN
+#define OBLIQUE_SKEW_FACTOR  0.3
+#else
+#define OBLIQUE_SKEW_FACTOR  0.25
+#endif
+
 struct gfxTextRunDrawCallbacks;
 
 namespace mozilla {
@@ -61,7 +69,7 @@ class GlyphRenderingOptions;
 struct gfxFontStyle {
     gfxFontStyle();
     gfxFontStyle(uint8_t aStyle, uint16_t aWeight, int16_t aStretch,
-                 gfxFloat aSize, nsIAtom *aLanguage,
+                 gfxFloat aSize, nsIAtom *aLanguage, bool aExplicitLanguage,
                  float aSizeAdjust, bool aSystemFont,
                  bool aPrinterFont,
                  bool aWeightSynthesis, bool aStyleSynthesis,
@@ -95,8 +103,8 @@ struct gfxFontStyle {
 
     // The aspect-value (ie., the ratio actualsize:actualxheight) that any
     // actual physical font created from this font structure must have when
-    // rendering or measuring a string. A value of 0 means no adjustment
-    // needs to be done.
+    // rendering or measuring a string. A value of -1.0 means no adjustment
+    // needs to be done; otherwise the value must be nonnegative.
     float sizeAdjust;
 
     // baseline offset, used when simulating sub/superscript glyphs
@@ -143,6 +151,10 @@ struct gfxFontStyle {
     // code, so set up a bool to indicate when shaping with fallback is needed
     bool noFallbackVariantFeatures : 1;
 
+    // whether the |language| field comes from explicit lang tagging in the
+    // document, or was inferred from charset/system locale
+    bool explicitLanguage : 1;
+
     // caps variant (small-caps, petite-caps, etc.)
     uint8_t variantCaps;
 
@@ -150,9 +162,9 @@ struct gfxFontStyle {
     uint8_t variantSubSuper;
 
     // Return the final adjusted font size for the given aspect ratio.
-    // Not meant to be called when sizeAdjust = 0.
+    // Not meant to be called when sizeAdjust = -1.0.
     gfxFloat GetAdjustedSize(gfxFloat aspect) const {
-        NS_ASSERTION(sizeAdjust != 0.0, "Not meant to be called when sizeAdjust = 0");
+        NS_ASSERTION(sizeAdjust >= 0.0, "Not meant to be called when sizeAdjust = -1.0");
         gfxFloat adjustedSize = std::max(NS_round(size*(sizeAdjust/aspect)), 1.0);
         return std::min(adjustedSize, FONT_MAX_SIZE);
     }
@@ -181,6 +193,7 @@ struct gfxFontStyle {
             (systemFont == other.systemFont) &&
             (printerFont == other.printerFont) &&
             (useGrayscaleAntialiasing == other.useGrayscaleAntialiasing) &&
+            (explicitLanguage == other.explicitLanguage) &&
             (weight == other.weight) &&
             (stretch == other.stretch) &&
             (language == other.language) &&
@@ -257,7 +270,7 @@ struct FontCacheSizes {
     size_t mShapedWords; // memory used by the per-font shapedWord caches
 };
 
-class gfxFontCache MOZ_FINAL : public nsExpirationTracker<gfxFont,3> {
+class gfxFontCache final : public nsExpirationTracker<gfxFont,3> {
 public:
     enum {
         FONT_TIMEOUT_SECONDS = 10,
@@ -299,7 +312,7 @@ public:
 
     // This gets called when the timeout has expired on a zero-refcount
     // font; we just delete it.
-    virtual void NotifyExpired(gfxFont *aFont);
+    virtual void NotifyExpired(gfxFont *aFont) override;
 
     // Cleans out the hashtable and removes expired fonts waiting for cleanup.
     // Other gfxFont objects may be still in use but they will be pushed
@@ -319,7 +332,7 @@ public:
                                 FontCacheSizes* aSizes) const;
 
 protected:
-    class MemoryReporter MOZ_FINAL : public nsIMemoryReporter
+    class MemoryReporter final : public nsIMemoryReporter
     {
         ~MemoryReporter() {}
     public:
@@ -328,7 +341,7 @@ protected:
     };
 
     // Observer for notifications that the font cache cares about
-    class Observer MOZ_FINAL
+    class Observer final
         : public nsIObserver
     {
         ~Observer() {}
@@ -623,14 +636,15 @@ public:
 
     gfxFont *GetFont() const { return mFont; }
 
-    // returns true if features exist in output, false otherwise
-    static bool
+    static void
     MergeFontFeatures(const gfxFontStyle *aStyle,
                       const nsTArray<gfxFontFeature>& aFontFeatures,
                       bool aDisableLigatures,
                       const nsAString& aFamilyName,
                       bool aAddSmallCaps,
-                      nsDataHashtable<nsUint32HashKey,uint32_t>& aMergedFeatures);
+                      PLDHashOperator (*aHandleFeature)(const uint32_t&,
+                                                        uint32_t&, void*),
+                      void* aHandleFeatureData);
 
 protected:
     // the font this shaper is working with
@@ -1138,7 +1152,7 @@ public:
         uint32_t size =
             offsetof(gfxShapedWord, mCharGlyphsStorage) +
             aLength * (sizeof(CompressedGlyph) + sizeof(uint8_t));
-        void *storage = moz_malloc(size);
+        void *storage = malloc(size);
         if (!storage) {
             return nullptr;
         }
@@ -1169,7 +1183,7 @@ public:
         uint32_t size =
             offsetof(gfxShapedWord, mCharGlyphsStorage) +
             aLength * (sizeof(CompressedGlyph) + sizeof(char16_t));
-        void *storage = moz_malloc(size);
+        void *storage = malloc(size);
         if (!storage) {
             return nullptr;
         }
@@ -1179,12 +1193,12 @@ public:
     }
 
     // Override operator delete to properly free the object that was
-    // allocated via moz_malloc.
+    // allocated via malloc.
     void operator delete(void* p) {
-        moz_free(p);
+        free(p);
     }
 
-    CompressedGlyph *GetCharacterGlyphs() {
+    virtual CompressedGlyph *GetCharacterGlyphs() override {
         return &mCharGlyphsStorage[0];
     }
 
@@ -1373,7 +1387,9 @@ public:
     }
 
     virtual gfxFloat GetAdjustedSize() const {
-        return mAdjustedSize > 0.0 ? mAdjustedSize : mStyle.size;
+        return mAdjustedSize > 0.0
+                 ? mAdjustedSize
+                 : (mStyle.sizeAdjust == 0.0 ? 0.0 : mStyle.size);
     }
 
     float FUnitsToDevUnitsFactor() const {
@@ -1390,6 +1406,16 @@ public:
     // check whether this is an sfnt we can potentially use with Graphite
     bool FontCanSupportGraphite() {
         return mFontEntry->HasGraphiteTables();
+    }
+
+    // Whether this is a font that may be doing full-color rendering,
+    // and therefore needs us to use a mask for text-shadow even when
+    // we're not actually blurring.
+    bool AlwaysNeedsMaskForShadow() {
+        return mFontEntry->TryGetColorGlyphs() ||
+               mFontEntry->TryGetSVGData(this) ||
+               mFontEntry->HasFontTable(TRUETYPE_TAG('C','B','D','T')) ||
+               mFontEntry->HasFontTable(TRUETYPE_TAG('s','b','i','x'));
     }
 
     // whether a feature is supported by the font (limited to a small set
@@ -1593,8 +1619,7 @@ public:
     gfxGlyphExtents *GetOrCreateGlyphExtents(int32_t aAppUnitsPerDevUnit);
 
     // You need to call SetupCairoFont on the aCR just before calling this
-    virtual void SetupGlyphExtents(gfxContext *aContext,
-                                   Orientation aOrientation, uint32_t aGlyphID,
+    virtual void SetupGlyphExtents(gfxContext *aContext, uint32_t aGlyphID,
                                    bool aNeedTight, gfxGlyphExtents *aExtents);
 
     // This is called by the default Draw() implementation above.
@@ -1833,6 +1858,8 @@ protected:
         return -1;
     }
 
+    bool IsSpaceGlyphInvisible(gfxContext *aRefContext, gfxTextRun *aTextRun);
+
     void AddGlyphChangeObserver(GlyphChangeObserver *aObserver);
     void RemoveGlyphChangeObserver(GlyphChangeObserver *aObserver);
 
@@ -1868,6 +1895,7 @@ protected:
                           const char16_t *aText,
                           uint32_t         aOffset, // position within aShapedText
                           uint32_t         aLength,
+                          bool             aVertical,
                           gfxShapedText   *aShapedText);
 
     // Shape text directly into a range within a textrun, without using the

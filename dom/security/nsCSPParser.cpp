@@ -1,4 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -14,6 +15,7 @@
 #include "nsReadableUtils.h"
 #include "nsServiceManagerUtils.h"
 #include "nsUnicharUtils.h"
+#include "mozilla/net/ReferrerPolicy.h"
 
 using namespace mozilla;
 
@@ -45,10 +47,18 @@ static const char16_t OPEN_CURL    = '{';
 static const char16_t CLOSE_CURL   = '}';
 static const char16_t NUMBER_SIGN  = '#';
 static const char16_t QUESTIONMARK = '?';
+static const char16_t PERCENT_SIGN = '%';
+static const char16_t EXCLAMATION  = '!';
+static const char16_t DOLLAR       = '$';
+static const char16_t AMPERSAND    = '&';
+static const char16_t OPENBRACE    = '(';
+static const char16_t CLOSINGBRACE = ')';
+static const char16_t EQUALS       = '=';
+static const char16_t ATSYMBOL     = '@';
 
-static uint32_t kSubHostPathCharacterCutoff = 512;
+static const uint32_t kSubHostPathCharacterCutoff = 512;
 
-static const char* kHashSourceValidFns [] = { "sha256", "sha384", "sha512" };
+static const char *const kHashSourceValidFns [] = { "sha256", "sha384", "sha512" };
 static const uint32_t kHashSourceValidFnsLen = 3;
 
 /* ===== nsCSPTokenizer ==================== */
@@ -114,7 +124,9 @@ nsCSPTokenizer::tokenizeCSPPolicy(const nsAString &aPolicyString,
 nsCSPParser::nsCSPParser(cspTokens& aTokens,
                          nsIURI* aSelfURI,
                          uint64_t aInnerWindowID)
- : mTokens(aTokens)
+ : mHasHashOrNonce(false)
+ , mUnsafeInlineKeywordSrc(nullptr)
+ , mTokens(aTokens)
  , mSelfURI(aSelfURI)
  , mInnerWindowID(aInnerWindowID)
 {
@@ -126,18 +138,25 @@ nsCSPParser::~nsCSPParser()
   CSPPARSERLOG(("nsCSPParser::~nsCSPParser"));
 }
 
-
-bool
+static bool
 isCharacterToken(char16_t aSymbol)
 {
   return (aSymbol >= 'a' && aSymbol <= 'z') ||
          (aSymbol >= 'A' && aSymbol <= 'Z');
 }
 
-bool
+static bool
 isNumberToken(char16_t aSymbol)
 {
   return (aSymbol >= '0' && aSymbol <= '9');
+}
+
+static bool
+isValidHexDig(char16_t aHexDig)
+{
+  return (isNumberToken(aHexDig) ||
+          (aHexDig >= 'A' && aHexDig <= 'F') ||
+          (aHexDig >= 'a' && aHexDig <= 'f'));
 }
 
 void
@@ -157,12 +176,116 @@ nsCSPParser::atEndOfPath()
   return (atEnd() || peek(QUESTIONMARK) || peek(NUMBER_SIGN));
 }
 
+void
+nsCSPParser::percentDecodeStr(const nsAString& aEncStr, nsAString& outDecStr)
+{
+  outDecStr.Truncate();
+
+  // helper function that should not be visible outside this methods scope
+  struct local {
+    static inline char16_t convertHexDig(char16_t aHexDig) {
+      if (isNumberToken(aHexDig)) {
+        return aHexDig - '0';
+      }
+      if (aHexDig >= 'A' && aHexDig <= 'F') {
+        return aHexDig - 'A' + 10;
+      }
+      // must be a lower case character
+      // (aHexDig >= 'a' && aHexDig <= 'f')
+      return aHexDig - 'a' + 10;
+    }
+  };
+
+  const char16_t *cur, *end, *hexDig1, *hexDig2;
+  cur = aEncStr.BeginReading();
+  end = aEncStr.EndReading();
+
+  while (cur != end) {
+    // if it's not a percent sign then there is
+    // nothing to do for that character
+    if (*cur != PERCENT_SIGN) {
+      outDecStr.Append(*cur);
+      cur++;
+      continue;
+    }
+
+    // get the two hexDigs following the '%'-sign
+    hexDig1 = cur + 1;
+    hexDig2 = cur + 2;
+
+    // if there are no hexdigs after the '%' then
+    // there is nothing to do for us.
+    if (hexDig1 == end || hexDig2 == end ||
+        !isValidHexDig(*hexDig1) ||
+        !isValidHexDig(*hexDig2)) {
+      outDecStr.Append(PERCENT_SIGN);
+      cur++;
+      continue;
+    }
+
+    // decode "% hexDig1 hexDig2" into a character.
+    char16_t decChar = (local::convertHexDig(*hexDig1) << 4) +
+                       local::convertHexDig(*hexDig2);
+    outDecStr.Append(decChar);
+
+    // increment 'cur' to after the second hexDig
+    cur = ++hexDig2;
+  }
+}
+
+// unreserved    = ALPHA / DIGIT / "-" / "." / "_" / "~"
 bool
-nsCSPParser::atValidPathChar()
+nsCSPParser::atValidUnreservedChar()
 {
   return (peek(isCharacterToken) || peek(isNumberToken) ||
           peek(DASH) || peek(DOT) ||
           peek(UNDERLINE) || peek(TILDE));
+}
+
+// sub-delims    = "!" / "$" / "&" / "'" / "(" / ")"
+//                 / "*" / "+" / "," / ";" / "="
+// Please note that even though ',' and ';' appear to be
+// valid sub-delims according to the RFC production of paths,
+// both can not appear here by itself, they would need to be
+// pct-encoded in order to be part of the path.
+bool
+nsCSPParser::atValidSubDelimChar()
+{
+  return (peek(EXCLAMATION) || peek(DOLLAR) || peek(AMPERSAND) ||
+          peek(SINGLEQUOTE) || peek(OPENBRACE) || peek(CLOSINGBRACE) ||
+          peek(WILDCARD) || peek(PLUS) || peek(EQUALS));
+}
+
+// pct-encoded   = "%" HEXDIG HEXDIG
+bool
+nsCSPParser::atValidPctEncodedChar()
+{
+  const char16_t* pctCurChar = mCurChar;
+
+  if ((pctCurChar + 2) >= mEndChar) {
+    // string too short, can't be a valid pct-encoded char.
+    return false;
+  }
+
+  // Any valid pct-encoding must follow the following format:
+  // "% HEXDIG HEXDIG"
+  if (PERCENT_SIGN != *pctCurChar ||
+     !isValidHexDig(*(pctCurChar+1)) ||
+     !isValidHexDig(*(pctCurChar+2))) {
+    return false;
+  }
+  return true;
+}
+
+// pchar = unreserved / pct-encoded / sub-delims / ":" / "@"
+// http://tools.ietf.org/html/rfc3986#section-3.3
+bool
+nsCSPParser::atValidPathChar()
+{
+  return (atValidUnreservedChar() ||
+          atValidSubDelimChar() ||
+          atValidPctEncodedChar() ||
+          peek(COLON) || peek(ATSYMBOL));
 }
 
 void
@@ -253,10 +376,15 @@ nsCSPParser::subPath(nsCSPHostSrc* aCspHost)
   // is longer than 512 characters, or also to avoid endless loops
   // in case we are parsing unrecognized characters in the following loop.
   uint32_t charCounter = 0;
+  nsString pctDecodedSubPath;
 
   while (!atEndOfPath()) {
     if (peek(SLASH)) {
-      aCspHost->appendPath(mCurValue);
+      // before appendig any additional portion of a subpath we have to pct-decode
+      // that portion of the subpath. atValidPathChar() already verified a correct
+      // pct-encoding, now we can safely decode and append the decoded-sub path.
+      percentDecodeStr(mCurValue, pctDecodedSubPath);
+      aCspHost->appendPath(pctDecodedSubPath);
       // Resetting current value since we are appending parts of the path
       // to aCspHost, e.g; "http://www.example.com/path1/path2" then the
       // first part is "/path1", second part "/path2"
@@ -269,12 +397,23 @@ nsCSPParser::subPath(nsCSPHostSrc* aCspHost)
                                params, ArrayLength(params));
       return false;
     }
+    // potentially we have encountred a valid pct-encoded character in atValidPathChar();
+    // if so, we have to account for "% HEXDIG HEXDIG" and advance the pointer past
+    // the pct-encoded char.
+    if (peek(PERCENT_SIGN)) {
+      advance();
+      advance();
+    }
     advance();
     if (++charCounter > kSubHostPathCharacterCutoff) {
       return false;
     }
   }
-  aCspHost->appendPath(mCurValue);
+  // before appendig any additional portion of a subpath we have to pct-decode
+  // that portion of the subpath. atValidPathChar() already verified a correct
+  // pct-encoding, now we can safely decode and append the decoded-sub path.
+  percentDecodeStr(mCurValue, pctDecodedSubPath);
+  aCspHost->appendPath(pctDecodedSubPath);
   resetCurValue();
   return true;
 }
@@ -301,12 +440,14 @@ nsCSPParser::path(nsCSPHostSrc* aCspHost)
   if (atEndOfPath()) {
     // one slash right after host [port] is also considered a path, e.g.
     // www.example.com/ should result in www.example.com/
-    aCspHost->appendPath(mCurValue);
+    // please note that we do not have to perform any pct-decoding here
+    // because we are just appending a '/' and not any actual chars.
+    aCspHost->appendPath(NS_LITERAL_STRING("/"));
     return true;
   }
   // path can begin with "/" but not "//"
   // see http://tools.ietf.org/html/rfc3986#section-3.3
-  if (!hostChar()) {
+  if (peek(SLASH)) {
     const char16_t* params[] = { mCurToken.get() };
     logWarningErrorToConsole(nsIScriptError::warningFlag, "couldntParseInvalidSource",
                              params, ArrayLength(params));
@@ -432,8 +573,22 @@ nsCSPParser::keywordSource()
     return CSP_CreateHostSrcFromURI(mSelfURI);
   }
 
-  if (CSP_IsKeyword(mCurToken, CSP_UNSAFE_INLINE) ||
-      CSP_IsKeyword(mCurToken, CSP_UNSAFE_EVAL)) {
+  if (CSP_IsKeyword(mCurToken, CSP_UNSAFE_INLINE)) {
+    // make sure script-src only contains 'unsafe-inline' once;
+    // ignore duplicates and log warning
+    if (mUnsafeInlineKeywordSrc) {
+      const char16_t* params[] = { mCurToken.get() };
+      logWarningErrorToConsole(nsIScriptError::warningFlag, "ignoringDuplicateSrc",
+                               params, ArrayLength(params));
+      return nullptr;
+    }
+    // cache if we encounter 'unsafe-inline' so we can invalidate (ignore) it in
+    // case that script-src directive also contains hash- or nonce-.
+    mUnsafeInlineKeywordSrc = new nsCSPKeywordSrc(CSP_KeywordToEnum(mCurToken));
+    return mUnsafeInlineKeywordSrc;
+  }
+
+  if (CSP_IsKeyword(mCurToken, CSP_UNSAFE_EVAL)) {
     return new nsCSPKeywordSrc(CSP_KeywordToEnum(mCurToken));
   }
   return nullptr;
@@ -538,6 +693,8 @@ nsCSPParser::nonceSource()
   if (dashIndex < 0) {
     return nullptr;
   }
+  // cache if encountering hash or nonce to invalidate unsafe-inline
+  mHasHashOrNonce = true;
   return new nsCSPNonceSrc(Substring(expr,
                                      dashIndex + 1,
                                      expr.Length() - dashIndex + 1));
@@ -550,7 +707,6 @@ nsCSPParser::hashSource()
   CSPPARSERLOG(("nsCSPParser::hashSource, mCurToken: %s, mCurValue: %s",
                NS_ConvertUTF16toUTF8(mCurToken).get(),
                NS_ConvertUTF16toUTF8(mCurValue).get()));
-
 
   // Check if mCurToken starts and ends with "'"
   if (mCurToken.First() != SINGLEQUOTE ||
@@ -571,6 +727,8 @@ nsCSPParser::hashSource()
 
   for (uint32_t i = 0; i < kHashSourceValidFnsLen; i++) {
     if (algo.LowerCaseEqualsASCII(kHashSourceValidFns[i])) {
+      // cache if encountering hash or nonce to invalidate unsafe-inline
+      mHasHashOrNonce = true;
       return new nsCSPHashSrc(algo, hash);
     }
   }
@@ -722,6 +880,30 @@ nsCSPParser::sourceList(nsTArray<nsCSPBaseSrc*>& outSrcs)
 }
 
 void
+nsCSPParser::referrerDirectiveValue()
+{
+  // directive-value   = "none" / "none-when-downgrade" / "origin" / "origin-when-cross-origin" / "unsafe-url"
+  // directive name is token 0, we need to examine the remaining tokens (and
+  // there should only be one token in the value).
+  CSPPARSERLOG(("nsCSPParser::referrerDirectiveValue"));
+
+  if (mCurDir.Length() > 2) {
+    CSPPARSERLOG(("Too many tokens in referrer directive, got %d expected 1",
+                 mCurDir.Length() - 1));
+    return;
+  }
+
+  if (!mozilla::net::IsValidReferrerPolicy(mCurDir[1])) {
+    CSPPARSERLOG(("invalid value for referrer directive: %s",
+                  NS_ConvertUTF16toUTF8(mCurDir[1]).get()));
+    return;
+  }
+
+  // the referrer policy is valid, so go ahead and use it.
+  mPolicy->setReferrerPolicy(&mCurDir[1]);
+}
+
+void
 nsCSPParser::reportURIList(nsTArray<nsCSPBaseSrc*>& outSrcs)
 {
   nsCOMPtr<nsIURI> uri;
@@ -760,10 +942,18 @@ nsCSPParser::directiveValue(nsTArray<nsCSPBaseSrc*>& outSrcs)
   // The tokenzier already generated an array in the form of
   // [ name, src, src, ... ], no need to parse again, but
   // special case handling in case the directive is report-uri.
-  if (CSP_IsDirective(mCurDir[0], CSP_REPORT_URI)) {
+  if (CSP_IsDirective(mCurDir[0], nsIContentSecurityPolicy::REPORT_URI_DIRECTIVE)) {
     reportURIList(outSrcs);
     return;
   }
+
+  // special case handling of the referrer directive (since it doesn't contain
+  // source lists)
+  if (CSP_IsDirective(mCurDir[0], nsIContentSecurityPolicy::REFERRER_DIRECTIVE)) {
+    referrerDirectiveValue();
+    return;
+  }
+
   // Otherwise just forward to sourceList
   sourceList(outSrcs);
 }
@@ -788,7 +978,7 @@ nsCSPParser::directiveName()
   // http://www.w3.org/TR/2014/WD-CSP11-20140211/#reflected-xss
   // Currently we are not supporting that directive, hence we log a
   // warning to the console and ignore the directive including its values.
-  if (CSP_IsDirective(mCurToken, CSP_REFLECTED_XSS)) {
+  if (CSP_IsDirective(mCurToken, nsIContentSecurityPolicy::REFLECTED_XSS_DIRECTIVE)) {
     const char16_t* params[] = { mCurToken.get() };
     logWarningErrorToConsole(nsIScriptError::warningFlag, "notSupportingDirective",
                              params, ArrayLength(params));
@@ -797,13 +987,13 @@ nsCSPParser::directiveName()
 
   // Make sure the directive does not already exist
   // (see http://www.w3.org/TR/CSP11/#parsing)
-  if (mPolicy->directiveExists(CSP_DirectiveToEnum(mCurToken))) {
+  if (mPolicy->hasDirective(CSP_StringToCSPDirective(mCurToken))) {
     const char16_t* params[] = { mCurToken.get() };
     logWarningErrorToConsole(nsIScriptError::warningFlag, "duplicateDirective",
                              params, ArrayLength(params));
     return nullptr;
   }
-  return new nsCSPDirective(CSP_DirectiveToEnum(mCurToken));
+  return new nsCSPDirective(CSP_StringToCSPDirective(mCurToken));
 }
 
 // directive = *WSP [ directive-name [ WSP directive-value ] ]
@@ -834,6 +1024,11 @@ nsCSPParser::directive()
     return;
   }
 
+  // make sure to reset cache variables when trying to invalidate unsafe-inline;
+  // unsafe-inline might not only appear in script-src, but also in default-src
+  mHasHashOrNonce = false;
+  mUnsafeInlineKeywordSrc = nullptr;
+
   // Try to parse all the srcs by handing the array off to directiveValue
   nsTArray<nsCSPBaseSrc*> srcs;
   directiveValue(srcs);
@@ -843,6 +1038,18 @@ nsCSPParser::directive()
   if (srcs.Length() == 0) {
     nsCSPKeywordSrc *keyword = new nsCSPKeywordSrc(CSP_NONE);
     srcs.AppendElement(keyword);
+  }
+
+  // if a hash or nonce is specified within script-src, then
+  // unsafe-inline should be ignored, see:
+  // http://www.w3.org/TR/CSP2/#directive-script-src
+  if (cspDir->equals(nsIContentSecurityPolicy::SCRIPT_SRC_DIRECTIVE) &&
+      mHasHashOrNonce && mUnsafeInlineKeywordSrc) {
+    mUnsafeInlineKeywordSrc->invalidate();
+    // log to the console that unsafe-inline will be ignored
+    const char16_t* params[] = { NS_LITERAL_STRING("'unsafe-inline'").get() };
+    logWarningErrorToConsole(nsIScriptError::warningFlag, "ignoringSrcWithinScriptSrc",
+                             params, ArrayLength(params));
   }
 
   // Add the newly created srcs to the directive and add the directive to the policy
@@ -903,7 +1110,7 @@ nsCSPParser::parseContentSecurityPolicy(const nsAString& aPolicyString,
   // Check that report-only policies define a report-uri, otherwise log warning.
   if (aReportOnly) {
     policy->setReportOnlyFlag(true);
-    if (!policy->directiveExists(CSP_REPORT_URI)) {
+    if (!policy->hasDirective(nsIContentSecurityPolicy::REPORT_URI_DIRECTIVE)) {
       nsAutoCString prePath;
       nsresult rv = aSelfURI->GetPrePath(prePath);
       NS_ENSURE_SUCCESS(rv, policy);

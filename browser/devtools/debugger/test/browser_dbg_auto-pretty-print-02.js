@@ -63,17 +63,19 @@ function test(){
 }
 
 function testSourceIsUgly() {
-  ok(!gEditor.getText().contains("\n  "),
+  ok(!gEditor.getText().includes("\n  "),
     "The source shouldn't be pretty printed yet.");
 }
 
 function testFirstSourceLabel(){
-  ok(gSources.containsValue(EXAMPLE_URL + gFirstSourceLabel),
+  let source = gSources.selectedItem.attachment.source;
+  ok(source.url === EXAMPLE_URL + gFirstSourceLabel,
     "First source url is correct.");
 }
 
 function testSecondSourceLabel(){
-  ok(gSources.containsValue(EXAMPLE_URL + gSecondSourceLabel),
+  let source = gSources.selectedItem.attachment.source;
+  ok(source.url === EXAMPLE_URL + gSecondSourceLabel,
     "Second source url is correct.");
 }
 
@@ -99,7 +101,7 @@ function disableAutoPrettyPrint(){
 }
 
 function testSourceIsPretty() {
-  ok(gEditor.getText().contains("\n  "),
+  ok(gEditor.getText().includes("\n  "),
     "The source should be pretty printed.")
 }
 

@@ -1,4 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -58,23 +59,21 @@ TelephonyChild::RecvNotifyCallError(const uint32_t& aClientId,
 }
 
 bool
-TelephonyChild::RecvNotifyCallStateChanged(const uint32_t& aClientId,
-                                           const IPCCallStateData& aData)
+TelephonyChild::RecvNotifyCallStateChanged(nsTArray<nsITelephonyCallInfo*>&& aAllInfo)
 {
+  uint32_t length = aAllInfo.Length();
+  nsTArray<nsCOMPtr<nsITelephonyCallInfo>> results;
+  for (uint32_t i = 0; i < length; ++i) {
+    // Use dont_AddRef here because this instance has already been AddRef-ed in
+    // TelephonyIPCSerializer.h
+    nsCOMPtr<nsITelephonyCallInfo> info = dont_AddRef(aAllInfo[i]);
+    results.AppendElement(info);
+  }
+
   MOZ_ASSERT(mService);
 
-  mService->CallStateChanged(aClientId,
-                              aData.callIndex(),
-                              aData.callState(),
-                              aData.number(),
-                              aData.numberPresentation(),
-                              aData.name(),
-                              aData.namePresentation(),
-                              aData.isOutGoing(),
-                              aData.isEmergency(),
-                              aData.isConference(),
-                              aData.isSwitchable(),
-                              aData.isMergeable());
+  mService->CallStateChanged(length, const_cast<nsITelephonyCallInfo**>(aAllInfo.Elements()));
+
   return true;
 }
 
@@ -165,23 +164,16 @@ TelephonyRequestChild::Recv__delete__(const IPCTelephonyResponse& aResponse)
 }
 
 bool
-TelephonyRequestChild::RecvNotifyEnumerateCallState(const uint32_t& aClientId,
-                                                    const IPCCallStateData& aData)
+TelephonyRequestChild::RecvNotifyEnumerateCallState(nsITelephonyCallInfo* const& aInfo)
 {
+  // Use dont_AddRef here because this instances has already been AddRef-ed in
+  // TelephonyIPCSerializer.h
+  nsCOMPtr<nsITelephonyCallInfo> info = dont_AddRef(aInfo);
+
   MOZ_ASSERT(mListener);
 
-  mListener->EnumerateCallState(aClientId,
-                                aData.callIndex(),
-                                aData.callState(),
-                                aData.number(),
-                                aData.numberPresentation(),
-                                aData.name(),
-                                aData.namePresentation(),
-                                aData.isOutGoing(),
-                                aData.isEmergency(),
-                                aData.isConference(),
-                                aData.isSwitchable(),
-                                aData.isMergeable());
+  mListener->EnumerateCallState(aInfo);
+
   return true;
 }
 
@@ -215,7 +207,8 @@ TelephonyRequestChild::DoResponse(const DialResponseCallSuccess& aResponse)
 {
   MOZ_ASSERT(mCallback);
   nsCOMPtr<nsITelephonyDialCallback> callback = do_QueryInterface(mCallback);
-  callback->NotifyDialCallSuccess(aResponse.callIndex(), aResponse.number());
+  callback->NotifyDialCallSuccess(aResponse.clientId(), aResponse.callIndex(),
+                                  aResponse.number());
   return true;
 }
 

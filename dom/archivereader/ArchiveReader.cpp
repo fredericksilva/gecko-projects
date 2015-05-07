@@ -1,5 +1,5 @@
 /* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=2 et sw=2 tw=80: */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -37,7 +37,7 @@ ArchiveReader::Constructor(const GlobalObject& aGlobal,
   nsAutoCString encoding;
   if (!EncodingUtils::FindEncodingForLabelNoReplacement(aOptions.mEncoding,
                                                         encoding)) {
-    aError.ThrowTypeError(MSG_ENCODING_NOT_SUPPORTED, &aOptions.mEncoding);
+    aError.ThrowRangeError(MSG_ENCODING_NOT_SUPPORTED, &aOptions.mEncoding);
     return nullptr;
   }
 
@@ -48,7 +48,7 @@ ArchiveReader::Constructor(const GlobalObject& aGlobal,
 
 ArchiveReader::ArchiveReader(File& aBlob, nsPIDOMWindow* aWindow,
                              const nsACString& aEncoding)
-  : mBlob(&aBlob)
+  : mFileImpl(aBlob.Impl())
   , mWindow(aWindow)
   , mStatus(NOT_STARTED)
   , mEncoding(aEncoding)
@@ -61,9 +61,9 @@ ArchiveReader::~ArchiveReader()
 }
 
 /* virtual */ JSObject*
-ArchiveReader::WrapObject(JSContext* aCx)
+ArchiveReader::WrapObject(JSContext* aCx, JS::Handle<JSObject*> aGivenProto)
 {
-  return ArchiveReaderBinding::Wrap(aCx, this);
+  return ArchiveReaderBinding::Wrap(aCx, this, aGivenProto);
 }
 
 nsresult
@@ -95,7 +95,7 @@ nsresult
 ArchiveReader::GetInputStream(nsIInputStream** aInputStream)
 {
   // Getting the input stream
-  mBlob->GetInternalStream(aInputStream);
+  mFileImpl->GetInternalStream(aInputStream);
   NS_ENSURE_TRUE(*aInputStream, NS_ERROR_UNEXPECTED);
   return NS_OK;
 }
@@ -103,9 +103,9 @@ ArchiveReader::GetInputStream(nsIInputStream** aInputStream)
 nsresult
 ArchiveReader::GetSize(uint64_t* aSize)
 {
-  nsresult rv = mBlob->GetSize(aSize);
-  NS_ENSURE_SUCCESS(rv, rv);
-  return NS_OK;
+  ErrorResult rv;
+  *aSize = mFileImpl->GetSize(rv);
+  return rv.StealNSResult();
 }
 
 // Here we open the archive:
@@ -199,7 +199,7 @@ ArchiveReader::GenerateArchiveRequest()
 }
 
 NS_IMPL_CYCLE_COLLECTION_WRAPPERCACHE(ArchiveReader,
-                                      mBlob,
+                                      mFileImpl,
                                       mWindow,
                                       mData.fileList,
                                       mRequests)

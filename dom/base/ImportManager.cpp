@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim:set ts=2 sw=2 sts=2 et cindent: */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -10,7 +10,7 @@
 #include "HTMLLinkElement.h"
 #include "nsContentPolicyUtils.h"
 #include "nsContentUtils.h"
-#include "nsCrossSiteListenerProxy.h"
+#include "nsCORSListenerProxy.h"
 #include "nsIChannel.h"
 #include "nsIContentPolicy.h"
 #include "nsIContentSecurityPolicy.h"
@@ -293,7 +293,7 @@ ImportLoader::ImportLoader(nsIURI* aURI, nsIDocument* aImportParent)
   , mReady(false)
   , mStopped(false)
   , mBlockingScripts(false)
-  , mUpdater(MOZ_THIS_IN_INITIALIZER_LIST())
+  , mUpdater(this)
 {
 }
 
@@ -504,7 +504,7 @@ ImportLoader::Open()
   nsRefPtr<nsCORSListenerProxy> corsListener =
     new nsCORSListenerProxy(this, principal,
                             /* aWithCredentials */ false);
-  rv = corsListener->Init(channel, true);
+  rv = corsListener->Init(channel, DataURIHandling::Allow);
   NS_ENSURE_SUCCESS_VOID(rv);
 
   rv = channel->AsyncOpen(corsListener, nullptr);
@@ -625,6 +625,9 @@ ImportLoader::OnStartRequest(nsIRequest* aRequest, nsISupports* aContext)
   mDocument = do_QueryInterface(importDoc);
   nsCOMPtr<nsIDocument> master = mImportParent->MasterDocument();
   mDocument->SetMasterDocument(master);
+
+  // We want to inherit the sandbox flags from the master document.
+  mDocument->SetSandboxFlags(master->GetSandboxFlags());
 
   // We have to connect the blank document we created with the channel we opened,
   // and create its own LoadGroup for it.

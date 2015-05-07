@@ -23,12 +23,14 @@ class MediaOmxCommonDecoder : public MediaDecoder
 public:
   MediaOmxCommonDecoder();
 
-  virtual void FirstFrameLoaded(nsAutoPtr<MediaInfo> aInfo);
+  virtual void FirstFrameLoaded(nsAutoPtr<MediaInfo> aInfo,
+                                MediaDecoderEventVisibility aEventVisibility);
   virtual void ChangeState(PlayState aState);
   virtual void ApplyStateToStateMachine(PlayState aState);
   virtual void SetVolume(double aVolume);
-  virtual void PlaybackPositionChanged();
-  virtual void UpdateReadyStateForData();
+  virtual void PlaybackPositionChanged(MediaDecoderEventVisibility aEventVisibility =
+                                         MediaDecoderEventVisibility::Observable);
+  virtual MediaDecoderOwner::NextFrameStatus NextFrameStatus() override;
   virtual void SetElementVisibility(bool aIsVisible);
   virtual void SetPlatformCanOffloadAudio(bool aCanOffloadAudio);
   virtual bool CheckDecoderCanOffloadAudio();
@@ -41,7 +43,7 @@ public:
   virtual MediaDecoderStateMachine* CreateStateMachine();
 
   virtual MediaOmxCommonReader* CreateReader() = 0;
-  virtual MediaDecoderStateMachine* CreateStateMachine(MediaOmxCommonReader* aReader) = 0;
+  virtual MediaDecoderStateMachine* CreateStateMachineFromReader(MediaOmxCommonReader* aReader) = 0;
 
 protected:
   virtual ~MediaOmxCommonDecoder();

@@ -14,6 +14,7 @@
 #include "gfxReusableSurfaceWrapper.h"  // for gfxReusableSurfaceWrapper
 #include "mozilla/gfx/2D.h"             // for DataSourceSurface
 #include "mozilla/gfx/BaseSize.h"       // for BaseSize
+#include "mozilla/gfx/Logging.h"        // for gfxCriticalError
 #ifdef MOZ_WIDGET_GONK
 # include "GrallocImages.h"  // for GrallocImage
 # include "EGLImageHelpers.h"
@@ -21,7 +22,6 @@
 #include "mozilla/layers/ISurfaceAllocator.h"
 #include "mozilla/layers/YCbCrImageDataSerializer.h"
 #include "mozilla/layers/GrallocTextureHost.h"
-#include "nsPoint.h"                    // for nsIntPoint
 #include "nsRegion.h"                   // for nsIntRegion
 #include "AndroidSurfaceTexture.h"
 #include "GfxTexturesReporter.h"        // for GfxTexturesReporter
@@ -68,6 +68,7 @@ CreateTextureHostOGL(const SurfaceDescriptor& aDesc,
       const EGLImageDescriptor& desc = aDesc.get_EGLImageDescriptor();
       result = new EGLImageTextureHost(aFlags,
                                        (EGLImage)desc.image(),
+                                       (EGLSync)desc.fence(),
                                        desc.size());
       break;
     }
@@ -101,8 +102,8 @@ FlagsToGLFlags(TextureFlags aFlags)
 
   if (aFlags & TextureFlags::USE_NEAREST_FILTER)
     result |= TextureImage::UseNearestFilter;
-  if (aFlags & TextureFlags::NEEDS_Y_FLIP)
-    result |= TextureImage::NeedsYFlip;
+  if (aFlags & TextureFlags::ORIGIN_BOTTOM_LEFT)
+    result |= TextureImage::OriginBottomLeft;
   if (aFlags & TextureFlags::DISALLOW_BIGIMAGE)
     result |= TextureImage::DisallowBigImage;
 
@@ -215,6 +216,10 @@ TextureImageTextureSourceOGL::Update(gfx::DataSourceSurface* aSurface,
     NS_WARNING("trying to update TextureImageTextureSourceOGL without a GLContext");
     return false;
   }
+  if (!aSurface) {
+    gfxCriticalError() << "Invalid surface for OGL update";
+    return false;
+  }
   MOZ_ASSERT(aSurface);
 
   IntSize size = aSurface->GetSize();
@@ -252,7 +257,7 @@ TextureImageTextureSourceOGL::Update(gfx::DataSourceSurface* aSurface,
 
     if (aDestRegion &&
         !aSrcOffset &&
-        !aDestRegion->IsEqual(nsIntRect(0, 0, size.width, size.height))) {
+        !aDestRegion->IsEqual(gfx::IntRect(0, 0, size.width, size.height))) {
       // UpdateFromDataSource will ignore our specified aDestRegion since the texture
       // hasn't been allocated with glTexImage2D yet. Call Resize() to force the
       // allocation (full size, but no upload), and then we'll only upload the pixels
@@ -274,21 +279,21 @@ TextureImageTextureSourceOGL::EnsureBuffer(const nsIntSize& aSize,
                                            gfxContentType aContentType)
 {
   if (!mTexImage ||
-      mTexImage->GetSize() != aSize.ToIntSize() ||
+      mTexImage->GetSize() != aSize ||
       mTexImage->GetContentType() != aContentType) {
     mTexImage = CreateTextureImage(mCompositor->gl(),
-                                   aSize.ToIntSize(),
+                                   aSize,
                                    aContentType,
                                    LOCAL_GL_CLAMP_TO_EDGE,
                                    FlagsToGLFlags(mFlags));
   }
-  mTexImage->Resize(aSize.ToIntSize());
+  mTexImage->Resize(aSize);
 }
 
 void
-TextureImageTextureSourceOGL::CopyTo(const nsIntRect& aSourceRect,
+TextureImageTextureSourceOGL::CopyTo(const gfx::IntRect& aSourceRect,
                                      DataTextureSource *aDest,
-                                     const nsIntRect& aDestRect)
+                                     const gfx::IntRect& aDestRect)
 {
   MOZ_ASSERT(aDest->AsSourceOGL(), "Incompatible destination type!");
   TextureImageTextureSourceOGL *dest =
@@ -303,6 +308,7 @@ TextureImageTextureSourceOGL::CopyTo(const nsIntRect& aSourceRect,
 void
 TextureImageTextureSourceOGL::SetCompositor(Compositor* aCompositor)
 {
+  MOZ_ASSERT(aCompositor);
   CompositorOGL* glCompositor = static_cast<CompositorOGL*>(aCompositor);
 
   if (!glCompositor || (mCompositor != glCompositor)) {
@@ -334,9 +340,9 @@ TextureImageTextureSourceOGL::GetFormat() const
   return gfx::SurfaceFormat::UNKNOWN;
 }
 
-nsIntRect TextureImageTextureSourceOGL::GetTileRect()
+gfx::IntRect TextureImageTextureSourceOGL::GetTileRect()
 {
-  return ThebesIntRect(mTexImage->GetTileRect());
+  return mTexImage->GetTileRect();
 }
 
 void
@@ -408,6 +414,7 @@ GLTextureSource::BindTexture(GLenum aTextureUnit, gfx::Filter aFilter)
 void
 GLTextureSource::SetCompositor(Compositor* aCompositor)
 {
+  MOZ_ASSERT(aCompositor);
   mCompositor = static_cast<CompositorOGL*>(aCompositor);
 }
 
@@ -466,6 +473,7 @@ SurfaceTextureSource::BindTexture(GLenum aTextureUnit, gfx::Filter aFilter)
 void
 SurfaceTextureSource::SetCompositor(Compositor* aCompositor)
 {
+  MOZ_ASSERT(aCompositor);
   if (mCompositor != aCompositor) {
     DeallocateDeviceData();
   }
@@ -547,6 +555,7 @@ SurfaceTextureHost::Unlock()
 void
 SurfaceTextureHost::SetCompositor(Compositor* aCompositor)
 {
+  MOZ_ASSERT(aCompositor);
   CompositorOGL* glCompositor = static_cast<CompositorOGL*>(aCompositor);
   mCompositor = glCompositor;
   if (mTextureSource) {
@@ -607,6 +616,7 @@ EGLImageTextureSource::BindTexture(GLenum aTextureUnit, gfx::Filter aFilter)
 void
 EGLImageTextureSource::SetCompositor(Compositor* aCompositor)
 {
+  MOZ_ASSERT(aCompositor);
   mCompositor = static_cast<CompositorOGL*>(aCompositor);
 }
 
@@ -633,9 +643,11 @@ EGLImageTextureSource::GetTextureTransform()
 
 EGLImageTextureHost::EGLImageTextureHost(TextureFlags aFlags,
                                          EGLImage aImage,
+                                         EGLSync aSync,
                                          gfx::IntSize aSize)
   : TextureHost(aFlags)
   , mImage(aImage)
+  , mSync(aSync)
   , mSize(aSize)
   , mCompositor(nullptr)
 {
@@ -655,6 +667,11 @@ bool
 EGLImageTextureHost::Lock()
 {
   if (!mCompositor) {
+    return false;
+  }
+
+  EGLint status = sEGLLibrary.fClientWaitSync(EGL_DISPLAY(), mSync, 0, LOCAL_EGL_FOREVER);
+  if (status != LOCAL_EGL_CONDITION_SATISFIED) {
     return false;
   }
 
@@ -681,6 +698,7 @@ EGLImageTextureHost::Unlock()
 void
 EGLImageTextureHost::SetCompositor(Compositor* aCompositor)
 {
+  MOZ_ASSERT(aCompositor);
   CompositorOGL* glCompositor = static_cast<CompositorOGL*>(aCompositor);
   mCompositor = glCompositor;
   if (mTextureSource) {

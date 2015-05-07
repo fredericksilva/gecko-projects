@@ -8,25 +8,23 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
-#include <assert.h>
+
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
-
+#include <assert.h>
+#include "vp9/encoder/vp9_onyx_int.h"
+#include "vp9/encoder/vp9_tokenize.h"
 #include "vpx_mem/vpx_mem.h"
 
-#include "vp9/common/vp9_entropy.h"
 #include "vp9/common/vp9_pred_common.h"
 #include "vp9/common/vp9_seg_common.h"
-
-#include "vp9/encoder/vp9_cost.h"
-#include "vp9/encoder/vp9_encoder.h"
-#include "vp9/encoder/vp9_tokenize.h"
+#include "vp9/common/vp9_entropy.h"
 
 static TOKENVALUE dct_value_tokens[DCT_MAX_VALUE * 2];
 const TOKENVALUE *vp9_dct_value_tokens_ptr;
-static int16_t dct_value_cost[DCT_MAX_VALUE * 2];
-const int16_t *vp9_dct_value_cost_ptr;
+static int dct_value_cost[DCT_MAX_VALUE * 2];
+const int *vp9_dct_value_cost_ptr;
 
 // Array indices are identical to previously-existing CONTEXT_NODE indices
 const vp9_tree_index vp9_coef_tree[TREE_SIZE(ENTROPY_TOKENS)] = {
@@ -55,6 +53,15 @@ const vp9_tree_index vp9_coef_con_tree[TREE_SIZE(ENTROPY_TOKENS)] = {
   -CATEGORY5_TOKEN, -CATEGORY6_TOKEN   // 7 = CAT_FIVE
 };
 
+static const vp9_prob Pcat1[] = { 159};
+static const vp9_prob Pcat2[] = { 165, 145};
+static const vp9_prob Pcat3[] = { 173, 148, 140};
+static const vp9_prob Pcat4[] = { 176, 155, 140, 135};
+static const vp9_prob Pcat5[] = { 180, 157, 141, 134, 130};
+static const vp9_prob Pcat6[] = {
+  254, 254, 254, 252, 249, 243, 230, 196, 177, 153, 140, 133, 130, 129
+};
+
 static vp9_tree_index cat1[2], cat2[4], cat3[6], cat4[8], cat5[10], cat6[28];
 
 static void init_bit_tree(vp9_tree_index *p, int n) {
@@ -78,18 +85,18 @@ static void init_bit_trees() {
 }
 
 const vp9_extra_bit vp9_extra_bits[ENTROPY_TOKENS] = {
-  {0, 0, 0, 0},                              // ZERO_TOKEN
-  {0, 0, 0, 1},                              // ONE_TOKEN
-  {0, 0, 0, 2},                              // TWO_TOKEN
-  {0, 0, 0, 3},                              // THREE_TOKEN
-  {0, 0, 0, 4},                              // FOUR_TOKEN
-  {cat1, vp9_cat1_prob, 1,  CAT1_MIN_VAL},   // CATEGORY1_TOKEN
-  {cat2, vp9_cat2_prob, 2,  CAT2_MIN_VAL},   // CATEGORY2_TOKEN
-  {cat3, vp9_cat3_prob, 3,  CAT3_MIN_VAL},   // CATEGORY3_TOKEN
-  {cat4, vp9_cat4_prob, 4,  CAT4_MIN_VAL},   // CATEGORY4_TOKEN
-  {cat5, vp9_cat5_prob, 5,  CAT5_MIN_VAL},   // CATEGORY5_TOKEN
-  {cat6, vp9_cat6_prob, 14, CAT6_MIN_VAL},   // CATEGORY6_TOKEN
-  {0, 0, 0, 0}                               // EOB_TOKEN
+  {0, 0, 0, 0},           // ZERO_TOKEN
+  {0, 0, 0, 1},           // ONE_TOKEN
+  {0, 0, 0, 2},           // TWO_TOKEN
+  {0, 0, 0, 3},           // THREE_TOKEN
+  {0, 0, 0, 4},           // FOUR_TOKEN
+  {cat1, Pcat1, 1, 5},    // CATEGORY1_TOKEN
+  {cat2, Pcat2, 2, 7},    // CATEGORY2_TOKEN
+  {cat3, Pcat3, 3, 11},   // CATEGORY3_TOKEN
+  {cat4, Pcat4, 4, 19},   // CATEGORY4_TOKEN
+  {cat5, Pcat5, 5, 35},   // CATEGORY5_TOKEN
+  {cat6, Pcat6, 14, 67},  // CATEGORY6_TOKEN
+  {0, 0, 0, 0}            // EOB_TOKEN
 };
 
 struct vp9_token vp9_coef_encodings[ENTROPY_TOKENS];
@@ -99,7 +106,7 @@ void vp9_coef_tree_initialize() {
   vp9_tokens_from_tree(vp9_coef_encodings, vp9_coef_tree);
 }
 
-void vp9_tokenize_initialize() {
+static void fill_value_tokens() {
   TOKENVALUE *const t = dct_value_tokens + DCT_MAX_VALUE;
   const vp9_extra_bit *const e = vp9_extra_bits;
 
@@ -153,6 +160,7 @@ struct tokenize_b_args {
   VP9_COMP *cpi;
   MACROBLOCKD *xd;
   TOKENEXTRA **tp;
+  uint8_t *token_cache;
 };
 
 static void set_entropy_context_b(int plane, int block, BLOCK_SIZE plane_bsize,
@@ -191,28 +199,22 @@ static INLINE void add_token_no_extra(TOKENEXTRA **t,
   ++counts[token];
 }
 
-static INLINE int get_tx_eob(const struct segmentation *seg, int segment_id,
-                             TX_SIZE tx_size) {
-  const int eob_max = 16 << (tx_size << 1);
-  return vp9_segfeature_active(seg, segment_id, SEG_LVL_SKIP) ? 0 : eob_max;
-}
-
 static void tokenize_b(int plane, int block, BLOCK_SIZE plane_bsize,
                        TX_SIZE tx_size, void *arg) {
   struct tokenize_b_args* const args = arg;
   VP9_COMP *cpi = args->cpi;
   MACROBLOCKD *xd = args->xd;
   TOKENEXTRA **tp = args->tp;
-  uint8_t token_cache[32 * 32];
+  uint8_t *token_cache = args->token_cache;
   struct macroblock_plane *p = &cpi->mb.plane[plane];
   struct macroblockd_plane *pd = &xd->plane[plane];
-  MB_MODE_INFO *mbmi = &xd->mi[0]->mbmi;
+  MB_MODE_INFO *mbmi = &xd->mi_8x8[0]->mbmi;
   int pt; /* near block/prev token context index */
   int c;
   TOKENEXTRA *t = *tp;        /* store tokens starting here */
   int eob = p->eobs[block];
   const PLANE_TYPE type = pd->plane_type;
-  const int16_t *qcoeff = BLOCK_OFFSET(p->qcoeff, block);
+  const int16_t *qcoeff_ptr = BLOCK_OFFSET(p->qcoeff, block);
   const int segment_id = mbmi->segment_id;
   const int16_t *scan, *nb;
   const scan_order *so;
@@ -223,6 +225,7 @@ static void tokenize_b(int plane, int block, BLOCK_SIZE plane_bsize,
       cpi->common.fc.coef_probs[tx_size][type][ref];
   unsigned int (*const eob_branch)[COEFF_CONTEXTS] =
       cpi->common.counts.eob_branch[tx_size][type][ref];
+
   const uint8_t *const band = get_band_translate(tx_size);
   const int seg_eob = get_tx_eob(&cpi->common.seg, segment_id, tx_size);
 
@@ -238,7 +241,7 @@ static void tokenize_b(int plane, int block, BLOCK_SIZE plane_bsize,
   while (c < eob) {
     int v = 0;
     int skip_eob = 0;
-    v = qcoeff[scan[c]];
+    v = qcoeff_ptr[scan[c]];
 
     while (!v) {
       add_token_no_extra(&t, coef_probs[band[c]][pt], ZERO_TOKEN, skip_eob,
@@ -249,13 +252,12 @@ static void tokenize_b(int plane, int block, BLOCK_SIZE plane_bsize,
       token_cache[scan[c]] = 0;
       ++c;
       pt = get_coef_context(nb, token_cache, c);
-      v = qcoeff[scan[c]];
+      v = qcoeff_ptr[scan[c]];
     }
 
     add_token(&t, coef_probs[band[c]][pt],
               vp9_dct_value_tokens_ptr[v].extra,
-              (uint8_t)vp9_dct_value_tokens_ptr[v].token,
-              (uint8_t)skip_eob,
+              vp9_dct_value_tokens_ptr[v].token, skip_eob,
               counts[band[c]][pt]);
     eob_branch[band[c]][pt] += !skip_eob;
 
@@ -279,17 +281,21 @@ struct is_skippable_args {
   MACROBLOCK *x;
   int *skippable;
 };
+
 static void is_skippable(int plane, int block,
                          BLOCK_SIZE plane_bsize, TX_SIZE tx_size,
                          void *argv) {
   struct is_skippable_args *args = argv;
-  (void)plane_bsize;
-  (void)tx_size;
   args->skippable[0] &= (!args->x->plane[plane].eobs[block]);
 }
 
-// TODO(yaowu): rewrite and optimize this function to remove the usage of
-//              vp9_foreach_transform_block() and simplify is_skippable().
+static int sb_is_skippable(MACROBLOCK *x, BLOCK_SIZE bsize) {
+  int result = 1;
+  struct is_skippable_args args = {x, &result};
+  vp9_foreach_transformed_block(&x->e_mbd, bsize, is_skippable, &args);
+  return result;
+}
+
 int vp9_is_skippable_in_plane(MACROBLOCK *x, BLOCK_SIZE bsize, int plane) {
   int result = 1;
   struct is_skippable_args args = {x, &result};
@@ -302,12 +308,12 @@ void vp9_tokenize_sb(VP9_COMP *cpi, TOKENEXTRA **t, int dry_run,
                      BLOCK_SIZE bsize) {
   VP9_COMMON *const cm = &cpi->common;
   MACROBLOCKD *const xd = &cpi->mb.e_mbd;
-  MB_MODE_INFO *const mbmi = &xd->mi[0]->mbmi;
+  MB_MODE_INFO *const mbmi = &xd->mi_8x8[0]->mbmi;
   TOKENEXTRA *t_backup = *t;
   const int ctx = vp9_get_skip_context(xd);
   const int skip_inc = !vp9_segfeature_active(&cm->seg, mbmi->segment_id,
                                               SEG_LVL_SKIP);
-  struct tokenize_b_args arg = {cpi, xd, t};
+  struct tokenize_b_args arg = {cpi, xd, t, cpi->mb.token_cache};
   if (mbmi->skip) {
     if (!dry_run)
       cm->counts.skip[ctx][1] += skip_inc;
@@ -324,4 +330,8 @@ void vp9_tokenize_sb(VP9_COMP *cpi, TOKENEXTRA **t, int dry_run,
     vp9_foreach_transformed_block(xd, bsize, set_entropy_context_b, &arg);
     *t = t_backup;
   }
+}
+
+void vp9_tokenize_initialize() {
+  fill_value_tokens();
 }

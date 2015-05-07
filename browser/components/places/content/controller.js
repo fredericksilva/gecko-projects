@@ -7,6 +7,8 @@ XPCOMUtils.defineLazyModuleGetter(this, "ForgetAboutSite",
                                   "resource://gre/modules/ForgetAboutSite.jsm");
 XPCOMUtils.defineLazyModuleGetter(this, "NetUtil",
                                   "resource://gre/modules/NetUtil.jsm");
+XPCOMUtils.defineLazyModuleGetter(this, "PrivateBrowsingUtils",
+                                  "resource://gre/modules/PrivateBrowsingUtils.jsm");
 
 // XXXmano: we should move most/all of these constants to PlacesUtils
 const ORGANIZER_ROOT_BOOKMARKS = "place:folder=BOOKMARKS_MENU&excludeItems=1&queryType=1";
@@ -127,15 +129,6 @@ PlacesController.prototype = {
   },
 
   isCommandEnabled: function PC_isCommandEnabled(aCommand) {
-    if (PlacesUIUtils.useAsyncTransactions) {
-      switch (aCommand) {
-      case "placesCmd_new:folder":
-      case "placesCmd_new:bookmark":
-      case "placesCmd_createBookmark":
-        return false;
-      }
-    }
-
     switch (aCommand) {
     case "cmd_undo":
       if (!PlacesUIUtils.useAsyncTransactions)
@@ -178,6 +171,7 @@ PlacesController.prototype = {
       return false;
     case "placesCmd_open":
     case "placesCmd_open:window":
+    case "placesCmd_open:privatewindow":
     case "placesCmd_open:tab":
       var selectedNode = this._view.selectedNode;
       return selectedNode && PlacesUtils.nodeIsURI(selectedNode);
@@ -263,6 +257,9 @@ PlacesController.prototype = {
     case "placesCmd_open:window":
       PlacesUIUtils.openNodeIn(this._view.selectedNode, "window", this._view);
       break;
+    case "placesCmd_open:privatewindow":
+      PlacesUIUtils.openNodeIn(this._view.selectedNode, "window", this._view, true);
+      break;
     case "placesCmd_open:tab":
       PlacesUIUtils.openNodeIn(this._view.selectedNode, "tab", this._view);
       break;
@@ -273,7 +270,7 @@ PlacesController.prototype = {
       this.newItem("bookmark");
       break;
     case "placesCmd_new:separator":
-      this.newSeparator().then(null, Components.utils.reportError);
+      this.newSeparator().catch(Cu.reportError);
       break;
     case "placesCmd_show:info":
       this.showBookmarkPropertiesForSelection();
@@ -601,7 +598,10 @@ PlacesController.prototype = {
         // We allow pasting into tag containers, so special case that.
         var hideIfNoIP = item.getAttribute("hideifnoinsertionpoint") == "true" &&
                          noIp && !(ip && ip.isTag && item.id == "placesContext_paste");
-        var shouldHideItem = hideIfNoIP || !this._shouldShowMenuItem(item, metadata);
+        var hideIfPrivate = item.getAttribute("hideifprivatebrowsing") == "true" &&
+                            PrivateBrowsingUtils.isWindowPrivate(window);
+        var shouldHideItem = hideIfNoIP || hideIfPrivate ||
+                             !this._shouldShowMenuItem(item, metadata);
         item.hidden = item.disabled = shouldHideItem;
 
         if (!item.hidden) {
@@ -657,27 +657,13 @@ PlacesController.prototype = {
   /**
    * Opens the bookmark properties for the selected URI Node.
    */
-  showBookmarkPropertiesForSelection:
-  function PC_showBookmarkPropertiesForSelection() {
-    var node = this._view.selectedNode;
+  showBookmarkPropertiesForSelection() {
+    let node = this._view.selectedNode;
     if (!node)
       return;
 
-    var itemType = PlacesUtils.nodeIsFolder(node) ||
-                   PlacesUtils.nodeIsTagQuery(node) ? "folder" : "bookmark";
-    var concreteId = PlacesUtils.getConcreteItemId(node);
-    var isRootItem = PlacesUtils.isRootItem(concreteId);
-    var itemId = node.itemId;
-    if (isRootItem || PlacesUtils.nodeIsTagQuery(node)) {
-      // If this is a root or the Tags query we use the concrete itemId to catch
-      // the correct title for the node.
-      itemId = concreteId;
-    }
-
     PlacesUIUtils.showBookmarkDialog({ action: "edit"
-                                     , type: itemType
-                                     , itemId: itemId
-                                     , readOnly: isRootItem
+                                     , node
                                      , hiddenRows: [ "folderPicker" ]
                                      }, window.top);
   },
@@ -1335,8 +1321,8 @@ PlacesController.prototype = {
     }
     else {
       let transactions = [];
+      let insertionIndex = ip.index;
       for (let i = 0; i < items.length; ++i) {
-        let insertionIndex = ip.index + i;
         if (ip.isTag) {
           // Pasting into a tag container means tagging the item, regardless of
           // the requested action.
@@ -1690,6 +1676,7 @@ function goUpdatePlacesCommands() {
 
   updatePlacesCommand("placesCmd_open");
   updatePlacesCommand("placesCmd_open:window");
+  updatePlacesCommand("placesCmd_open:privatewindow");
   updatePlacesCommand("placesCmd_open:tab");
   updatePlacesCommand("placesCmd_new:folder");
   updatePlacesCommand("placesCmd_new:bookmark");

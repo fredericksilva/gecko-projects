@@ -53,8 +53,10 @@
 #include "client/linux/crash_generation/client_info.h"
 #include "client/linux/crash_generation/crash_generation_server.h"
 #include "client/linux/handler/exception_handler.h"
+#include "common/linux/eintr_wrapper.h"
 #include <fcntl.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #elif defined(XP_SOLARIS)
 #include "client/solaris/handler/exception_handler.h"
@@ -158,7 +160,7 @@ static const XP_CHAR dumpFileExtension[] = XP_TEXT(".dmp");
 static const XP_CHAR extraFileExtension[] = XP_TEXT(".extra");
 static const XP_CHAR memoryReportExtension[] = XP_TEXT(".memory.json.gz");
 
-static const char kCrashMainID[] = "crash.main.1\n";
+static const char kCrashMainID[] = "crash.main.2\n";
 
 static google_breakpad::ExceptionHandler* gExceptionHandler = nullptr;
 
@@ -406,7 +408,7 @@ JitExceptionHandler(void *exceptionRecord, void *context)
  * This size is bigger than xul.dll plus some extra for MinidumpWriteDump
  * allocations.
  */
-static const SIZE_T kReserveSize = 0x2800000; // 40 MB
+static const SIZE_T kReserveSize = 0x4000000; // 64 MB
 static void* gBreakpadReservedVM;
 #endif
 
@@ -710,6 +712,13 @@ bool MinidumpCallback(
       WriteFile(hFile, crashTimeString, crashTimeStringLen, &nBytes, nullptr);
       WriteFile(hFile, "\n", 1, &nBytes, nullptr);
       WriteFile(hFile, id_ascii, strlen(id_ascii), &nBytes, nullptr);
+      if (oomAllocationSizeBufferLen) {
+        WriteFile(hFile, "\n", 1, &nBytes, nullptr);
+        WriteFile(hFile, kOOMAllocationSizeParameter,
+                  kOOMAllocationSizeParameterLen, &nBytes, nullptr);
+        WriteFile(hFile, oomAllocationSizeBuffer, oomAllocationSizeBufferLen,
+                  &nBytes, nullptr);
+      }
       CloseHandle(hFile);
     }
 #elif defined(XP_UNIX)
@@ -721,6 +730,13 @@ bool MinidumpCallback(
       unused << sys_write(fd, crashTimeString, crashTimeStringLen);
       unused << sys_write(fd, "\n", 1);
       unused << sys_write(fd, id_ascii, strlen(id_ascii));
+      if (oomAllocationSizeBufferLen) {
+        unused << sys_write(fd, "\n", 1);
+        unused << sys_write(fd, kOOMAllocationSizeParameter,
+                            kOOMAllocationSizeParameterLen);
+        unused << sys_write(fd, oomAllocationSizeBuffer,
+                            oomAllocationSizeBufferLen);
+      }
       sys_close(fd);
     }
 #endif
@@ -956,6 +972,13 @@ bool MinidumpCallback(
     }
 #endif
     _exit(1);
+#ifdef MOZ_WIDGET_ANDROID
+  } else {
+    // We need to wait on the 'am start' command above to finish, otherwise everything will
+    // be killed by the ActivityManager as soon as the signal handler exits
+    int status;
+    unused << HANDLE_EINTR(sys_waitpid(pid, &status, __WALL));
+#endif
   }
 #endif // XP_MACOSX
 #endif // XP_UNIX
@@ -1066,12 +1089,7 @@ nsresult SetExceptionHandler(nsIFile* aXREDirectory,
   doReport = false;
   headlessClient = true;
 #elif defined(XP_WIN)
-  if (XRE_GetWindowsEnvironment() == WindowsEnvironmentType_Desktop) {
-    doReport = ShouldReport();
-  } else {
-    doReport = false;
-    headlessClient = true;
-  }
+  doReport = ShouldReport();
 #else
   // this environment variable prevents us from launching
   // the crash reporter client
@@ -1627,22 +1645,22 @@ nsresult UnsetExceptionHandler()
   lastRunCrashID = nullptr;
 
   if (pendingDirectory) {
-    NS_Free(pendingDirectory);
+    free(pendingDirectory);
     pendingDirectory = nullptr;
   }
 
   if (crashReporterPath) {
-    NS_Free(crashReporterPath);
+    free(crashReporterPath);
     crashReporterPath = nullptr;
   }
 
   if (eventsDirectory) {
-    NS_Free(eventsDirectory);
+    free(eventsDirectory);
     eventsDirectory = nullptr;
   }
 
   if (memoryReportPath) {
-    NS_Free(memoryReportPath);
+    free(memoryReportPath);
     memoryReportPath = nullptr;
   }
 
@@ -2227,7 +2245,7 @@ SetCrashEventsDir(nsIFile* aDir)
   }
 
   if (eventsDirectory) {
-    NS_Free(eventsDirectory);
+    free(eventsDirectory);
   }
 
 #ifdef XP_WIN
@@ -2255,7 +2273,7 @@ SetCrashEventsDir(nsIFile* aDir)
   PR_SetEnv(eventsEnv);
 
   if (oldEventsEnv) {
-    NS_Free(oldEventsEnv);
+    free(oldEventsEnv);
   }
 #endif
 }
@@ -2705,8 +2723,8 @@ OOPInit()
 
   MOZ_ASSERT(NS_IsMainThread());
 
-  NS_ABORT_IF_FALSE(gExceptionHandler != nullptr,
-                    "attempt to initialize OOP crash reporter before in-process crashreporter!");
+  MOZ_ASSERT(gExceptionHandler != nullptr,
+             "attempt to initialize OOP crash reporter before in-process crashreporter!");
 
 #if defined(XP_WIN)
   childCrashNotifyPipe =
@@ -2950,7 +2968,7 @@ SetRemoteExceptionHandler(const nsACString& crashPipe)
   if (crashPipe.Equals(kNullNotifyPipe))
     return true;
 
-  NS_ABORT_IF_FALSE(!gExceptionHandler, "crash client already init'd");
+  MOZ_ASSERT(!gExceptionHandler, "crash client already init'd");
 
   gExceptionHandler = new google_breakpad::
     ExceptionHandler(L"",
@@ -2994,7 +3012,7 @@ CreateNotificationPipeForChild(int* childCrashFd, int* childCrashRemapFd)
 bool
 SetRemoteExceptionHandler()
 {
-  NS_ABORT_IF_FALSE(!gExceptionHandler, "crash client already init'd");
+  MOZ_ASSERT(!gExceptionHandler, "crash client already init'd");
 
 #ifndef XP_LINUX
   xpstring path = "";
@@ -3031,7 +3049,7 @@ SetRemoteExceptionHandler(const nsACString& crashPipe)
   if (crashPipe.Equals(kNullNotifyPipe))
     return true;
 
-  NS_ABORT_IF_FALSE(!gExceptionHandler, "crash client already init'd");
+  MOZ_ASSERT(!gExceptionHandler, "crash client already init'd");
 
   gExceptionHandler = new google_breakpad::
     ExceptionHandler("",

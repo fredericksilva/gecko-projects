@@ -1,4 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -31,6 +32,7 @@
 #include "nsDOMCID.h"
 #include "nsError.h"
 #include "nsGkAtoms.h"
+#include "nsHtml5Atoms.h"
 #include "nsIContent.h"
 #include "nsIContentSecurityPolicy.h"
 #include "nsIDocument.h"
@@ -378,6 +380,10 @@ EventListenerManager::AddEventListenerInternal(
   if (aTypeAtom && mTarget) {
     mTarget->EventListenerAdded(aTypeAtom);
   }
+
+  if (mIsMainThreadELM && mTarget) {
+    EventListenerService::NotifyAboutMainThreadListenerChange(mTarget);
+  }
 }
 
 bool
@@ -494,6 +500,9 @@ EventListenerManager::RemoveEventListenerInternal(
         mNoListenerForEventAtom = nullptr;
         if (mTarget && aUserType) {
           mTarget->EventListenerRemoved(aUserType);
+        }
+        if (mIsMainThreadELM && mTarget) {
+          EventListenerService::NotifyAboutMainThreadListenerChange(mTarget);
         }
 
         if (!deviceType
@@ -628,6 +637,9 @@ EventListenerManager::SetEventHandlerInternal(
       mTarget->EventListenerRemoved(aName);
       mTarget->EventListenerAdded(aName);
     }
+    if (mIsMainThreadELM && mTarget) {
+      EventListenerService::NotifyAboutMainThreadListenerChange(mTarget);
+    }
   }
 
   // Set flag to indicate possible need for compilation later
@@ -754,6 +766,9 @@ EventListenerManager::RemoveEventHandler(nsIAtom* aName,
     mNoListenerForEventAtom = nullptr;
     if (mTarget && aName) {
       mTarget->EventListenerRemoved(aName);
+    }
+    if (mIsMainThreadELM && mTarget) {
+      EventListenerService::NotifyAboutMainThreadListenerChange(mTarget);
     }
   }
 }
@@ -900,7 +915,7 @@ EventListenerManager::CompileEventHandlerInternal(Listener* aListener,
   NS_ENSURE_TRUE(jsStr, NS_ERROR_OUT_OF_MEMORY);
 
   // Get the reflector for |aElement|, so that we can pass to setElement.
-  if (NS_WARN_IF(!WrapNewBindingObject(cx, target, aElement, &v))) {
+  if (NS_WARN_IF(!GetOrCreateDOMReflector(cx, target, aElement, &v))) {
     return NS_ERROR_FAILURE;
   }
   JS::CompileOptions options(cx);
@@ -959,7 +974,7 @@ EventListenerManager::HandleEventSubType(Listener* aListener,
       ErrorResult rv;
       listenerHolder.GetWebIDLCallback()->
         HandleEvent(aCurrentTarget, *(aDOMEvent->InternalDOMEvent()), rv);
-      result = rv.ErrorCode();
+      result = rv.StealNSResult();
     } else {
       result = listenerHolder.GetXPCOMCallback()->HandleEvent(aDOMEvent);
     }
@@ -1011,6 +1026,28 @@ EventListenerManager::GetDocShellForTarget()
 
   return docShell;
 }
+
+class EventTimelineMarker : public TimelineMarker
+{
+public:
+  EventTimelineMarker(nsDocShell* aDocShell, TracingMetadata aMetaData,
+                      uint16_t aPhase, const nsAString& aCause)
+    : TimelineMarker(aDocShell, "DOMEvent", aMetaData, aCause)
+    , mPhase(aPhase)
+  {
+  }
+
+  virtual void AddDetails(mozilla::dom::ProfileTimelineMarker& aMarker) override
+  {
+    if (GetMetaData() == TRACING_INTERVAL_START) {
+      aMarker.mType.Construct(GetCause());
+      aMarker.mEventPhase.Construct(mPhase);
+    }
+  }
+
+private:
+  uint16_t mPhase;
+};
 
 /**
 * Causes a check for event listeners and processing by them if they exist.
@@ -1066,13 +1103,24 @@ EventListenerManager::HandleEventInternal(nsPresContext* aPresContext,
           // Maybe add a marker to the docshell's timeline, but only
           // bother with all the logic if some docshell is recording.
           nsCOMPtr<nsIDocShell> docShell;
+          bool isTimelineRecording = false;
           if (mIsMainThreadELM &&
               nsDocShell::gProfileTimelineRecordingsCount > 0 &&
               listener->mListenerType != Listener::eNativeListener) {
             docShell = GetDocShellForTarget();
             if (docShell) {
+              docShell->GetRecordProfileTimelineMarkers(&isTimelineRecording);
+            }
+            if (isTimelineRecording) {
               nsDocShell* ds = static_cast<nsDocShell*>(docShell.get());
-              ds->AddProfileTimelineMarker("DOMEvent", TRACING_INTERVAL_START);
+              nsAutoString typeStr;
+              (*aDOMEvent)->GetType(typeStr);
+              uint16_t phase;
+              (*aDOMEvent)->GetEventPhase(&phase);
+              mozilla::UniquePtr<TimelineMarker> marker =
+                MakeUnique<EventTimelineMarker>(ds, TRACING_INTERVAL_START,
+                                                phase, typeStr);
+              ds->AddProfileTimelineMarker(Move(marker));
             }
           }
 
@@ -1081,7 +1129,7 @@ EventListenerManager::HandleEventInternal(nsPresContext* aPresContext,
             aEvent->mFlags.mExceptionHasBeenRisen = true;
           }
 
-          if (docShell) {
+          if (isTimelineRecording) {
             nsDocShell* ds = static_cast<nsDocShell*>(docShell.get());
             ds->AddProfileTimelineMarker("DOMEvent", TRACING_INTERVAL_END);
           }
@@ -1202,8 +1250,19 @@ EventListenerManager::MutationListenerBits()
 bool
 EventListenerManager::HasListenersFor(const nsAString& aEventName)
 {
-  nsCOMPtr<nsIAtom> atom = do_GetAtom(NS_LITERAL_STRING("on") + aEventName);
-  return HasListenersFor(atom);
+  if (mIsMainThreadELM) {
+    nsCOMPtr<nsIAtom> atom = do_GetAtom(NS_LITERAL_STRING("on") + aEventName);
+    return HasListenersFor(atom);
+  }
+
+  uint32_t count = mListeners.Length();
+  for (uint32_t i = 0; i < count; ++i) {
+    Listener* listener = &mListeners.ElementAt(i);
+    if (listener->mTypeString == aEventName) {
+      return true;
+    }
+  }
+  return false;
 }
 
 bool

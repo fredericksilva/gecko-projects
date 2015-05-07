@@ -181,7 +181,7 @@ nsSVGRenderingObserver::ContentRemoved(nsIDocument *aDocument,
 nsSVGIDRenderingObserver::nsSVGIDRenderingObserver(nsIURI* aURI,
                                                    nsIContent* aObservingContent,
                                                    bool aReferenceImage)
-  : mElement(MOZ_THIS_IN_INITIALIZER_LIST())
+  : mElement(this)
 {
   // Start watching the target element
   mElement.Reset(aObservingContent, aURI, true, aReferenceImage);
@@ -367,7 +367,7 @@ bool
 nsSVGTextPathProperty::TargetIsValid()
 {
   Element* target = GetTarget();
-  return target && target->IsSVG(nsGkAtoms::path);
+  return target && target->IsSVGElement(nsGkAtoms::path);
 }
 
 void
@@ -491,9 +491,9 @@ nsSVGMarkerProperty *
 nsSVGEffects::GetMarkerProperty(nsIURI *aURI, nsIFrame *aFrame,
                                 const FramePropertyDescriptor *aProp)
 {
-  NS_ABORT_IF_FALSE(aFrame->GetType() == nsGkAtoms::svgPathGeometryFrame &&
-                      static_cast<nsSVGPathGeometryElement*>(aFrame->GetContent())->IsMarkable(),
-                    "Bad frame");
+  MOZ_ASSERT(aFrame->GetType() == nsGkAtoms::svgPathGeometryFrame &&
+               static_cast<nsSVGPathGeometryElement*>(aFrame->GetContent())->IsMarkable(),
+             "Bad frame");
   return static_cast<nsSVGMarkerProperty*>(
           GetEffectProperty(aURI, aFrame, aProp, CreateMarkerProperty));
 }
@@ -778,6 +778,9 @@ nsSVGEffects::InvalidateRenderingObservers(nsIFrame *aFrame)
   if (!aFrame->GetContent()->IsElement())
     return;
 
+  // If the rendering has changed, the bounds may well have changed too:
+  aFrame->Properties().Delete(nsSVGUtils::ObjectBoundingBoxProperty());
+
   nsSVGRenderingObserverList *observerList =
     GetObserverList(aFrame->GetContent()->AsElement());
   if (observerList) {
@@ -802,6 +805,12 @@ nsSVGEffects::InvalidateRenderingObservers(nsIFrame *aFrame)
 void
 nsSVGEffects::InvalidateDirectRenderingObservers(Element *aElement, uint32_t aFlags /* = 0 */)
 {
+  nsIFrame* frame = aElement->GetPrimaryFrame();
+  if (frame) {
+    // If the rendering has changed, the bounds may well have changed too:
+    frame->Properties().Delete(nsSVGUtils::ObjectBoundingBoxProperty());
+  }
+
   if (aElement->HasRenderingObservers()) {
     nsSVGRenderingObserverList *observerList = GetObserverList(aElement);
     if (observerList) {

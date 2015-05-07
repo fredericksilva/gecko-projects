@@ -13,11 +13,9 @@ function test()
 {
   let hud;
 
-  addTab(TEST_URI);
-  browser.addEventListener("load", function onLoad() {
-    browser.removeEventListener("load", onLoad, true);
+  loadTab(TEST_URI).then(() => {
     HUDService.toggleBrowserConsole().then(browserConsoleOpened);
-  }, true);
+  });
 
   function browserConsoleOpened(aHud)
   {
@@ -54,7 +52,7 @@ function test()
   {
     let viewSource = hud.viewSource;
     let viewSourceCalled = false;
-    hud.viewSource = () => viewSourceCalled = true;
+    hud.viewSourceInDebugger = () => viewSourceCalled = true;
 
     for (let result of results) {
       viewSourceCalled = false;
@@ -69,7 +67,7 @@ function test()
       ok(viewSourceCalled, "view source opened");
     }
 
-    hud.viewSource = viewSource;
+    hud.viewSourceInDebugger = viewSource;
     finishTest();
   }
 }

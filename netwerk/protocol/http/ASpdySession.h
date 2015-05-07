@@ -15,8 +15,6 @@ class nsISocketTransport;
 
 namespace mozilla { namespace net {
 
-class nsHttpConnectionInfo;
-
 class ASpdySession : public nsAHttpTransaction
 {
 public:
@@ -33,9 +31,18 @@ public:
 
   static ASpdySession *NewSpdySession(uint32_t version, nsISocketTransport *);
 
+  // MaybeReTunnel() is called by the connection manager when it cannot
+  // dispatch a tunneled transaction. That might be because the tunnels it
+  // expects to see are dead (and we may or may not be able to make more),
+  // or it might just need to wait longer for one of them to become free.
+  //
+  // return true if the session takes back ownership of the transaction from
+  // the connection manager.
+  virtual bool MaybeReTunnel(nsAHttpTransaction *) = 0;
+
   virtual void PrintDiagnostics (nsCString &log) = 0;
 
-  bool ResponseTimeoutEnabled() const MOZ_OVERRIDE MOZ_FINAL {
+  bool ResponseTimeoutEnabled() const override final {
     return true;
   }
 
@@ -50,12 +57,28 @@ public:
   // scenarios.
   const static uint32_t kInitialRwin = 256 * 1024 * 1024;
 
+  const static uint32_t kDefaultMaxConcurrent = 100;
+
+  // soft errors are errors that terminate a stream without terminating the
+  // connection. In general non-network errors are stream errors as well
+  // as network specific items like cancels.
   bool SoftStreamError(nsresult code)
   {
-    if (NS_SUCCEEDED(code)) {
+    if (NS_SUCCEEDED(code) || code == NS_BASE_STREAM_WOULD_BLOCK) {
       return false;
     }
 
+    // this could go either way, but because there are network instances of
+    // it being a hard error we should consider it hard.
+    if (code == NS_ERROR_FAILURE) {
+      return false;
+    }
+
+    if (NS_ERROR_GET_MODULE(code) != NS_ERROR_MODULE_NETWORK) {
+      return true;
+    }
+
+    // these are network specific soft errors
     return (code == NS_BASE_STREAM_CLOSED || code == NS_BINDING_FAILED ||
             code == NS_BINDING_ABORTED || code == NS_BINDING_REDIRECTED ||
             code == NS_ERROR_INVALID_CONTENT_ENCODING ||

@@ -1,5 +1,5 @@
 /* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=2 et sw=2 tw=80: */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -354,7 +354,7 @@ public:
     }
 
     File*
-    operator->() const
+    operator->() const MOZ_NO_ADDREF_RELEASE_ON_RETURN
     {
       MOZ_ASSERT(mFile);
       return mFile;
@@ -501,7 +501,6 @@ public:
     mState(eInitial),
     mResult(JS::AsmJSCache_InternalError),
     mIsApp(false),
-    mHasUnlimStoragePerm(false),
     mEnforcingQuota(true)
   {
     MOZ_ASSERT(IsMainProcess());
@@ -675,7 +674,6 @@ private:
   JS::AsmJSCacheResult mResult;
 
   bool mIsApp;
-  bool mHasUnlimStoragePerm;
   bool mEnforcingQuota;
 };
 
@@ -700,7 +698,7 @@ MainProcessRunnable::InitPersistenceType()
 
     if (mWriteParams.mInstalled &&
         !QuotaManager::IsQuotaEnforced(quota::PERSISTENCE_TYPE_PERSISTENT,
-                                       mOrigin, mIsApp, mHasUnlimStoragePerm)) {
+                                       mOrigin, mIsApp)) {
       mPersistence = quota::PERSISTENCE_TYPE_PERSISTENT;
     } else {
       mPersistence = quota::PERSISTENCE_TYPE_TEMPORARY;
@@ -735,28 +733,13 @@ MainProcessRunnable::InitOnMainThread()
   NS_ENSURE_STATE(qm);
 
   nsresult rv =
-    QuotaManager::GetInfoFromPrincipal(mPrincipal,
-                                       quota::PERSISTENCE_TYPE_INVALID,
-                                       &mGroup, &mOrigin, &mIsApp,
-                                       &mHasUnlimStoragePerm);
+    QuotaManager::GetInfoFromPrincipal(mPrincipal, &mGroup, &mOrigin, &mIsApp);
   NS_ENSURE_SUCCESS(rv, rv);
-
-  // XXX Don't use mGroup yet! We might need to update it right after we
-  //     initialize persistence type.
 
   InitPersistenceType();
 
-  // XXX Since we couldn't pass persistence type to GetInfoFromPrincipal(),
-  //     we need to do this manually.
-  //     This hack is only temporary, it will go away once we have regular
-  //     metadata files for persistent storge.
-  if (mPersistence == quota::PERSISTENCE_TYPE_PERSISTENT) {
-    mGroup = mOrigin;
-  }
-
   mEnforcingQuota =
-    QuotaManager::IsQuotaEnforced(mPersistence, mOrigin, mIsApp,
-                                  mHasUnlimStoragePerm);
+    QuotaManager::IsQuotaEnforced(mPersistence, mOrigin, mIsApp);
 
   QuotaManager::GetStorageId(mPersistence, mOrigin, quota::Client::ASMJS,
                              NS_LITERAL_STRING("asmjs"), mStorageId);
@@ -775,9 +758,11 @@ MainProcessRunnable::ReadMetadata()
 
   nsresult rv =
     qm->EnsureOriginIsInitialized(mPersistence, mGroup, mOrigin, mIsApp,
-                                  mHasUnlimStoragePerm,
                                   getter_AddRefs(mDirectory));
-  NS_ENSURE_SUCCESS(rv, rv);
+  if (NS_WARN_IF(NS_FAILED(rv))) {
+    mResult = JS::AsmJSCache_StorageInitFailure;
+    return rv;
+  }
 
   rv = mDirectory->Append(NS_LITERAL_STRING(ASMJSCACHE_DIRECTORY_NAME));
   NS_ENSURE_SUCCESS(rv, rv);
@@ -851,13 +836,15 @@ MainProcessRunnable::OpenCacheFileForWrite()
     mQuotaObject = qm->GetQuotaObject(mPersistence, mGroup, mOrigin, file);
     NS_ENSURE_STATE(mQuotaObject);
 
-    if (!mQuotaObject->MaybeAllocateMoreSpace(0, mWriteParams.mSize)) {
+    if (!mQuotaObject->MaybeUpdateSize(mWriteParams.mSize,
+                                       /* aTruncate */ false)) {
       // If the request fails, it might be because mOrigin is using too much
-      // space (MaybeAllocateMoreSpace will not evict our own origin since it is
+      // space (MaybeUpdateSize will not evict our own origin since it is
       // active). Try to make some space by evicting LRU entries until there is
       // enough space.
       EvictEntries(mDirectory, mGroup, mOrigin, mWriteParams.mSize, mMetadata);
-      if (!mQuotaObject->MaybeAllocateMoreSpace(0, mWriteParams.mSize)) {
+      if (!mQuotaObject->MaybeUpdateSize(mWriteParams.mSize,
+                                         /* aTruncate */ false)) {
         mResult = JS::AsmJSCache_QuotaExceeded;
         return NS_ERROR_FAILURE;
       }
@@ -1017,7 +1004,12 @@ MainProcessRunnable::Run()
     case eFailedToReadMetadata: {
       MOZ_ASSERT(NS_IsMainThread());
 
-      CacheMiss();
+      if (mOpenMode == eOpenForRead) {
+        CacheMiss();
+        return NS_OK;
+      }
+
+      Fail();
       return NS_OK;
     }
 
@@ -1125,8 +1117,8 @@ FindHashMatch(const Metadata& aMetadata, const ReadParams& aReadParams,
 }
 
 // A runnable that executes for a cache access originating in the main process.
-class SingleProcessRunnable MOZ_FINAL : public File,
-                                        private MainProcessRunnable
+class SingleProcessRunnable final : public File,
+                                    private MainProcessRunnable
 {
 public:
   // In the single-process case, the calling JS compilation thread holds the
@@ -1154,7 +1146,7 @@ protected:
 
 private:
   void
-  OnOpenMetadataForRead(const Metadata& aMetadata) MOZ_OVERRIDE
+  OnOpenMetadataForRead(const Metadata& aMetadata) override
   {
     uint32_t moduleIndex;
     if (FindHashMatch(aMetadata, mReadParams, &moduleIndex)) {
@@ -1165,26 +1157,26 @@ private:
   }
 
   void
-  OnOpenCacheFile() MOZ_OVERRIDE
+  OnOpenCacheFile() override
   {
     File::OnOpen();
   }
 
   void
-  Close() MOZ_OVERRIDE MOZ_FINAL
+  Close() override final
   {
     MainProcessRunnable::Close();
   }
 
   void
-  OnFailure(JS::AsmJSCacheResult aResult) MOZ_OVERRIDE
+  OnFailure(JS::AsmJSCacheResult aResult) override
   {
     MainProcessRunnable::OnFailure(aResult);
     File::OnFailure(aResult);
   }
 
   void
-  OnClose() MOZ_OVERRIDE MOZ_FINAL
+  OnClose() override final
   {
     MainProcessRunnable::OnClose();
     File::OnClose();
@@ -1192,7 +1184,7 @@ private:
 
   // Avoid MSVC 'dominance' warning by having clear Run() override.
   NS_IMETHODIMP
-  Run() MOZ_OVERRIDE
+  Run() override
   {
     return MainProcessRunnable::Run();
   }
@@ -1203,8 +1195,8 @@ private:
 // A runnable that executes in a parent process for a cache access originating
 // in the content process. This runnable gets registered as an IPDL subprotocol
 // actor so that it can communicate with the corresponding ChildProcessRunnable.
-class ParentProcessRunnable MOZ_FINAL : public PAsmJSCacheEntryParent,
-                                        public MainProcessRunnable
+class ParentProcessRunnable final : public PAsmJSCacheEntryParent,
+                                    public MainProcessRunnable
 {
 public:
   // The given principal comes from an IPC::Principal which will be dec-refed
@@ -1234,7 +1226,7 @@ private:
   }
 
   bool
-  Recv__delete__(const JS::AsmJSCacheResult& aResult) MOZ_OVERRIDE
+  Recv__delete__(const JS::AsmJSCacheResult& aResult) override
   {
     MOZ_ASSERT(!mFinished);
     mFinished = true;
@@ -1249,7 +1241,7 @@ private:
   }
 
   void
-  ActorDestroy(ActorDestroyReason why) MOZ_OVERRIDE
+  ActorDestroy(ActorDestroyReason why) override
   {
     MOZ_ASSERT(!mActorDestroyed);
     mActorDestroyed = true;
@@ -1271,7 +1263,7 @@ private:
   }
 
   void
-  OnOpenMetadataForRead(const Metadata& aMetadata) MOZ_OVERRIDE
+  OnOpenMetadataForRead(const Metadata& aMetadata) override
   {
     MOZ_ASSERT(NS_IsMainThread());
 
@@ -1281,21 +1273,21 @@ private:
   }
 
   bool
-  RecvSelectCacheFileToRead(const uint32_t& aModuleIndex) MOZ_OVERRIDE
+  RecvSelectCacheFileToRead(const uint32_t& aModuleIndex) override
   {
     MainProcessRunnable::OpenForRead(aModuleIndex);
     return true;
   }
 
   bool
-  RecvCacheMiss() MOZ_OVERRIDE
+  RecvCacheMiss() override
   {
     MainProcessRunnable::CacheMiss();
     return true;
   }
 
   void
-  OnOpenCacheFile() MOZ_OVERRIDE
+  OnOpenCacheFile() override
   {
     MOZ_ASSERT(NS_IsMainThread());
 
@@ -1310,7 +1302,7 @@ private:
   }
 
   void
-  OnClose() MOZ_OVERRIDE MOZ_FINAL
+  OnClose() override final
   {
     MOZ_ASSERT(NS_IsMainThread());
     MOZ_ASSERT(mOpened);
@@ -1325,7 +1317,7 @@ private:
   }
 
   void
-  OnFailure(JS::AsmJSCacheResult aResult) MOZ_OVERRIDE
+  OnFailure(JS::AsmJSCacheResult aResult) override
   {
     MOZ_ASSERT(NS_IsMainThread());
     MOZ_ASSERT(!mOpened);
@@ -1374,8 +1366,8 @@ DeallocEntryParent(PAsmJSCacheEntryParent* aActor)
 
 namespace {
 
-class ChildProcessRunnable MOZ_FINAL : public File,
-                                       public PAsmJSCacheEntryChild
+class ChildProcessRunnable final : public File,
+                                   public PAsmJSCacheEntryChild
 {
 public:
   NS_DECL_NSIRUNNABLE
@@ -1411,7 +1403,7 @@ protected:
 
 private:
   bool
-  RecvOnOpenMetadataForRead(const Metadata& aMetadata) MOZ_OVERRIDE
+  RecvOnOpenMetadataForRead(const Metadata& aMetadata) override
   {
     MOZ_ASSERT(NS_IsMainThread());
     MOZ_ASSERT(mState == eOpening);
@@ -1426,7 +1418,7 @@ private:
 
   bool
   RecvOnOpenCacheFile(const int64_t& aFileSize,
-                      const FileDescriptor& aFileDesc) MOZ_OVERRIDE
+                      const FileDescriptor& aFileDesc) override
   {
     MOZ_ASSERT(NS_IsMainThread());
     MOZ_ASSERT(mState == eOpening);
@@ -1444,7 +1436,7 @@ private:
   }
 
   bool
-  Recv__delete__(const JS::AsmJSCacheResult& aResult) MOZ_OVERRIDE
+  Recv__delete__(const JS::AsmJSCacheResult& aResult) override
   {
     MOZ_ASSERT(NS_IsMainThread());
     MOZ_ASSERT(mState == eOpening);
@@ -1454,14 +1446,14 @@ private:
   }
 
   void
-  ActorDestroy(ActorDestroyReason why) MOZ_OVERRIDE
+  ActorDestroy(ActorDestroyReason why) override
   {
     MOZ_ASSERT(NS_IsMainThread());
     mActorDestroyed = true;
   }
 
   void
-  Close() MOZ_OVERRIDE MOZ_FINAL
+  Close() override final
   {
     MOZ_ASSERT(mState == eOpened);
 
@@ -1768,13 +1760,13 @@ class Client : public quota::Client
 
 public:
   NS_IMETHOD_(MozExternalRefCountType)
-  AddRef() MOZ_OVERRIDE;
+  AddRef() override;
 
   NS_IMETHOD_(MozExternalRefCountType)
-  Release() MOZ_OVERRIDE;
+  Release() override;
 
   virtual Type
-  GetType() MOZ_OVERRIDE
+  GetType() override
   {
     return ASMJS;
   }
@@ -1783,7 +1775,7 @@ public:
   InitOrigin(PersistenceType aPersistenceType,
              const nsACString& aGroup,
              const nsACString& aOrigin,
-             UsageInfo* aUsageInfo) MOZ_OVERRIDE
+             UsageInfo* aUsageInfo) override
   {
     if (!aUsageInfo) {
       return NS_OK;
@@ -1795,7 +1787,7 @@ public:
   GetUsageForOrigin(PersistenceType aPersistenceType,
                     const nsACString& aGroup,
                     const nsACString& aOrigin,
-                    UsageInfo* aUsageInfo) MOZ_OVERRIDE
+                    UsageInfo* aUsageInfo) override
   {
     QuotaManager* qm = QuotaManager::Get();
     MOZ_ASSERT(qm, "We were being called by the QuotaManager");
@@ -1843,47 +1835,23 @@ public:
 
   virtual void
   OnOriginClearCompleted(PersistenceType aPersistenceType,
-                         const OriginOrPatternString& aOriginOrPattern)
-                         MOZ_OVERRIDE
+                         const nsACString& aOrigin)
+                         override
   { }
 
   virtual void
-  ReleaseIOThreadObjects() MOZ_OVERRIDE
+  ReleaseIOThreadObjects() override
   { }
-
-  virtual bool
-  IsFileServiceUtilized() MOZ_OVERRIDE
-  {
-    return false;
-  }
-
-  virtual bool
-  IsTransactionServiceActivated() MOZ_OVERRIDE
-  {
-    return false;
-  }
 
   virtual void
   WaitForStoragesToComplete(nsTArray<nsIOfflineStorage*>& aStorages,
-                            nsIRunnable* aCallback) MOZ_OVERRIDE
+                            nsIRunnable* aCallback) override
   {
     MOZ_ASSERT_UNREACHABLE("There are no storages");
   }
 
   virtual void
-  AbortTransactionsForStorage(nsIOfflineStorage* aStorage) MOZ_OVERRIDE
-  {
-    MOZ_ASSERT_UNREACHABLE("There are no storages");
-  }
-
-  virtual bool
-  HasTransactionsForStorage(nsIOfflineStorage* aStorage) MOZ_OVERRIDE
-  {
-    return false;
-  }
-
-  virtual void
-  ShutdownTransactionService() MOZ_OVERRIDE
+  ShutdownWorkThreads() override
   { }
 
 private:

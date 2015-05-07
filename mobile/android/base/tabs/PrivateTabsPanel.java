@@ -7,7 +7,7 @@ package org.mozilla.gecko.tabs;
 
 import java.util.Locale;
 
-import org.mozilla.gecko.BrowserLocaleManager;
+import org.mozilla.gecko.Locales;
 import org.mozilla.gecko.R;
 import org.mozilla.gecko.Tabs;
 import org.mozilla.gecko.tabs.TabsPanel.CloseAllPanelView;
@@ -18,6 +18,7 @@ import android.util.AttributeSet;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.widget.FrameLayout;
+import android.widget.LinearLayout;
 
 /**
  * A container that wraps the private tabs {@link android.widget.AdapterView} and empty
@@ -27,6 +28,7 @@ import android.widget.FrameLayout;
  */
 class PrivateTabsPanel extends FrameLayout implements CloseAllPanelView {
     private TabsPanel tabsPanel;
+
     private final TabsLayout tabsLayout;
 
     public PrivateTabsPanel(Context context, AttributeSet attrs) {
@@ -35,14 +37,14 @@ class PrivateTabsPanel extends FrameLayout implements CloseAllPanelView {
         LayoutInflater.from(context).inflate(R.layout.private_tabs_panel, this);
         tabsLayout = (TabsLayout) findViewById(R.id.private_tabs_layout);
 
-        final View emptyView = findViewById(R.id.private_tabs_empty);
-        tabsLayout.setEmptyView(emptyView);
+        final LinearLayout emptyTabsFrame = (LinearLayout) findViewById(R.id.private_tabs_empty);
+        tabsLayout.setEmptyView(emptyTabsFrame);
 
         final View learnMore = findViewById(R.id.private_tabs_learn_more);
         learnMore.setOnClickListener(new OnClickListener() {
             @Override
             public void onClick(View v) {
-                final String locale = BrowserLocaleManager.getLanguageTag(Locale.getDefault());
+                final String locale = Locales.getLanguageTag(Locale.getDefault());
                 final String url =
                         getResources().getString(R.string.private_tabs_panel_learn_more_link, locale);
                 Tabs.getInstance().loadUrlInTab(url);

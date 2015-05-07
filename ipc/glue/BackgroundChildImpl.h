@@ -7,14 +7,13 @@
 
 #include "mozilla/Attributes.h"
 #include "mozilla/ipc/PBackgroundChild.h"
-
-template <class> class nsAutoPtr;
+#include "nsAutoPtr.h"
 
 namespace mozilla {
 namespace dom {
 namespace indexedDB {
 
-class IDBTransaction;
+class ThreadLocal;
 
 } // namespace indexedDB
 } // namespace dom
@@ -41,47 +40,83 @@ protected:
   virtual ~BackgroundChildImpl();
 
   virtual void
-  ActorDestroy(ActorDestroyReason aWhy) MOZ_OVERRIDE;
+  ProcessingError(Result aCode, const char* aReason) override;
+
+  virtual void
+  ActorDestroy(ActorDestroyReason aWhy) override;
 
   virtual PBackgroundTestChild*
-  AllocPBackgroundTestChild(const nsCString& aTestArg) MOZ_OVERRIDE;
+  AllocPBackgroundTestChild(const nsCString& aTestArg) override;
 
   virtual bool
-  DeallocPBackgroundTestChild(PBackgroundTestChild* aActor) MOZ_OVERRIDE;
+  DeallocPBackgroundTestChild(PBackgroundTestChild* aActor) override;
 
   virtual PBackgroundIDBFactoryChild*
-  AllocPBackgroundIDBFactoryChild(const OptionalWindowId& aOptionalWindowId)
-                                  MOZ_OVERRIDE;
+  AllocPBackgroundIDBFactoryChild(const LoggingInfo& aLoggingInfo) override;
 
   virtual bool
   DeallocPBackgroundIDBFactoryChild(PBackgroundIDBFactoryChild* aActor)
-                                    MOZ_OVERRIDE;
+                                    override;
 
   virtual PBlobChild*
-  AllocPBlobChild(const BlobConstructorParams& aParams) MOZ_OVERRIDE;
+  AllocPBlobChild(const BlobConstructorParams& aParams) override;
 
   virtual bool
-  DeallocPBlobChild(PBlobChild* aActor) MOZ_OVERRIDE;
+  DeallocPBlobChild(PBlobChild* aActor) override;
 
   virtual PFileDescriptorSetChild*
   AllocPFileDescriptorSetChild(const FileDescriptor& aFileDescriptor)
-                               MOZ_OVERRIDE;
+                               override;
 
   virtual bool
-  DeallocPFileDescriptorSetChild(PFileDescriptorSetChild* aActor) MOZ_OVERRIDE;
+  DeallocPFileDescriptorSetChild(PFileDescriptorSetChild* aActor) override;
+
+  virtual PMediaChild*
+  AllocPMediaChild() override;
+
+  virtual bool
+  DeallocPMediaChild(PMediaChild* aActor) override;
+
+  virtual PVsyncChild*
+  AllocPVsyncChild() override;
+
+  virtual bool
+  DeallocPVsyncChild(PVsyncChild* aActor) override;
+
+  virtual PBroadcastChannelChild*
+  AllocPBroadcastChannelChild(const PrincipalInfo& aPrincipalInfo,
+                              const nsString& aOrigin,
+                              const nsString& aChannel,
+                              const bool& aPrivateBrowsing) override;
+
+  virtual bool
+  DeallocPBroadcastChannelChild(PBroadcastChannelChild* aActor) override;
+
+  virtual dom::cache::PCacheStorageChild*
+  AllocPCacheStorageChild(const dom::cache::Namespace& aNamespace,
+                          const PrincipalInfo& aPrincipalInfo) override;
+
+  virtual bool
+  DeallocPCacheStorageChild(dom::cache::PCacheStorageChild* aActor) override;
+
+  virtual dom::cache::PCacheChild* AllocPCacheChild() override;
+
+  virtual bool
+  DeallocPCacheChild(dom::cache::PCacheChild* aActor) override;
+
+  virtual dom::cache::PCacheStreamControlChild*
+  AllocPCacheStreamControlChild() override;
+
+  virtual bool
+  DeallocPCacheStreamControlChild(dom::cache::PCacheStreamControlChild* aActor) override;
 };
 
-class BackgroundChildImpl::ThreadLocal MOZ_FINAL
+class BackgroundChildImpl::ThreadLocal final
 {
   friend class nsAutoPtr<ThreadLocal>;
 
 public:
-  mozilla::dom::indexedDB::IDBTransaction* mCurrentTransaction;
-
-#ifdef MOZ_ENABLE_PROFILER_SPS
-  uint64_t mNextTransactionSerialNumber;
-  uint64_t mNextRequestSerialNumber;
-#endif
+  nsAutoPtr<mozilla::dom::indexedDB::ThreadLocal> mIndexedDBThreadLocal;
 
 public:
   ThreadLocal();

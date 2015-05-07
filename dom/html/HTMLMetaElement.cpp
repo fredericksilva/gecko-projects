@@ -1,4 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -36,7 +37,7 @@ NS_IMPL_STRING_ATTR(HTMLMetaElement, Name, name)
 NS_IMPL_STRING_ATTR(HTMLMetaElement, Scheme, scheme)
 
 void
-HTMLMetaElement::GetItemValueText(nsAString& aValue)
+HTMLMetaElement::GetItemValueText(DOMString& aValue)
 {
   GetContent(aValue);
 }
@@ -77,7 +78,21 @@ HTMLMetaElement::BindToTree(nsIDocument* aDocument, nsIContent* aParent,
     nsAutoString content;
     rv = GetContent(content);
     NS_ENSURE_SUCCESS(rv, rv);
-    nsContentUtils::ProcessViewportInfo(aDocument, content);  
+    nsContentUtils::ProcessViewportInfo(aDocument, content);
+  }
+  if (aDocument &&
+      AttrValueIs(kNameSpaceID_None, nsGkAtoms::name, nsGkAtoms::referrer, eIgnoreCase)) {
+    nsAutoString content;
+    rv = GetContent(content);
+    NS_ENSURE_SUCCESS(rv, rv);
+
+    // Referrer Policy spec requires a <meta name="referrer" tag to be in the
+    // <head> element.
+    Element* headElt = aDocument->GetHeadElement();
+    if (headElt && nsContentUtils::ContentIsDescendantOf(this, headElt)) {
+      content = nsContentUtils::TrimWhitespace<nsContentUtils::IsHTMLWhitespace>(content);
+      aDocument->SetHeaderData(nsGkAtoms::referrer, content);
+    }
   }
   CreateAndDispatchEvent(aDocument, NS_LITERAL_STRING("DOMMetaAdded"));
   return rv;
@@ -104,9 +119,9 @@ HTMLMetaElement::CreateAndDispatchEvent(nsIDocument* aDoc,
 }
 
 JSObject*
-HTMLMetaElement::WrapNode(JSContext* aCx)
+HTMLMetaElement::WrapNode(JSContext* aCx, JS::Handle<JSObject*> aGivenProto)
 {
-  return HTMLMetaElementBinding::Wrap(aCx, this);
+  return HTMLMetaElementBinding::Wrap(aCx, this, aGivenProto);
 }
 
 } // namespace dom

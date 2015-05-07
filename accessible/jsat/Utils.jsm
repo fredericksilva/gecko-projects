@@ -160,14 +160,14 @@ this.Utils = { // jshint ignore:line
   },
 
   get AllMessageManagers() {
-    let messageManagers = [];
+    let messageManagers = new Set();
 
     function collectLeafMessageManagers(mm) {
       for (let i = 0; i < mm.childCount; i++) {
         let childMM = mm.getChildAt(i);
 
         if ('sendAsyncMessage' in childMM) {
-          messageManagers.push(childMM);
+          messageManagers.add(childMM);
         } else {
           collectLeafMessageManagers(childMM);
         }
@@ -179,12 +179,19 @@ this.Utils = { // jshint ignore:line
     let document = this.CurrentContentDoc;
 
     if (document) {
+      if (document.location.host === 'b2g') {
+        // The document is a b2g app chrome (ie. Mulet).
+        let contentBrowser = this.win.content.shell.contentBrowser;
+        messageManagers.add(this.getMessageManager(contentBrowser));
+        document = contentBrowser.contentDocument;
+      }
+
       let remoteframes = document.querySelectorAll('iframe');
 
       for (let i = 0; i < remoteframes.length; ++i) {
         let mm = this.getMessageManager(remoteframes[i]);
         if (mm) {
-          messageManagers.push(mm);
+          messageManagers.add(mm);
         }
       }
 
@@ -294,22 +301,22 @@ this.Utils = { // jshint ignore:line
   },
 
   getContentResolution: function _getContentResolution(aAccessible) {
-    let resX = { value: 1 }, resY = { value: 1 };
+    let res = { value: 1 };
     aAccessible.document.window.QueryInterface(
       Ci.nsIInterfaceRequestor).getInterface(
-      Ci.nsIDOMWindowUtils).getResolution(resX, resY);
-    return [resX.value, resY.value];
+      Ci.nsIDOMWindowUtils).getResolution(res);
+    return res.value;
   },
 
   getBounds: function getBounds(aAccessible, aPreserveContentScale) {
     let objX = {}, objY = {}, objW = {}, objH = {};
     aAccessible.getBounds(objX, objY, objW, objH);
 
-    let [scaleX, scaleY] = aPreserveContentScale ? [1, 1] :
+    let scale = aPreserveContentScale ? 1 :
       this.getContentResolution(aAccessible);
 
     return new Rect(objX.value, objY.value, objW.value, objH.value).scale(
-      scaleX, scaleY);
+      scale, scale);
   },
 
   getTextBounds: function getTextBounds(aAccessible, aStart, aEnd,
@@ -319,11 +326,11 @@ this.Utils = { // jshint ignore:line
     accText.getRangeExtents(aStart, aEnd, objX, objY, objW, objH,
       Ci.nsIAccessibleCoordinateType.COORDTYPE_SCREEN_RELATIVE);
 
-    let [scaleX, scaleY] = aPreserveContentScale ? [1, 1] :
+    let scale = aPreserveContentScale ? 1 :
       this.getContentResolution(aAccessible);
 
     return new Rect(objX.value, objY.value, objW.value, objH.value).scale(
-      scaleX, scaleY);
+      scale, scale);
   },
 
   /**
@@ -457,9 +464,10 @@ this.Utils = { // jshint ignore:line
         typeof aDetails === 'string' ? { eventType : aDetails } : aDetails)
     };
     let window = this.win;
-    if (window.shell) {
+    let shell = window.shell || window.content.shell;
+    if (shell) {
       // On B2G device.
-      window.shell.sendChromeEvent(details);
+      shell.sendChromeEvent(details);
     } else {
       // Dispatch custom event to have support for desktop and screen reader
       // emulator add-on.
@@ -826,6 +834,26 @@ PivotContext.prototype = {
       }
       child = child.nextSibling;
     }
+  },
+
+  /**
+   * Get interaction hints for the context ancestry.
+   * @return {Array} Array of interaction hints.
+   */
+  get interactionHints() {
+    let hints = [];
+    this.newAncestry.concat(this.accessible).reverse().forEach(aAccessible => {
+      let hint = Utils.getAttributes(aAccessible)['moz-hint'];
+      if (hint) {
+        hints.push(hint);
+      } else if (aAccessible.actionCount > 0) {
+        hints.push({
+          string: Utils.AccRetrieval.getStringRole(
+            aAccessible.role).replace(/\s/g, '') + '-hint'
+        });
+      }
+    });
+    return hints;
   },
 
   /*

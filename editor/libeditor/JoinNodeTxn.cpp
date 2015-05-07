@@ -3,8 +3,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#include <stdio.h>                      // for printf
-
 #include "JoinNodeTxn.h"
 #include "nsAString.h"
 #include "nsDebug.h"                    // for NS_ASSERTION, etc
@@ -84,7 +82,7 @@ JoinNodeTxn::UndoTransaction()
     nsCOMPtr<nsIContent> child = mRightNode->GetFirstChild();
     for (uint32_t i = 0; i < mOffset; i++) {
       if (rv.Failed()) {
-        return rv.ErrorCode();
+        return rv.StealNSResult();
       }
       if (!child) {
         return NS_ERROR_NULL_POINTER;
@@ -96,7 +94,7 @@ JoinNodeTxn::UndoTransaction()
   }
   // Second, re-insert the left node into the tree
   mParent->InsertBefore(*mLeftNode, mRightNode, rv);
-  return rv.ErrorCode();
+  return rv.StealNSResult();
 }
 
 NS_IMETHODIMP

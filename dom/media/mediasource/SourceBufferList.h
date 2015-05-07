@@ -22,14 +22,13 @@ class JSObject;
 
 namespace mozilla {
 
-class ErrorResult;
 template <typename T> class AsyncEventRunner;
 
 namespace dom {
 
 class MediaSource;
 
-class SourceBufferList MOZ_FINAL : public DOMEventTargetHelper
+class SourceBufferList final : public DOMEventTargetHelper
 {
 public:
   /** WebIDL Methods. */
@@ -46,7 +45,7 @@ public:
 
   MediaSource* GetParentObject() const;
 
-  JSObject* WrapObject(JSContext* aCx) MOZ_OVERRIDE;
+  JSObject* WrapObject(JSContext* aCx, JS::Handle<JSObject*> aGivenProto) override;
 
   // Append a SourceBuffer and fire "addsourcebuffer" at the list.
   void Append(SourceBuffer* aSourceBuffer);
@@ -66,9 +65,8 @@ public:
   // Returns true if updating is true on any SourceBuffers in the list.
   bool AnyUpdating();
 
-  // Calls Remove(aStart, aEnd) on each SourceBuffer in the list.  Aborts on
-  // first error, with result returned in aRv.
-  void Remove(double aStart, double aEnd, ErrorResult& aRv);
+  // Runs the range removal steps from the MSE specification on each SourceBuffer.
+  void RangeRemoval(double aStart, double aEnd);
 
   // Mark all SourceBuffers input buffers as ended.
   void Ended();
@@ -78,6 +76,13 @@ public:
 
   // Returns the highest end time of any of the Sourcebuffers.
   double GetHighestBufferedEndTime();
+
+  // Append a SourceBuffer to the list. No event is fired.
+  void AppendSimple(SourceBuffer* aSourceBuffer);
+
+  // Remove all SourceBuffers from mSourceBuffers.
+  //  No event is fired and no action is performed on the sourcebuffers.
+  void ClearSimple();
 
 #if defined(DEBUG)
   void Dump(const char* aPath);

@@ -4,10 +4,26 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
+with Files('*'):
+    BUG_COMPONENT = ('Core', 'Video/Audio')
+
+component_signaling = ('Core', 'WebRTC: Signaling')
+with Files('IdpSandbox.jsm'):
+    BUG_COMPONENT = component_signaling
+with Files('PeerConnection*'):
+    BUG_COMPONENT = component_signaling
+with Files('RTC*'):
+    BUG_COMPONENT = component_signaling
+
+component_av = ('Core', 'WebRTC: Audio/Video')
+with Files('GetUserMedia*'):
+    BUG_COMPONENT = component_av
+
 DIRS += [
     'encoder',
     'gmp',
     'gmp-plugin',
+    'gmp-plugin-openh264',
     'imagecapture',
     'mediasource',
     'ogg',
@@ -16,6 +32,7 @@ DIRS += [
     'webrtc',
     'webspeech',
     'webvtt',
+    'standalone',
 ]
 
 if CONFIG['MOZ_RAW']:
@@ -81,6 +98,7 @@ XPIDL_MODULE = 'dom_media'
 
 EXPORTS += [
     'AbstractMediaDecoder.h',
+    'AbstractThread.h',
     'AudioBufferUtils.h',
     'AudioChannelFormat.h',
     'AudioCompactor.h',
@@ -95,22 +113,24 @@ EXPORTS += [
     'EncodedBufferCache.h',
     'FileBlockCache.h',
     'GraphDriver.h',
+    'Intervals.h',
     'Latency.h',
     'MediaCache.h',
     'MediaData.h',
-    'MediaDataDecodedListener.h',
     'MediaDecoder.h',
     'MediaDecoderOwner.h',
     'MediaDecoderReader.h',
     'MediaDecoderStateMachine.h',
     'MediaInfo.h',
     'MediaMetadataManager.h',
+    'MediaPromise.h',
     'MediaQueue.h',
     'MediaRecorder.h',
     'MediaResource.h',
     'MediaSegment.h',
     'MediaStreamGraph.h',
     'MediaTaskQueue.h',
+    'MediaTimer.h',
     'MediaTrack.h',
     'MediaTrackList.h',
     'MP3FrameParser.h',
@@ -119,8 +139,12 @@ EXPORTS += [
     'SelfRef.h',
     'SharedBuffer.h',
     'SharedThreadPool.h',
+    'StateMirroring.h',
+    'StateWatching.h',
     'StreamBuffer.h',
+    'TaskDispatcher.h',
     'ThreadPoolCOMListener.h',
+    'TimeUnits.h',
     'TimeVarying.h',
     'TrackUnionStream.h',
     'VideoFrameContainer.h',
@@ -133,6 +157,14 @@ EXPORTS.mozilla += [
     'MediaManager.h',
 ]
 
+EXPORTS.mozilla.media.webrtc += [
+    'webrtc/WebrtcGlobal.h',
+]
+
+IPDL_SOURCES += [
+    'webrtc/PWebrtcGlobal.ipdl'
+]
+
 if CONFIG['MOZ_B2G']:
     EXPORTS.mozilla += [
         'MediaPermissionGonk.h',
@@ -143,9 +175,11 @@ EXPORTS.mozilla.dom += [
     'AudioTrack.h',
     'AudioTrackList.h',
     'GetUserMediaRequest.h',
+    'MediaDeviceInfo.h',
     'MediaDevices.h',
     'MediaStreamError.h',
     'MediaStreamTrack.h',
+    'RTCIdentityProviderRegistrar.h',
     'TextTrack.h',
     'TextTrackCue.h',
     'TextTrackCueList.h',
@@ -158,6 +192,7 @@ EXPORTS.mozilla.dom += [
 ]
 
 UNIFIED_SOURCES += [
+    'AbstractThread.cpp',
     'AudioChannelFormat.cpp',
     'AudioCompactor.cpp',
     'AudioSegment.cpp',
@@ -178,7 +213,7 @@ UNIFIED_SOURCES += [
     'MediaDecoder.cpp',
     'MediaDecoderReader.cpp',
     'MediaDecoderStateMachine.cpp',
-    'MediaDecoderStateMachineScheduler.cpp',
+    'MediaDeviceInfo.cpp',
     'MediaDevices.cpp',
     'MediaManager.cpp',
     'MediaRecorder.cpp',
@@ -188,9 +223,11 @@ UNIFIED_SOURCES += [
     'MediaStreamGraph.cpp',
     'MediaStreamTrack.cpp',
     'MediaTaskQueue.cpp',
+    'MediaTimer.cpp',
     'MediaTrack.cpp',
     'MediaTrackList.cpp',
     'MP3FrameParser.cpp',
+    'RTCIdentityProviderRegistrar.cpp',
     'RtspMediaResource.cpp',
     'SharedThreadPool.cpp',
     'StreamBuffer.cpp',
@@ -223,20 +260,23 @@ SOURCES += [
     'DecoderTraits.cpp',
 ]
 
+# Some codec-related code uses multi-character constants, which GCC and clang
+# warn about. Suppress turning this warning into an error.
+if CONFIG['GNU_CC'] or CONFIG['CLANG_CL']:
+  SOURCES['DecoderTraits.cpp'].flags += ['-Wno-error=multichar']
+
 EXTRA_COMPONENTS += [
     'PeerConnection.js',
     'PeerConnection.manifest',
 ]
 
 EXTRA_JS_MODULES.media += [
-    'IdpProxy.jsm',
+    'IdpSandbox.jsm',
     'PeerConnectionIdp.jsm',
     'RTCStatsReport.jsm',
 ]
 
 FAIL_ON_WARNINGS = True
-
-MSVC_ENABLE_PGO = True
 
 LOCAL_INCLUDES += [
     '/caps',
@@ -244,7 +284,7 @@ LOCAL_INCLUDES += [
     '/dom/camera',
     '/layout/generic',
     '/layout/xul',
-    '/netwerk/base/src',
+    '/netwerk/base',
 ]
 
 if CONFIG['MOZ_DIRECTSHOW']:
@@ -270,5 +310,11 @@ CFLAGS += CONFIG['GSTREAMER_CFLAGS']
 CXXFLAGS += CONFIG['GSTREAMER_CFLAGS']
 
 include('/ipc/chromium/chromium-config.mozbuild')
+
+# Suppress some GCC warnings being treated as errors:
+#  - about attributes on forward declarations for types that are already
+#    defined, which complains about an important MOZ_EXPORT for android::AString
+if CONFIG['GNU_CC']:
+  CXXFLAGS += ['-Wno-error=attributes']
 
 FINAL_LIBRARY = 'xul'

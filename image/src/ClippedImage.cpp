@@ -128,16 +128,17 @@ ClippedImage::~ClippedImage()
 bool
 ClippedImage::ShouldClip()
 {
-  // We need to evaluate the clipping region against the image's width and height
-  // once they're available to determine if it's valid and whether we actually
-  // need to do any work. We may fail if the image's width and height aren't
-  // available yet, in which case we'll try again later.
+  // We need to evaluate the clipping region against the image's width and
+  // height once they're available to determine if it's valid and whether we
+  // actually need to do any work. We may fail if the image's width and height
+  // aren't available yet, in which case we'll try again later.
   if (mShouldClip.isNothing()) {
     int32_t width, height;
     nsRefPtr<ProgressTracker> progressTracker =
       InnerImage()->GetProgressTracker();
     if (InnerImage()->HasError()) {
-      // If there's a problem with the inner image we'll let it handle everything.
+      // If there's a problem with the inner image we'll let it handle
+      // everything.
       mShouldClip.emplace(false);
     } else if (NS_SUCCEEDED(InnerImage()->GetWidth(&width)) && width > 0 &&
                NS_SUCCEEDED(InnerImage()->GetHeight(&height)) && height > 0) {
@@ -146,10 +147,12 @@ ClippedImage::ShouldClip()
 
       // If the clipping region is the same size as the underlying image we
       // don't have to do anything.
-      mShouldClip.emplace(!mClip.IsEqualInterior(nsIntRect(0, 0, width, height)));
-    } else if (progressTracker && progressTracker->IsLoading()) {
+      mShouldClip.emplace(!mClip.IsEqualInterior(nsIntRect(0, 0, width,
+                                                           height)));
+    } else if (progressTracker &&
+               !(progressTracker->GetProgress() & FLAG_LOAD_COMPLETE)) {
       // The image just hasn't finished loading yet. We don't yet know whether
-      // clipping with be needed or not for now. Just return without memoizing
+      // clipping with be needed or not for now. Just return without memorizing
       // anything.
       return false;
     } else {
@@ -164,16 +167,6 @@ ClippedImage::ShouldClip()
 }
 
 NS_IMPL_ISUPPORTS_INHERITED0(ClippedImage, ImageWrapper)
-
-nsIntRect
-ClippedImage::FrameRect(uint32_t aWhichFrame)
-{
-  if (!ShouldClip()) {
-    return InnerImage()->FrameRect(aWhichFrame);
-  }
-
-  return nsIntRect(0, 0, mClip.width, mClip.height);
-}
 
 NS_IMETHODIMP
 ClippedImage::GetWidth(int32_t* aWidth)
@@ -275,8 +268,8 @@ ClippedImage::GetFrameInternal(const nsIntSize& aSize,
   return mCachedSurface->Surface();
 }
 
-NS_IMETHODIMP
-ClippedImage::GetImageContainer(LayerManager* aManager, ImageContainer** _retval)
+NS_IMETHODIMP_(already_AddRefed<ImageContainer>)
+ClippedImage::GetImageContainer(LayerManager* aManager, uint32_t aFlags)
 {
   // XXX(seth): We currently don't have a way of clipping the result of
   // GetImageContainer. We work around this by always returning null, but if it
@@ -285,11 +278,10 @@ ClippedImage::GetImageContainer(LayerManager* aManager, ImageContainer** _retval
   // that method for performance reasons.
 
   if (!ShouldClip()) {
-    return InnerImage()->GetImageContainer(aManager, _retval);
+    return InnerImage()->GetImageContainer(aManager, aFlags);
   }
 
-  *_retval = nullptr;
-  return NS_OK;
+  return (nullptr);
 }
 
 static bool
@@ -306,7 +298,7 @@ MustCreateSurface(gfxContext* aContext,
   return willTile || willResample;
 }
 
-NS_IMETHODIMP
+NS_IMETHODIMP_(DrawResult)
 ClippedImage::Draw(gfxContext* aContext,
                    const nsIntSize& aSize,
                    const ImageRegion& aRegion,
@@ -327,7 +319,9 @@ ClippedImage::Draw(gfxContext* aContext,
     // GetFrame will call DrawSingleTile internally.
     RefPtr<SourceSurface> surface =
       GetFrameInternal(aSize, aSVGContext, aWhichFrame, aFlags);
-    NS_ENSURE_TRUE(surface, NS_ERROR_FAILURE);
+    if (!surface) {
+      return DrawResult::TEMPORARY_ERROR;
+    }
 
     // Create a drawable from that surface.
     nsRefPtr<gfxSurfaceDrawable> drawable =
@@ -337,7 +331,7 @@ ClippedImage::Draw(gfxContext* aContext,
     gfxUtils::DrawPixelSnapped(aContext, drawable, aSize, aRegion,
                                SurfaceFormat::B8G8R8A8, aFilter);
 
-    return NS_OK;
+    return DrawResult::SUCCESS;
   }
 
   return DrawSingleTile(aContext, aSize, aRegion, aWhichFrame,
@@ -353,15 +347,16 @@ UnclipViewport(const SVGImageContext& aOldContext,
 
   // Map the viewport to the inner image. (Note that we don't take the aSize
   // parameter of Draw into account, just the clipping region.)
-  nsIntSize vSize(aOldContext.GetViewportSize());
+  CSSIntSize vSize(aOldContext.GetViewportSize());
   vSize.width = ceil(vSize.width * double(innerSize.width) / clipSize.width);
-  vSize.height = ceil(vSize.height * double(innerSize.height) / clipSize.height);
+  vSize.height =
+    ceil(vSize.height * double(innerSize.height) / clipSize.height);
 
   return SVGImageContext(vSize,
                          aOldContext.GetPreserveAspectRatio());
 }
 
-nsresult
+DrawResult
 ClippedImage::DrawSingleTile(gfxContext* aContext,
                              const nsIntSize& aSize,
                              const ImageRegion& aRegion,
@@ -379,13 +374,14 @@ ClippedImage::DrawSingleTile(gfxContext* aContext,
       NS_SUCCEEDED(InnerImage()->GetHeight(&innerSize.height))) {
     double scaleX = aSize.width / clip.width;
     double scaleY = aSize.height / clip.height;
-    
+
     // Map the clip and size to the scale requested by the caller.
     clip.Scale(scaleX, scaleY);
     size = innerSize;
     size.Scale(scaleX, scaleY);
   } else {
-    MOZ_ASSERT(false, "If ShouldClip() led us to draw then we should never get here");
+    MOZ_ASSERT(false,
+               "If ShouldClip() led us to draw then we should never get here");
   }
 
   // We restrict our drawing to only the clipping region, and translate so that
@@ -422,11 +418,13 @@ ClippedImage::GetOrientation()
 }
 
 nsIntSize
-ClippedImage::OptimalImageSizeForDest(const gfxSize& aDest, uint32_t aWhichFrame,
+ClippedImage::OptimalImageSizeForDest(const gfxSize& aDest,
+                                      uint32_t aWhichFrame,
                                       GraphicsFilter aFilter, uint32_t aFlags)
 {
   if (!ShouldClip()) {
-    return InnerImage()->OptimalImageSizeForDest(aDest, aWhichFrame, aFilter, aFlags);
+    return InnerImage()->OptimalImageSizeForDest(aDest, aWhichFrame, aFilter,
+                                                 aFlags);
   }
 
   int32_t imgWidth, imgHeight;
@@ -435,8 +433,8 @@ ClippedImage::OptimalImageSizeForDest(const gfxSize& aDest, uint32_t aWhichFrame
     // To avoid ugly sampling artifacts, ClippedImage needs the image size to
     // be chosen such that the clipping region lies on pixel boundaries.
 
-    // First, we select a scale that's good for ClippedImage. An integer multiple
-    // of the size of the clipping region is always fine.
+    // First, we select a scale that's good for ClippedImage. An integer
+    // multiple of the size of the clipping region is always fine.
     nsIntSize scale(ceil(aDest.width / mClip.width),
                     ceil(aDest.height / mClip.height));
 
@@ -454,8 +452,10 @@ ClippedImage::OptimalImageSizeForDest(const gfxSize& aDest, uint32_t aWhichFrame
                          ceil(double(innerDesiredSize.height) / imgHeight));
     return mClip.Size() * finalScale;
   } else {
-    MOZ_ASSERT(false, "If ShouldClip() led us to draw then we should never get here");
-    return InnerImage()->OptimalImageSizeForDest(aDest, aWhichFrame, aFilter, aFlags);
+    MOZ_ASSERT(false,
+               "If ShouldClip() led us to draw then we should never get here");
+    return InnerImage()->OptimalImageSizeForDest(aDest, aWhichFrame, aFilter,
+                                                 aFlags);
   }
 }
 

@@ -20,32 +20,27 @@ interface ServiceWorkerContainer : EventTarget {
   readonly attribute Promise<ServiceWorkerRegistration> ready;
 
   [Throws]
-  Promise<ServiceWorkerRegistration> register(ScalarValueString scriptURL,
-                                              optional RegistrationOptionList options);
+  Promise<ServiceWorkerRegistration> register(USVString scriptURL,
+                                              optional RegistrationOptions options);
 
   [Throws]
-  Promise<ServiceWorkerRegistration> getRegistration(optional ScalarValueString documentURL = "");
+  Promise<ServiceWorkerRegistration> getRegistration(optional USVString documentURL = "");
 
   [Throws]
-   Promise<sequence<ServiceWorkerRegistration>> getRegistrations();
+  Promise<sequence<ServiceWorkerRegistration>> getRegistrations();
 
   attribute EventHandler oncontrollerchange;
   attribute EventHandler onreloadpage;
   attribute EventHandler onerror;
+  attribute EventHandler onmessage;
 };
 
 // Testing only.
 partial interface ServiceWorkerContainer {
   [Throws,Pref="dom.serviceWorkers.testing.enabled"]
-  Promise<any> clearAllServiceWorkerData();
-
-  [Throws,Pref="dom.serviceWorkers.testing.enabled"]
   DOMString getScopeForUrl(DOMString url);
-
-  [Throws,Pref="dom.serviceWorkers.testing.enabled"]
-  DOMString getControllingWorkerScriptURLForPath(DOMString path);
 };
 
-dictionary RegistrationOptionList {
-  ScalarValueString scope = "/";
+dictionary RegistrationOptions {
+  USVString scope;
 };

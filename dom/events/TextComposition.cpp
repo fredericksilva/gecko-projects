@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=2 sw=2 et tw=80: */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -14,6 +14,7 @@
 #include "mozilla/EventDispatcher.h"
 #include "mozilla/IMEStateManager.h"
 #include "mozilla/MiscEvents.h"
+#include "mozilla/Preferences.h"
 #include "mozilla/TextComposition.h"
 #include "mozilla/TextEvents.h"
 
@@ -43,6 +44,9 @@ TextComposition::TextComposition(nsPresContext* aPresContext,
   , mIsRequestingCancel(false)
   , mRequestedToCommitOrCancel(false)
   , mWasNativeCompositionEndEventDiscarded(false)
+  , mAllowControlCharacters(
+      Preferences::GetBool("dom.compositionevent.allow_control_characters",
+                           false))
 {
 }
 
@@ -62,31 +66,54 @@ TextComposition::MatchesNativeContext(nsIWidget* aWidget) const
 }
 
 bool
+TextComposition::IsValidStateForComposition(nsIWidget* aWidget) const
+{
+  return !Destroyed() && aWidget && !aWidget->Destroyed() &&
+         mPresContext->GetPresShell() &&
+         !mPresContext->GetPresShell()->IsDestroying();
+}
+
+bool
 TextComposition::MaybeDispatchCompositionUpdate(
                    const WidgetCompositionEvent* aCompositionEvent)
 {
-  if (Destroyed()) {
+  if (!IsValidStateForComposition(aCompositionEvent->widget)) {
     return false;
   }
 
   if (mLastData == aCompositionEvent->mData) {
     return true;
   }
+  CloneAndDispatchAs(aCompositionEvent, NS_COMPOSITION_UPDATE);
+  return IsValidStateForComposition(aCompositionEvent->widget);
+}
 
-  WidgetCompositionEvent compositionUpdate(aCompositionEvent->mFlags.mIsTrusted,
-                                           NS_COMPOSITION_UPDATE,
-                                           aCompositionEvent->widget);
-  compositionUpdate.time = aCompositionEvent->time;
-  compositionUpdate.timeStamp = aCompositionEvent->timeStamp;
-  compositionUpdate.mData = aCompositionEvent->mData;
-  compositionUpdate.mFlags.mIsSynthesizedForTests =
+BaseEventFlags
+TextComposition::CloneAndDispatchAs(
+                   const WidgetCompositionEvent* aCompositionEvent,
+                   uint32_t aMessage,
+                   nsEventStatus* aStatus,
+                   EventDispatchingCallback* aCallBack)
+{
+  MOZ_ASSERT(IsValidStateForComposition(aCompositionEvent->widget),
+             "Should be called only when it's safe to dispatch an event");
+
+  WidgetCompositionEvent compositionEvent(aCompositionEvent->mFlags.mIsTrusted,
+                                          aMessage, aCompositionEvent->widget);
+  compositionEvent.time = aCompositionEvent->time;
+  compositionEvent.timeStamp = aCompositionEvent->timeStamp;
+  compositionEvent.mData = aCompositionEvent->mData;
+  compositionEvent.mFlags.mIsSynthesizedForTests =
     aCompositionEvent->mFlags.mIsSynthesizedForTests;
 
-  nsEventStatus status = nsEventStatus_eConsumeNoDefault;
-  mLastData = compositionUpdate.mData;
+  nsEventStatus dummyStatus = nsEventStatus_eConsumeNoDefault;
+  nsEventStatus* status = aStatus ? aStatus : &dummyStatus;
+  if (aMessage == NS_COMPOSITION_UPDATE) {
+    mLastData = compositionEvent.mData;
+  }
   EventDispatcher::Dispatch(mNode, mPresContext,
-                            &compositionUpdate, nullptr, &status, nullptr);
-  return !Destroyed();
+                            &compositionEvent, nullptr, status, aCallBack);
+  return compositionEvent.mFlags;
 }
 
 void
@@ -103,11 +130,65 @@ TextComposition::OnCompositionEventDiscarded(
   //     runnable event?  However, even if we do so, it might make native IME
   //     confused due to async modification.  Especially when native IME is
   //     TSF.
-  if (aCompositionEvent->message != NS_COMPOSITION_END) {
+  if (!aCompositionEvent->CausesDOMCompositionEndEvent()) {
     return;
   }
 
   mWasNativeCompositionEndEventDiscarded = true;
+}
+
+static inline bool
+IsControlChar(uint32_t aCharCode)
+{
+  return aCharCode < ' ' || aCharCode == 0x7F;
+}
+
+static size_t
+FindFirstControlCharacter(const nsAString& aStr)
+{
+  const char16_t* sourceBegin = aStr.BeginReading();
+  const char16_t* sourceEnd = aStr.EndReading();
+
+  for (const char16_t* source = sourceBegin; source < sourceEnd; ++source) {
+    if (*source != '\t' && IsControlChar(*source)) {
+      return source - sourceBegin;
+    }
+  }
+
+  return -1;
+}
+
+static void
+RemoveControlCharactersFrom(nsAString& aStr, TextRangeArray* aRanges)
+{
+  size_t firstControlCharOffset = FindFirstControlCharacter(aStr);
+  if (firstControlCharOffset == (size_t)-1) {
+    return;
+  }
+
+  nsAutoString copy(aStr);
+  const char16_t* sourceBegin = copy.BeginReading();
+  const char16_t* sourceEnd = copy.EndReading();
+
+  char16_t* dest = aStr.BeginWriting();
+  if (NS_WARN_IF(!dest)) {
+    return;
+  }
+
+  char16_t* curDest = dest + firstControlCharOffset;
+  size_t i = firstControlCharOffset;
+  for (const char16_t* source = sourceBegin + firstControlCharOffset;
+       source < sourceEnd; ++source) {
+    if (*source == '\t' || !IsControlChar(*source)) {
+      *curDest = *source;
+      ++curDest;
+      ++i;
+    } else if (aRanges) {
+      aRanges->RemoveCharacter(i);
+    }
+  }
+
+  aStr.SetLength(curDest - dest);
 }
 
 void
@@ -117,7 +198,31 @@ TextComposition::DispatchCompositionEvent(
                    EventDispatchingCallback* aCallBack,
                    bool aIsSynthesized)
 {
-  if (Destroyed()) {
+  if (!mAllowControlCharacters) {
+    RemoveControlCharactersFrom(aCompositionEvent->mData,
+                                aCompositionEvent->mRanges);
+  }
+  if (aCompositionEvent->message == NS_COMPOSITION_COMMIT_AS_IS) {
+    NS_ASSERTION(!aCompositionEvent->mRanges,
+                 "mRanges of NS_COMPOSITION_COMMIT_AS_IS should be null");
+    aCompositionEvent->mRanges = nullptr;
+    NS_ASSERTION(aCompositionEvent->mData.IsEmpty(),
+                 "mData of NS_COMPOSITION_COMMIT_AS_IS should be empty string");
+    if (mLastData == IDEOGRAPHIC_SPACE) {
+      // If the last data is an ideographic space (FullWidth space), it must be
+      // a placeholder character of some Chinese IME.  So, committing with
+      // this data must not be expected by users.  Let's use empty string.
+      aCompositionEvent->mData.Truncate();
+    } else {
+      aCompositionEvent->mData = mLastData;
+    }
+  } else if (aCompositionEvent->message == NS_COMPOSITION_COMMIT) {
+    NS_ASSERTION(!aCompositionEvent->mRanges,
+                 "mRanges of NS_COMPOSITION_COMMIT should be null");
+    aCompositionEvent->mRanges = nullptr;
+  }
+
+  if (!IsValidStateForComposition(aCompositionEvent->widget)) {
     *aStatus = nsEventStatus_eConsumeNoDefault;
     return;
   }
@@ -149,6 +254,8 @@ TextComposition::DispatchCompositionEvent(
     switch (aCompositionEvent->message) {
       case NS_COMPOSITION_END:
       case NS_COMPOSITION_CHANGE:
+      case NS_COMPOSITION_COMMIT_AS_IS:
+      case NS_COMPOSITION_COMMIT:
         committingData = &aCompositionEvent->mData;
         break;
       default:
@@ -166,32 +273,73 @@ TextComposition::DispatchCompositionEvent(
     }
   }
 
-  if (aCompositionEvent->message == NS_COMPOSITION_CHANGE) {
+  bool dispatchEvent = true;
+  bool dispatchDOMTextEvent = aCompositionEvent->CausesDOMTextEvent();
+
+  // When mIsComposing is false but the committing string is different from
+  // the last data (E.g., previous NS_COMPOSITION_CHANGE event made the
+  // composition string empty or didn't have clause information), we don't
+  // need to dispatch redundant DOM text event.
+  if (dispatchDOMTextEvent &&
+      aCompositionEvent->message != NS_COMPOSITION_CHANGE &&
+      !mIsComposing && mLastData == aCompositionEvent->mData) {
+    dispatchEvent = dispatchDOMTextEvent = false;
+  }
+
+  // widget may dispatch redundant NS_COMPOSITION_CHANGE event
+  // which modifies neither composition string, clauses nor caret
+  // position.  In such case, we shouldn't dispatch DOM events.
+  if (dispatchDOMTextEvent &&
+      aCompositionEvent->message == NS_COMPOSITION_CHANGE &&
+      mLastData == aCompositionEvent->mData &&
+      mRanges && aCompositionEvent->mRanges &&
+      mRanges->Equals(*aCompositionEvent->mRanges)) {
+    dispatchEvent = dispatchDOMTextEvent = false;
+  }
+
+  if (dispatchDOMTextEvent) {
     if (!MaybeDispatchCompositionUpdate(aCompositionEvent)) {
       return;
     }
   }
 
-  EventDispatcher::Dispatch(mNode, mPresContext,
-                            aCompositionEvent, nullptr, aStatus, aCallBack);
+  if (dispatchEvent) {
+    // If the composition event should cause a DOM text event, we should
+    // overwrite the event message as NS_COMPOSITION_CHANGE because due to
+    // the limitation of mapping between event messages and DOM event types,
+    // we cannot map multiple event messages to a DOM event type.
+    if (dispatchDOMTextEvent &&
+        aCompositionEvent->message != NS_COMPOSITION_CHANGE) {
+      aCompositionEvent->mFlags =
+        CloneAndDispatchAs(aCompositionEvent, NS_COMPOSITION_CHANGE,
+                           aStatus, aCallBack);
+    } else {
+      EventDispatcher::Dispatch(mNode, mPresContext,
+                                aCompositionEvent, nullptr, aStatus, aCallBack);
+    }
+  } else {
+    *aStatus = nsEventStatus_eConsumeNoDefault;
+  }
 
-  if (NS_WARN_IF(Destroyed())) {
+  if (!IsValidStateForComposition(aCompositionEvent->widget)) {
     return;
   }
 
   // Emulate editor behavior of compositionchange event (DOM text event) handler
   // if no editor handles composition events.
-  if (aCompositionEvent->message == NS_COMPOSITION_CHANGE && !HasEditor()) {
+  if (dispatchDOMTextEvent && !HasEditor()) {
     EditorWillHandleCompositionChangeEvent(aCompositionEvent);
     EditorDidHandleCompositionChangeEvent();
   }
 
-#ifdef DEBUG
-  else if (aCompositionEvent->message == NS_COMPOSITION_END) {
+  if (aCompositionEvent->CausesDOMCompositionEndEvent()) {
+    // Dispatch a compositionend event if it's necessary.
+    if (aCompositionEvent->message != NS_COMPOSITION_END) {
+      CloneAndDispatchAs(aCompositionEvent, NS_COMPOSITION_END);
+    }
     MOZ_ASSERT(!mIsComposing, "Why is the editor still composing?");
     MOZ_ASSERT(!HasEditor(), "Why does the editor still keep to hold this?");
   }
-#endif // #ifdef DEBUG
 
   // Notify composition update to widget if possible
   NotityUpdateComposition(aCompositionEvent);
@@ -221,7 +369,7 @@ TextComposition::NotityUpdateComposition(
       mCompositionStartOffset = 0;
     }
     mCompositionTargetOffset = mCompositionStartOffset;
-  } else if (aCompositionEvent->message == NS_COMPOSITION_CHANGE) {
+  } else if (aCompositionEvent->CausesDOMTextEvent()) {
     mCompositionTargetOffset =
       mCompositionStartOffset + aCompositionEvent->TargetClauseOffset();
   } else {
@@ -265,49 +413,14 @@ TextComposition::RequestToCommit(nsIWidget* aWidget, bool aDiscard)
       mIsRequestingCancel = false;
       mIsRequestingCommit = true;
     }
-    if (!mIsSynthesizedForTests) {
-      // FYI: CompositionEvents caused by a call of NotifyIME() may be
-      //      discarded by PresShell if it's not safe to dispatch the event.
-      nsresult rv =
-        aWidget->NotifyIME(IMENotification(aDiscard ?
-                                             REQUEST_TO_CANCEL_COMPOSITION :
-                                             REQUEST_TO_COMMIT_COMPOSITION));
-      if (rv == NS_ERROR_NOT_IMPLEMENTED) {
-        return rv;
-      }
-      if (NS_WARN_IF(NS_FAILED(rv))) {
-        return rv;
-      }
-    } else {
-      // Emulates to commit or cancel the composition
-      // FYI: These events may be discarded by PresShell if it's not safe to
-      //      dispatch the event.
-      nsCOMPtr<nsIWidget> widget(aWidget);
-      nsAutoString commitData(aDiscard ? EmptyString() : lastData);
-      bool changingData = lastData != commitData;
-
-      WidgetCompositionEvent changeEvent(true, NS_COMPOSITION_CHANGE, widget);
-      changeEvent.mData = commitData;
-      changeEvent.mFlags.mIsSynthesizedForTests = true;
-
-      MaybeDispatchCompositionUpdate(&changeEvent);
-
-      // If changing the data or committing string isn't empty, we need to
-      // dispatch compositionchange event for setting the composition string
-      // without IME selection.
-      if (!Destroyed() && !widget->Destroyed() &&
-          (changingData || !commitData.IsEmpty())) {
-        nsEventStatus status = nsEventStatus_eIgnore;
-        widget->DispatchEvent(&changeEvent, status);
-      }
-
-      if (!Destroyed() && !widget->Destroyed()) {
-        nsEventStatus status = nsEventStatus_eIgnore;
-        WidgetCompositionEvent endEvent(true, NS_COMPOSITION_END, widget);
-        endEvent.mData = commitData;
-        endEvent.mFlags.mIsSynthesizedForTests = true;
-        widget->DispatchEvent(&endEvent, status);
-      }
+    // FYI: CompositionEvents caused by a call of NotifyIME() may be
+    //      discarded by PresShell if it's not safe to dispatch the event.
+    nsresult rv =
+      aWidget->NotifyIME(IMENotification(aDiscard ?
+                                           REQUEST_TO_CANCEL_COMPOSITION :
+                                           REQUEST_TO_COMMIT_COMPOSITION));
+    if (NS_WARN_IF(NS_FAILED(rv))) {
+      return rv;
     }
   }
 
@@ -320,15 +433,12 @@ TextComposition::RequestToCommit(nsIWidget* aWidget, bool aDiscard)
 
   // Otherwise, synthesize the commit in content.
   nsAutoString data(aDiscard ? EmptyString() : lastData);
-  // If the last composition string and new data are different, we need to
-  // dispatch compositionchange event for removing IME selection.  However, if
-  // the commit string is empty string and it's not changed from the last data,
-  // we don't need to dispatch compositionchange event.
-  if (lastData != data || !data.IsEmpty()) {
-    DispatchCompositionEventRunnable(NS_COMPOSITION_CHANGE, data, true);
+  if (data == mLastData) {
+    DispatchCompositionEventRunnable(NS_COMPOSITION_COMMIT_AS_IS, EmptyString(),
+                                     true);
+  } else {
+    DispatchCompositionEventRunnable(NS_COMPOSITION_COMMIT, data, true);
   }
-  DispatchCompositionEventRunnable(NS_COMPOSITION_END, data, true);
-
   return NS_OK;
 }
 
@@ -411,22 +521,17 @@ TextComposition::CompositionEventDispatcher::CompositionEventDispatcher(
 NS_IMETHODIMP
 TextComposition::CompositionEventDispatcher::Run()
 {
-  nsRefPtr<nsPresContext> presContext = mTextComposition->mPresContext;
-  if (!presContext || !presContext->GetPresShell() ||
-      presContext->GetPresShell()->IsDestroying()) {
-    return NS_OK; // cannot dispatch any events anymore
-  }
-
   // The widget can be different from the widget which has dispatched
   // composition events because GetWidget() returns a widget which is proper
   // for calling NotifyIME().  However, this must no be problem since both
   // widget should share native IME context.  Therefore, even if an event
   // handler uses the widget for requesting IME to commit or cancel, it works.
   nsCOMPtr<nsIWidget> widget(mTextComposition->GetWidget());
-  if (NS_WARN_IF(!widget)) {
+  if (!mTextComposition->IsValidStateForComposition(widget)) {
     return NS_OK; // cannot dispatch any events anymore
   }
 
+  nsRefPtr<nsPresContext> presContext = mTextComposition->mPresContext;
   nsEventStatus status = nsEventStatus_eIgnore;
   switch (mEventMessage) {
     case NS_COMPOSITION_START: {
@@ -444,10 +549,13 @@ TextComposition::CompositionEventDispatcher::Run()
                                                 mIsSynthesizedEvent);
       break;
     }
-    case NS_COMPOSITION_END:
-    case NS_COMPOSITION_CHANGE: {
+    case NS_COMPOSITION_CHANGE:
+    case NS_COMPOSITION_COMMIT_AS_IS:
+    case NS_COMPOSITION_COMMIT: {
       WidgetCompositionEvent compEvent(true, mEventMessage, widget);
-      compEvent.mData = mData;
+      if (mEventMessage != NS_COMPOSITION_COMMIT_AS_IS) {
+        compEvent.mData = mData;
+      }
       compEvent.mFlags.mIsSynthesizedForTests =
         mTextComposition->IsSynthesizedForTests();
       IMEStateManager::DispatchCompositionEvent(mEventTarget, presContext,

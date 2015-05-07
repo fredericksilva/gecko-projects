@@ -23,7 +23,6 @@ namespace mozilla {
 
 namespace layers {
 class ImageContainer;
-class PlanarYCbCrImage;
 }
 
 class MediaEngineDefault;
@@ -37,39 +36,38 @@ class MediaEngineDefaultVideoSource : public nsITimerCallback,
 public:
   MediaEngineDefaultVideoSource();
 
-  virtual void GetName(nsAString&);
-  virtual void GetUUID(nsAString&);
+  virtual void GetName(nsAString&) override;
+  virtual void GetUUID(nsAString&) override;
 
-  virtual nsresult Allocate(const VideoTrackConstraintsN &aConstraints,
-                            const MediaEnginePrefs &aPrefs);
-  virtual nsresult Deallocate();
-  virtual nsresult Start(SourceMediaStream*, TrackID);
-  virtual nsresult Stop(SourceMediaStream*, TrackID);
-  virtual void SetDirectListeners(bool aHasDirectListeners) {};
+  virtual nsresult Allocate(const dom::MediaTrackConstraints &aConstraints,
+                            const MediaEnginePrefs &aPrefs) override;
+  virtual nsresult Deallocate() override;
+  virtual nsresult Start(SourceMediaStream*, TrackID) override;
+  virtual nsresult Stop(SourceMediaStream*, TrackID) override;
+  virtual void SetDirectListeners(bool aHasDirectListeners) override {};
   virtual nsresult Config(bool aEchoOn, uint32_t aEcho,
                           bool aAgcOn, uint32_t aAGC,
                           bool aNoiseOn, uint32_t aNoise,
-                          int32_t aPlayoutDelay) { return NS_OK; };
+                          int32_t aPlayoutDelay) override { return NS_OK; };
   virtual void NotifyPull(MediaStreamGraph* aGraph,
                           SourceMediaStream *aSource,
                           TrackID aId,
-                          StreamTime aDesiredTime,
-                          TrackTicks &aLastEndTime);
-  virtual bool SatisfiesConstraintSets(
-      const nsTArray<const dom::MediaTrackConstraintSet*>& aConstraintSets)
+                          StreamTime aDesiredTime) override;
+  virtual uint32_t GetBestFitnessDistance(
+      const nsTArray<const dom::MediaTrackConstraintSet*>& aConstraintSets) override
   {
     return true;
   }
 
-  virtual bool IsFake() {
+  virtual bool IsFake() override {
     return true;
   }
 
-  virtual const MediaSourceType GetMediaSource() {
-    return MediaSourceType::Camera;
+  virtual const dom::MediaSourceEnum GetMediaSource() override {
+    return dom::MediaSourceEnum::Camera;
   }
 
-  virtual nsresult TakePhoto(PhotoCallback* aCallback)
+  virtual nsresult TakePhoto(PhotoCallback* aCallback) override
   {
     return NS_ERROR_NOT_IMPLEMENTED;
   }
@@ -106,34 +104,33 @@ class MediaEngineDefaultAudioSource : public nsITimerCallback,
 public:
   MediaEngineDefaultAudioSource();
 
-  virtual void GetName(nsAString&);
-  virtual void GetUUID(nsAString&);
+  virtual void GetName(nsAString&) override;
+  virtual void GetUUID(nsAString&) override;
 
-  virtual nsresult Allocate(const AudioTrackConstraintsN &aConstraints,
-                            const MediaEnginePrefs &aPrefs);
-  virtual nsresult Deallocate();
-  virtual nsresult Start(SourceMediaStream*, TrackID);
-  virtual nsresult Stop(SourceMediaStream*, TrackID);
-  virtual void SetDirectListeners(bool aHasDirectListeners) {};
+  virtual nsresult Allocate(const dom::MediaTrackConstraints &aConstraints,
+                            const MediaEnginePrefs &aPrefs) override;
+  virtual nsresult Deallocate() override;
+  virtual nsresult Start(SourceMediaStream*, TrackID) override;
+  virtual nsresult Stop(SourceMediaStream*, TrackID) override;
+  virtual void SetDirectListeners(bool aHasDirectListeners) override {};
   virtual nsresult Config(bool aEchoOn, uint32_t aEcho,
                           bool aAgcOn, uint32_t aAGC,
                           bool aNoiseOn, uint32_t aNoise,
-                          int32_t aPlayoutDelay) { return NS_OK; };
+                          int32_t aPlayoutDelay) override { return NS_OK; };
   virtual void NotifyPull(MediaStreamGraph* aGraph,
                           SourceMediaStream *aSource,
                           TrackID aId,
-                          StreamTime aDesiredTime,
-                          TrackTicks &aLastEndTime) {}
+                          StreamTime aDesiredTime) override {}
 
-  virtual bool IsFake() {
+  virtual bool IsFake() override {
     return true;
   }
 
-  virtual const MediaSourceType GetMediaSource() {
-    return MediaSourceType::Microphone;
+  virtual const dom::MediaSourceEnum GetMediaSource() override {
+    return dom::MediaSourceEnum::Microphone;
   }
 
-  virtual nsresult TakePhoto(PhotoCallback* aCallback)
+  virtual nsresult TakePhoto(PhotoCallback* aCallback) override
   {
     return NS_ERROR_NOT_IMPLEMENTED;
   }
@@ -155,14 +152,18 @@ protected:
 class MediaEngineDefault : public MediaEngine
 {
 public:
-  MediaEngineDefault()
-  : mMutex("mozilla::MediaEngineDefault")
+  explicit MediaEngineDefault(bool aHasFakeTracks = false)
+    : mHasFakeTracks(aHasFakeTracks)
+    , mMutex("mozilla::MediaEngineDefault")
   {}
 
-  virtual void EnumerateVideoDevices(MediaSourceType,
+  virtual void EnumerateVideoDevices(dom::MediaSourceEnum,
                                      nsTArray<nsRefPtr<MediaEngineVideoSource> >*);
-  virtual void EnumerateAudioDevices(MediaSourceType,
+  virtual void EnumerateAudioDevices(dom::MediaSourceEnum,
                                      nsTArray<nsRefPtr<MediaEngineAudioSource> >*);
+
+protected:
+  bool mHasFakeTracks;
 
 private:
   ~MediaEngineDefault() {}

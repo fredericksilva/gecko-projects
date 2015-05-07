@@ -11,7 +11,8 @@ const Strings = Services.strings.createBundle("chrome://browser/locale/devtools/
 window.addEventListener("load", function onLoad() {
   window.removeEventListener("load", onLoad);
   document.querySelector("#aboutaddons").onclick = function() {
-    window.parent.UI.openInBrowser("about:addons");
+    let browserWin = Services.wm.getMostRecentWindow("navigator:browser");
+    browserWin.BrowserOpenAddonsMgr("addons://list/extension");
   }
   document.querySelector("#close").onclick = CloseUI;
   GetAvailableAddons().then(BuildUI, (e) => {
@@ -47,8 +48,7 @@ function BuildItem(addon, type) {
         status.textContent = Strings.GetStringFromName("addons_status_" + addon.status);
         break;
       case "failure":
-        console.error(arg);
-        window.alert(arg);
+        window.parent.UI.reportError("error_operationFail", arg);
         break;
       case "progress":
         if (arg == -1) {

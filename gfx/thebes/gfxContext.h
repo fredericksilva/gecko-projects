@@ -42,7 +42,7 @@ struct RectCornerRadii;
  * Note that the gfxContext takes coordinates in device pixels,
  * as opposed to app units.
  */
-class gfxContext MOZ_FINAL {
+class gfxContext final {
     typedef mozilla::gfx::CapStyle CapStyle;
     typedef mozilla::gfx::JoinStyle JoinStyle;
     typedef mozilla::gfx::FillRule FillRule;
@@ -109,15 +109,6 @@ public:
     void Fill(const Pattern& aPattern);
 
     /**
-     * Fill the current path according to the current settings and
-     * with |aOpacity|.
-     *
-     * Does not consume the current path.
-     */
-    void FillWithOpacity(gfxFloat aOpacity);
-    void FillWithOpacity(const Pattern& aPattern, gfxFloat aOpacity);
-
-    /**
      * Forgets the current path.
      */
     void NewPath();
@@ -156,16 +147,6 @@ public:
      */
     void LineTo(const gfxPoint& pt);
 
-    /**
-     * Draws a cubic Bézier curve with control points pt1, pt2 and pt3.
-     */
-    void CurveTo(const gfxPoint& pt1, const gfxPoint& pt2, const gfxPoint& pt3);
-
-    /**
-     * Draws a quadratic Bézier curve with control points pt1, pt2 and pt3.
-     */
-    void QuadraticCurveTo(const gfxPoint& pt1, const gfxPoint& pt2);
-
     // path helpers
     /**
      * Draws a line from start to end.
@@ -178,11 +159,6 @@ public:
      */
     void Rectangle(const gfxRect& rect, bool snapToPixels = false);
     void SnappedRectangle(const gfxRect& rect) { return Rectangle(rect, true); }
-
-    /**
-     * Draw a polygon from the given points
-     */
-    void Polygon(const gfxPoint *points, uint32_t numPoints);
 
     /**
      ** Transformation Matrix manipulation
@@ -343,17 +319,7 @@ public:
      */
     void Mask(gfxASurface *surface, const gfxPoint& offset = gfxPoint(0.0, 0.0));
 
-    void Mask(mozilla::gfx::SourceSurface *surface, const mozilla::gfx::Point& offset = mozilla::gfx::Point());
-
-    /**
-     ** Shortcuts
-     **/
-
-    /**
-     * Creates a new path with a rectangle from 0,0 to size.w,size.h
-     * and calls cairo_fill.
-     */
-    void DrawSurface(gfxASurface *surface, const gfxSize& size);
+    void Mask(mozilla::gfx::SourceSurface *surface, float alpha = 1.0f, const mozilla::gfx::Point& offset = mozilla::gfx::Point());
 
     /**
      ** Line Properties
@@ -408,7 +374,6 @@ public:
 
     // define enum for operators (clear, src, dst, etc)
     enum GraphicsOperator {
-        OPERATOR_CLEAR,
         OPERATOR_SOURCE,
 
         OPERATOR_OVER,
@@ -465,12 +430,6 @@ public:
     void Clip();
 
     /**
-     * Undoes any clipping. Further drawings will only be restricted by the
-     * surface dimensions.
-     */
-    void ResetClip();
-
-    /**
      * Helper functions that will create a rect path and call Clip().
      * Any current path will be destroyed by these functions!
      */
@@ -478,11 +437,7 @@ public:
     void Clip(const gfxRect& rect); // will clip to a rect
     void Clip(Path* aPath);
 
-    /**
-     * This will ensure that the surface actually has its clip set.
-     * Useful if you are doing native drawing.
-     */
-    void UpdateSurfaceClip();
+    void PopClip();
 
     /**
      * This will return the current bounds of the clip region in user
@@ -565,7 +520,6 @@ private:
   struct AzureState {
     AzureState()
       : op(mozilla::gfx::CompositionOp::OP_OVER)
-      , opIsClear(false)
       , color(0, 0, 0, 1.0f)
       , clipWasReset(false)
       , fillRule(mozilla::gfx::FillRule::FILL_WINDING)
@@ -574,7 +528,6 @@ private:
     {}
 
     mozilla::gfx::CompositionOp op;
-    bool opIsClear;
     Color color;
     nsRefPtr<gfxPattern> pattern;
     nsRefPtr<gfxASurface> sourceSurfCairo;

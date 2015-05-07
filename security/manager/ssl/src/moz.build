@@ -23,6 +23,10 @@ EXPORTS.mozilla += [
     'PublicSSL.h',
 ]
 
+EXPORTS.mozilla.psm += [
+    'PSMContentListener.h',
+]
+
 UNIFIED_SOURCES += [
     'CryptoTask.cpp',
     'nsCertOverrideService.cpp',
@@ -30,22 +34,25 @@ UNIFIED_SOURCES += [
     'nsCertVerificationThread.cpp',
     'nsClientAuthRemember.cpp',
     'nsCrypto.cpp',
+    'nsCryptoHash.cpp',
     'nsDataSignatureVerifier.cpp',
     'nsKeygenHandler.cpp',
+    'nsKeygenHandlerContent.cpp',
     'nsKeygenThread.cpp',
     'nsKeyModule.cpp',
     'nsNSSASN1Object.cpp',
     'nsNSSCallbacks.cpp',
-    'nsNSSCertCache.cpp',
     'nsNSSCertHelper.cpp',
     'nsNSSCertificate.cpp',
     'nsNSSCertificateFakeTransport.cpp',
     'nsNSSCertTrust.cpp',
     'nsNSSCertValidity.cpp',
+    'nsNSSComponent.cpp',
     'nsNSSErrors.cpp',
     'nsNSSIOLayer.cpp',
     'nsNSSModule.cpp',
     'nsNSSShutDown.cpp',
+    'nsNSSVersion.cpp',
     'nsNTLMAuthModule.cpp',
     'nsPK11TokenDB.cpp',
     'nsPKCS11Slot.cpp',
@@ -57,9 +64,9 @@ UNIFIED_SOURCES += [
     'NSSErrorsService.cpp',
     'nsSSLSocketProvider.cpp',
     'nsSSLStatus.cpp',
-    'nsStreamCipher.cpp',
     'nsTLSSocketProvider.cpp',
     'nsUsageArrayHelper.cpp',
+    'PSMContentListener.cpp',
     'PSMRunnable.cpp',
     'SharedSSLState.cpp',
     'SSLServerCertVerification.cpp',
@@ -67,14 +74,16 @@ UNIFIED_SOURCES += [
 ]
 
 # nsNSSCertificateDB.cpp needs to include nscert.h before everything else.
-# The rest cannot be built in unified mode because they want to force NSPR
-# logging.
 SOURCES += [
-    'nsCryptoHash.cpp',
     'nsNSSCertificateDB.cpp',
-    'nsNSSComponent.cpp',
-    'nsNSSVersion.cpp',
-    'PSMContentListener.cpp',
+]
+
+IPDL_SOURCES += [
+    'PPSMContentDownloader.ipdl',
+]
+
+LOCAL_INCLUDES += [
+    '/security/manager/boot/src',
 ]
 
 if not CONFIG['MOZ_NO_SMART_CARDS']:
@@ -98,6 +107,7 @@ FINAL_LIBRARY = 'xul'
 LOCAL_INCLUDES += [
     '../../../certverifier',
     '../../../pkix/include',
+    '/dom/base',
 ]
 
 if CONFIG['NSS_DISABLE_DBM']:
@@ -111,3 +121,5 @@ for var in ('DLL_PREFIX', 'DLL_SUFFIX'):
 USE_LIBS += [
     'crmf',
 ]
+
+include('/ipc/chromium/chromium-config.mozbuild')

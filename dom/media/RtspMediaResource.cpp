@@ -220,6 +220,13 @@ nsresult RtspTrackBuffer::ReadBuffer(uint8_t* aToBuffer, uint32_t aToBufferSize,
   // 3. No data in this buffer
   // 4. mIsStarted is not set
   while (1) {
+    // Make sure the track buffer is started.
+    // It could be stopped when RTSP connection is disconnected.
+    if (!mIsStarted) {
+      RTSPMLOG("ReadBuffer: mIsStarted is false");
+      return NS_ERROR_FAILURE;
+    }
+
     // Do not read from buffer if we are still in the playout delay duration.
     if (mDuringPlayoutDelay) {
       monitor.Wait();
@@ -236,7 +243,10 @@ nsresult RtspTrackBuffer::ReadBuffer(uint8_t* aToBuffer, uint32_t aToBufferSize,
         aFrameSize = mBufferSlotData[mConsumerIdx].mLength;
         break;
       }
-      uint32_t slots = (mBufferSlotData[mConsumerIdx].mLength / mSlotSize) + 1;
+      uint32_t slots = mBufferSlotData[mConsumerIdx].mLength / mSlotSize;
+      if (mBufferSlotData[mConsumerIdx].mLength % mSlotSize > 0) {
+        slots++;
+      }
       // we have data, copy to aToBuffer
       MOZ_ASSERT(mBufferSlotData[mConsumerIdx].mLength <=
                  (int32_t)((BUFFER_SLOT_NUM - mConsumerIdx) * mSlotSize));
@@ -261,10 +271,6 @@ nsresult RtspTrackBuffer::ReadBuffer(uint8_t* aToBuffer, uint32_t aToBufferSize,
       mConsumerIdx = (mConsumerIdx + 1) % BUFFER_SLOT_NUM;
       RTSPMLOG("BUFFER_SLOT_INVALID move forward");
     } else {
-      // No data, and disconnected.
-      if (!mIsStarted) {
-        return NS_ERROR_FAILURE;
-      }
       // No data, the decode thread is blocked here until we receive
       // OnMediaDataAvailable. The OnMediaDataAvailable will call WriteBuffer()
       // to wake up the decode thread.
@@ -332,13 +338,15 @@ void RtspTrackBuffer::WriteBuffer(const char *aFromBuffer, uint32_t aWriteCount,
   // The flag is true if the incoming data is larger than remainder free slots
   bool returnToHead = false;
   // Calculate how many slots the incoming data needed.
-  int32_t slots = 1;
+  int32_t slots = aWriteCount / mSlotSize;
+  if (aWriteCount % mSlotSize > 0) {
+    slots++;
+  }
   int32_t i;
   RTSPMLOG("WriteBuffer mTrackIdx %d mProducerIdx %d mConsumerIdx %d",
            mTrackIdx, mProducerIdx,mConsumerIdx);
   if (aWriteCount > mSlotSize) {
     isMultipleSlots = true;
-    slots = (aWriteCount / mSlotSize) + 1;
   }
   if (isMultipleSlots &&
       (aWriteCount > (BUFFER_SLOT_NUM - mProducerIdx) * mSlotSize)) {
@@ -488,7 +496,8 @@ RtspMediaResource::RtspMediaResource(MediaDecoder* aDecoder,
     nsIChannel* aChannel, nsIURI* aURI, const nsACString& aContentType)
   : BaseMediaResource(aDecoder, aChannel, aURI, aContentType)
   , mIsConnected(false)
-  , mRealTime(false)
+  , mIsLiveStream(false)
+  , mHasTimestamp(true)
   , mIsSuspend(true)
 {
 #ifndef NECKO_PROTOCOL_rtsp
@@ -616,6 +625,11 @@ RtspMediaResource::ReadFrameFromTrack(uint8_t* aBuffer, uint32_t aBufferSize,
                "ReadTrack index > mTrackBuffer");
   MOZ_ASSERT(aBuffer);
 
+  if (!mIsConnected) {
+    RTSPMLOG("ReadFrameFromTrack: RTSP not connected");
+    return NS_ERROR_FAILURE;
+  }
+
   return mTrackBuffer[aTrackIdx]->ReadBuffer(aBuffer, aBufferSize, aBytes,
                                              aTime, aFrameSize);
 }
@@ -631,9 +645,6 @@ RtspMediaResource::OnMediaDataAvailable(uint8_t aTrackIdx,
   uint32_t frameType;
   meta->GetTimeStamp(&time);
   meta->GetFrameType(&frameType);
-  if (mRealTime) {
-    time = 0;
-  }
   mTrackBuffer[aTrackIdx]->WriteBuffer(data.BeginReading(), length, time,
                                        frameType);
   return NS_OK;
@@ -719,7 +730,7 @@ RtspMediaResource::OnConnected(uint8_t aTrackIdx,
   // If the durationUs is 0, imply the stream is live stream.
   if (durationUs) {
     // Not live stream.
-    mRealTime = false;
+    mIsLiveStream = false;
     mDecoder->SetInfinite(false);
     mDecoder->SetDuration((double)(durationUs) / USECS_PER_S);
   } else {
@@ -732,18 +743,17 @@ RtspMediaResource::OnConnected(uint8_t aTrackIdx,
       NS_DispatchToMainThread(event);
       return NS_ERROR_FAILURE;
     } else {
-      mRealTime = true;
+      mIsLiveStream = true;
       bool seekable = false;
       mDecoder->SetInfinite(true);
       mDecoder->SetMediaSeekable(seekable);
     }
   }
-  // Fires an initial progress event and sets up the stall counter so stall events
-  // fire if no download occurs within the required time frame.
-  mDecoder->Progress(false);
-
   MediaDecoderOwner* owner = mDecoder->GetMediaOwner();
   NS_ENSURE_TRUE(owner, NS_ERROR_FAILURE);
+  // Fires an initial progress event.
+  owner->DownloadProgressed();
+
   dom::HTMLMediaElement* element = owner->GetMediaElement();
   NS_ENSURE_TRUE(element, NS_ERROR_FAILURE);
 
@@ -770,6 +780,7 @@ RtspMediaResource::OnDisconnected(uint8_t aTrackIdx, nsresult aReason)
         aReason == NS_ERROR_NET_TIMEOUT) {
       // Report error code to Decoder.
       RTSPMLOG("Error in OnDisconnected 0x%x", aReason);
+      mIsConnected = false;
       mDecoder->NetworkError();
     } else {
       // Resetting the decoder and media element when the connection

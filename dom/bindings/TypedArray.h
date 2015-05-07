@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*-*/
-/* vim: set ts=2 sw=2 et tw=79: */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -53,7 +53,7 @@ public:
   }
 
 private:
-  TypedArrayObjectStorage(const TypedArrayObjectStorage&) MOZ_DELETE;
+  TypedArrayObjectStorage(const TypedArrayObjectStorage&) = delete;
 };
 
 /*
@@ -133,9 +133,8 @@ public:
   }
 
 private:
-  TypedArray_base(const TypedArray_base&) MOZ_DELETE;
+  TypedArray_base(const TypedArray_base&) = delete;
 };
-
 
 template<typename T,
          JSObject* UnwrapArray(JSObject*),
@@ -188,7 +187,7 @@ private:
     return obj;
   }
 
-  TypedArray(const TypedArray&) MOZ_DELETE;
+  TypedArray(const TypedArray&) = delete;
 };
 
 typedef TypedArray<int8_t, js::UnwrapInt8Array, JS_GetInt8ArrayData,
@@ -259,7 +258,7 @@ public:
   {
   }
 
-  virtual void trace(JSTracer* trc) MOZ_OVERRIDE
+  virtual void trace(JSTracer* trc) override
   {
     mArray->TraceSelf(trc);
   }
@@ -282,7 +281,7 @@ public:
   {
   }
 
-  virtual void trace(JSTracer* trc) MOZ_OVERRIDE
+  virtual void trace(JSTracer* trc) override
   {
     if (!mArray->IsNull()) {
       mArray->Value().TraceSelf(trc);
@@ -301,16 +300,14 @@ class MOZ_STACK_CLASS RootedTypedArray : public ArrayType,
 public:
   explicit RootedTypedArray(JSContext* cx MOZ_GUARD_OBJECT_NOTIFIER_PARAM) :
     ArrayType(),
-    TypedArrayRooter<ArrayType>(cx,
-                                MOZ_THIS_IN_INITIALIZER_LIST()
+    TypedArrayRooter<ArrayType>(cx, this
                                 MOZ_GUARD_OBJECT_NOTIFIER_PARAM_TO_PARENT)
   {
   }
 
   RootedTypedArray(JSContext* cx, JSObject* obj MOZ_GUARD_OBJECT_NOTIFIER_PARAM) :
     ArrayType(obj),
-    TypedArrayRooter<ArrayType>(cx,
-                                MOZ_THIS_IN_INITIALIZER_LIST()
+    TypedArrayRooter<ArrayType>(cx, this
                                 MOZ_GUARD_OBJECT_NOTIFIER_PARAM_TO_PARENT)
   {
   }

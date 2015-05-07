@@ -29,6 +29,11 @@ namespace mozilla {
 class ErrorResult;
 template <typename T> class AsyncEventRunner;
 
+enum MSRangeRemovalAction: uint8_t {
+  RUN = 0,
+  SKIP = 1
+};
+
 namespace dom {
 
 class GlobalObject;
@@ -40,7 +45,7 @@ template <typename T> class Optional;
   { 0x3839d699, 0x22c5, 0x439f, \
   { 0x94, 0xca, 0x0e, 0x0b, 0x26, 0xf9, 0xca, 0xbf } }
 
-class MediaSource MOZ_FINAL : public DOMEventTargetHelper
+class MediaSource final : public DOMEventTargetHelper
 {
 public:
   /** WebIDL Methods. */
@@ -60,6 +65,8 @@ public:
 
   void EndOfStream(const Optional<MediaSourceEndOfStreamError>& aError, ErrorResult& aRv);
   static bool IsTypeSupported(const GlobalObject&, const nsAString& aType);
+
+  static bool Enabled(JSContext* cx, JSObject* aGlobal);
   /** End WebIDL Methods. */
 
   NS_DECL_ISUPPORTS_INHERITED
@@ -68,7 +75,7 @@ public:
 
   nsPIDOMWindow* GetParentObject() const;
 
-  JSObject* WrapObject(JSContext* aCx) MOZ_OVERRIDE;
+  JSObject* WrapObject(JSContext* aCx, JS::Handle<JSObject*> aGivenProto) override;
 
   // Attach this MediaSource to Decoder aDecoder.  Returns false if already attached.
   bool Attach(MediaSourceDecoder* aDecoder);
@@ -107,10 +114,16 @@ public:
   void Dump(const char* aPath);
 #endif
 
+  // Returns a string describing the state of the MediaSource internal
+  // buffered data. Used for debugging purposes.
+  void GetMozDebugReaderData(nsAString& aString);
+
 private:
   // MediaSourceDecoder uses DurationChange to set the duration
   // without hitting the checks in SetDuration.
   friend class mozilla::MediaSourceDecoder;
+  // SourceBuffer uses SetDuration and SourceBufferIsActive
+  friend class mozilla::dom::SourceBuffer;
 
   ~MediaSource();
 
@@ -124,10 +137,19 @@ private:
 
   void InitializationEvent();
 
+  // SetDuration with no checks.
+  void SetDuration(double aDuration, MSRangeRemovalAction aAction);
+
+  // Mark SourceBuffer as active and rebuild ActiveSourceBuffers.
+  void SourceBufferIsActive(SourceBuffer* aSourceBuffer);
+
   nsRefPtr<SourceBufferList> mSourceBuffers;
   nsRefPtr<SourceBufferList> mActiveSourceBuffers;
 
   nsRefPtr<MediaSourceDecoder> mDecoder;
+  // Ensures the media element remains alive to dispatch progress and
+  // durationchanged events.
+  nsRefPtr<HTMLMediaElement> mMediaElement;
 
   nsRefPtr<nsIPrincipal> mPrincipal;
 

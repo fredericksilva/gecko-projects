@@ -120,6 +120,7 @@ IsBidiUI()
 nsCaret::nsCaret()
 : mOverrideOffset(0)
 , mIsBlinkOn(false)
+, mBlinkCount(-1)
 , mVisible(false)
 , mReadOnly(false)
 , mShowDuringSelection(false)
@@ -381,7 +382,7 @@ GetFrameAndOffset(Selection* aSelection,
 
   nsIContent* contentNode = focusNode->AsContent();
   nsFrameSelection* frameSelection = aSelection->GetFrameSelection();
-  uint8_t bidiLevel = frameSelection->GetCaretBidiLevel();
+  nsBidiLevel bidiLevel = frameSelection->GetCaretBidiLevel();
   nsIFrame* frame;
   nsresult rv = nsCaret::GetCaretFrameForNodeOffset(
       frameSelection, contentNode, focusOffset,
@@ -551,7 +552,7 @@ NS_IMETHODIMP
 nsCaret::NotifySelectionChanged(nsIDOMDocument *, nsISelection *aDomSel,
                                 int16_t aReason)
 {
-  if (aReason & nsISelectionListener::MOUSEUP_REASON)//this wont do
+  if ((aReason & nsISelectionListener::MOUSEUP_REASON) || !IsVisible())//this wont do
     return NS_OK;
 
   nsCOMPtr<nsISelection> domSel(do_QueryReferent(mDomSelectionWeak));
@@ -594,6 +595,7 @@ void nsCaret::ResetBlinking()
   uint32_t blinkRate = static_cast<uint32_t>(
     LookAndFeel::GetInt(LookAndFeel::eIntID_CaretBlinkTime, 500));
   if (blinkRate > 0) {
+    mBlinkCount = Preferences::GetInt("ui.caretBlinkCount", -1);
     mBlinkTimer->InitWithFuncCallback(CaretBlinkCallback, this, blinkRate,
                                       nsITimer::TYPE_REPEATING_SLACK);
   }
@@ -607,12 +609,12 @@ void nsCaret::StopBlinking()
   }
 }
 
-nsresult 
+nsresult
 nsCaret::GetCaretFrameForNodeOffset(nsFrameSelection*    aFrameSelection,
                                     nsIContent*          aContentNode,
                                     int32_t              aOffset,
                                     CaretAssociationHint aFrameHint,
-                                    uint8_t              aBidiLevel,
+                                    nsBidiLevel          aBidiLevel,
                                     nsIFrame**           aReturnFrame,
                                     int32_t*             aReturnOffset)
 {
@@ -656,8 +658,8 @@ nsCaret::GetCaretFrameForNodeOffset(nsFrameSelection*    aFrameSelection,
     int32_t end;
     nsIFrame* frameBefore;
     nsIFrame* frameAfter;
-    uint8_t levelBefore;     // Bidi level of the character before the caret
-    uint8_t levelAfter;      // Bidi level of the character after the caret
+    nsBidiLevel levelBefore; // Bidi level of the character before the caret
+    nsBidiLevel levelAfter;  // Bidi level of the character after the caret
 
     theFrame->GetOffsets(start, end);
     if (start == 0 || end == 0 || start == theFrameOffset || end == theFrameOffset)
@@ -678,8 +680,10 @@ nsCaret::GetCaretFrameForNodeOffset(nsFrameSelection*    aFrameSelection,
           aBidiLevel = std::max(aBidiLevel, std::min(levelBefore, levelAfter));                                  // rule c3
           aBidiLevel = std::min(aBidiLevel, std::max(levelBefore, levelAfter));                                  // rule c4
           if (aBidiLevel == levelBefore                                                                      // rule c1
-              || (aBidiLevel > levelBefore && aBidiLevel < levelAfter && !((aBidiLevel ^ levelBefore) & 1))    // rule c5
-              || (aBidiLevel < levelBefore && aBidiLevel > levelAfter && !((aBidiLevel ^ levelBefore) & 1)))  // rule c9
+              || (aBidiLevel > levelBefore && aBidiLevel < levelAfter &&
+                  IS_SAME_DIRECTION(aBidiLevel, levelBefore))   // rule c5
+              || (aBidiLevel < levelBefore && aBidiLevel > levelAfter &&
+                  IS_SAME_DIRECTION(aBidiLevel, levelBefore)))  // rule c9
           {
             if (theFrame != frameBefore)
             {
@@ -695,10 +699,12 @@ nsCaret::GetCaretFrameForNodeOffset(nsFrameSelection*    aFrameSelection,
                 // so we stay with the current frame.
                 // Exception: when the first frame on the line has a different Bidi level from the paragraph level, there is no
                 // real frame for the caret to be in. We have to find the visually first frame on the line.
-                uint8_t baseLevel = NS_GET_BASE_LEVEL(frameAfter);
+                nsBidiLevel baseLevel = NS_GET_BASE_LEVEL(frameAfter);
                 if (baseLevel != levelAfter)
                 {
-                  nsPeekOffsetStruct pos(eSelectBeginLine, eDirPrevious, 0, 0, false, true, false, true);
+                  nsPeekOffsetStruct pos(eSelectBeginLine, eDirPrevious, 0,
+                                         nsPoint(0, 0), false, true, false,
+                                         true, false);
                   if (NS_SUCCEEDED(frameAfter->PeekOffset(&pos))) {
                     theFrame = pos.mResultFrame;
                     theFrameOffset = pos.mContentOffset;
@@ -708,8 +714,10 @@ nsCaret::GetCaretFrameForNodeOffset(nsFrameSelection*    aFrameSelection,
             }
           }
           else if (aBidiLevel == levelAfter                                                                     // rule c2
-                   || (aBidiLevel > levelBefore && aBidiLevel < levelAfter && !((aBidiLevel ^ levelAfter) & 1))   // rule c6
-                   || (aBidiLevel < levelBefore && aBidiLevel > levelAfter && !((aBidiLevel ^ levelAfter) & 1)))  // rule c10
+                   || (aBidiLevel > levelBefore && aBidiLevel < levelAfter &&
+                       IS_SAME_DIRECTION(aBidiLevel, levelAfter))   // rule c6
+                   || (aBidiLevel < levelBefore && aBidiLevel > levelAfter &&
+                       IS_SAME_DIRECTION(aBidiLevel, levelAfter)))  // rule c10
           {
             if (theFrame != frameAfter)
             {
@@ -726,10 +734,12 @@ nsCaret::GetCaretFrameForNodeOffset(nsFrameSelection*    aFrameSelection,
                 // so we stay with the current frame.
                 // Exception: when the last frame on the line has a different Bidi level from the paragraph level, there is no
                 // real frame for the caret to be in. We have to find the visually last frame on the line.
-                uint8_t baseLevel = NS_GET_BASE_LEVEL(frameBefore);
+                nsBidiLevel baseLevel = NS_GET_BASE_LEVEL(frameBefore);
                 if (baseLevel != levelBefore)
                 {
-                  nsPeekOffsetStruct pos(eSelectEndLine, eDirNext, 0, 0, false, true, false, true);
+                  nsPeekOffsetStruct pos(eSelectEndLine, eDirNext, 0,
+                                         nsPoint(0, 0), false, true, false,
+                                         true, false);
                   if (NS_SUCCEEDED(frameBefore->PeekOffset(&pos))) {
                     theFrame = pos.mResultFrame;
                     theFrameOffset = pos.mContentOffset;
@@ -739,33 +749,33 @@ nsCaret::GetCaretFrameForNodeOffset(nsFrameSelection*    aFrameSelection,
             }
           }
           else if (aBidiLevel > levelBefore && aBidiLevel < levelAfter  // rule c7/8
-                   && !((levelBefore ^ levelAfter) & 1)                 // before and after have the same parity
-                   && ((aBidiLevel ^ levelAfter) & 1))                  // caret has different parity
+                   && IS_SAME_DIRECTION(levelBefore, levelAfter)        // before and after have the same parity
+                   && !IS_SAME_DIRECTION(aBidiLevel, levelAfter))       // caret has different parity
           {
             if (NS_SUCCEEDED(aFrameSelection->GetFrameFromLevel(frameAfter, eDirNext, aBidiLevel, &theFrame)))
             {
               theFrame->GetOffsets(start, end);
               levelAfter = NS_GET_EMBEDDING_LEVEL(theFrame);
-              if (aBidiLevel & 1) // c8: caret to the right of the rightmost character
-                theFrameOffset = (levelAfter & 1) ? start : end;
+              if (IS_LEVEL_RTL(aBidiLevel)) // c8: caret to the right of the rightmost character
+                theFrameOffset = IS_LEVEL_RTL(levelAfter) ? start : end;
               else               // c7: caret to the left of the leftmost character
-                theFrameOffset = (levelAfter & 1) ? end : start;
+                theFrameOffset = IS_LEVEL_RTL(levelAfter) ? end : start;
             }
           }
           else if (aBidiLevel < levelBefore && aBidiLevel > levelAfter  // rule c11/12
-                   && !((levelBefore ^ levelAfter) & 1)                 // before and after have the same parity
-                   && ((aBidiLevel ^ levelAfter) & 1))                  // caret has different parity
+                   && IS_SAME_DIRECTION(levelBefore, levelAfter)        // before and after have the same parity
+                   && !IS_SAME_DIRECTION(aBidiLevel, levelAfter))       // caret has different parity
           {
             if (NS_SUCCEEDED(aFrameSelection->GetFrameFromLevel(frameBefore, eDirPrevious, aBidiLevel, &theFrame)))
             {
               theFrame->GetOffsets(start, end);
               levelBefore = NS_GET_EMBEDDING_LEVEL(theFrame);
-              if (aBidiLevel & 1) // c12: caret to the left of the leftmost character
-                theFrameOffset = (levelBefore & 1) ? end : start;
+              if (IS_LEVEL_RTL(aBidiLevel)) // c12: caret to the left of the leftmost character
+                theFrameOffset = IS_LEVEL_RTL(levelBefore) ? end : start;
               else               // c11: caret to the right of the rightmost character
-                theFrameOffset = (levelBefore & 1) ? start : end;
+                theFrameOffset = IS_LEVEL_RTL(levelBefore) ? start : end;
             }
-          }   
+          }
         }
       }
     }
@@ -905,6 +915,19 @@ void nsCaret::CaretBlinkCallback(nsITimer* aTimer, void* aClosure)
   }
   theCaret->mIsBlinkOn = !theCaret->mIsBlinkOn;
   theCaret->SchedulePaint();
+
+  // mBlinkCount of -1 means blink count is not enabled.
+  if (theCaret->mBlinkCount == -1) {
+    return;
+  }
+
+  // Track the blink count, but only at end of a blink cycle.
+  if (!theCaret->mIsBlinkOn) {
+    // If we exceeded the blink count, stop the timer.
+    if (--theCaret->mBlinkCount <= 0) {
+      theCaret->StopBlinking();
+    }
+  }
 }
 
 void

@@ -6,6 +6,7 @@ let outOfProcess = __marionetteParams[0]
 let mochitestUrl = __marionetteParams[1]
 let onDevice = __marionetteParams[2]
 let wifiSettings = __marionetteParams[3]
+let chrome = __marionetteParams[4]
 let prefs = Components.classes["@mozilla.org/preferences-service;1"].
                             getService(Components.interfaces.nsIPrefBranch)
 let settings = window.navigator.mozSettings;
@@ -30,19 +31,19 @@ if (cm) {
 
 function openWindow(aEvent) {
   var popupIframe = aEvent.detail.frameElement;
-  popupIframe.style = 'position: absolute; left: 0; top: 0px; background: white;';
+  popupIframe.id = 'popupiframe';
 
   // This is to size the iframe to what is requested in the window.open call,
   // e.g. window.open("", "", "width=600,height=600");
   if (aEvent.detail.features.indexOf('width') != -1) {
     let width = aEvent.detail.features.substr(aEvent.detail.features.indexOf('width')+6);
     width = width.substr(0,width.indexOf(',') == -1 ? width.length : width.indexOf(','));
-    popupIframe.style.width = width + 'px';
+    popupIframe.setAttribute('width', width);
   }
   if (aEvent.detail.features.indexOf('height') != -1) {
     let height = aEvent.detail.features.substr(aEvent.detail.features.indexOf('height')+7);
     height = height.substr(0, height.indexOf(',') == -1 ? height.length : height.indexOf(','));
-    popupIframe.style.height = height + 'px';
+    popupIframe.setAttribute('height', height);
   }
 
   popupIframe.addEventListener('mozbrowserclose', function(e) {
@@ -65,6 +66,14 @@ function openWindow(aEvent) {
   container.parentNode.appendChild(popupIframe);
 }
 container.addEventListener('mozbrowseropenwindow', openWindow);
+container.addEventListener('mozbrowsershowmodalprompt', function (e) {
+  if (e.detail.message == 'setVisible::false') {
+    container.setVisible(false);
+  }
+  else if (e.detail.message == 'setVisible::true') {
+    container.setVisible(true);
+  }
+});
 
 if (outOfProcess) {
   let specialpowers = {};
@@ -86,6 +95,11 @@ if (outOfProcess) {
   mm.loadFrameScript("data:,(" + encodeURI(contentScript.toSource()) + ")();", true);
 }
 
+if (chrome) {
+  let loader = Cc["@mozilla.org/moz/jssubscript-loader;1"].getService(Ci.mozIJSSubScriptLoader);
+  loader.loadSubScript("chrome://mochikit/content/browser-test.js");
+  b2gStart();
+}
 
 if (onDevice) {
   var cpuLock = Cc["@mozilla.org/power/powermanagerservice;1"]
@@ -133,5 +147,7 @@ if (onDevice) {
     };
   }
 } else {
-  container.src = mochitestUrl;
+  if (!chrome) {
+    container.src = mochitestUrl;
+  }
 }

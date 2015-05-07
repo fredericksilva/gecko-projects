@@ -128,14 +128,23 @@ protected:
     enum eCompositionState {
         eCompositionState_NotComposing,
         eCompositionState_CompositionStartDispatched,
-        eCompositionState_CompositionChangeEventDispatched,
-        eCompositionState_CommitCompositionChangeEventDispatched
+        eCompositionState_CompositionChangeEventDispatched
     };
     eCompositionState mCompositionState;
 
-    bool IsComposing()
+    bool IsComposing() const
     {
         return (mCompositionState != eCompositionState_NotComposing);
+    }
+
+    bool IsComposingOn(GtkIMContext* aContext) const
+    {
+        return IsComposing() && mComposingContext == aContext;
+    }
+
+    bool IsComposingOnCurrentContext() const
+    {
+        return IsComposingOn(GetCurrentContext());
     }
 
     bool EditorHasCompositionString()
@@ -164,8 +173,6 @@ protected:
                 return "CompositionStartDispatched";
             case eCompositionState_CompositionChangeEventDispatched:
                 return "CompositionChangeEventDispatched";
-            case eCompositionState_CommitCompositionChangeEventDispatched:
-                return "CommitCompositionChangeEventDispatched";
             default:
                 return "InvaildState";
         }
@@ -186,6 +193,9 @@ protected:
     // keypress event.  If this is true, the keydown event has been dispatched.
     // Then, DispatchCompositionStart() doesn't dispatch keydown event.
     bool mKeyDownEventWasSent;
+    // mIsDeletingSurrounding is true while OnDeleteSurroundingNative() is
+    // trying to delete the surrounding text.
+    bool mIsDeletingSurrounding;
 
     // sLastFocusedModule is a pointer to the last focused instance of this
     // class.  When a instance is destroyed and sLastFocusedModule refers it,
@@ -317,7 +327,7 @@ protected:
      *    FALSE, callers cannot continue the composition.
      *      - DispatchCompositionStart
      *      - DispatchCompositionChangeEvent
-     *      - DispatchCompositionEventsForCommit
+     *      - DispatchCompositionCommitEvent
      */
 
     /**
@@ -341,17 +351,19 @@ protected:
                                         const nsAString& aCompositionString);
 
     /**
-     * Dispatches a compositionchange event for committing the composition
-     * string and a compositionend event.
+     * Dispatches a compositioncommit event or compositioncommitasis event.
      *
      * @param aContext              A GtkIMContext which is being handled.
-     * @param aCommitString         The string which the composition is
-     *                              committed with.
+     * @param aCommitString         If this is nullptr, the composition will
+     *                              be committed with last dispatched data.
+     *                              Otherwise, the composition will be
+     *                              committed with this value.
      * @return                      true if the focused widget is neither
      *                              destroyed nor changed.  Otherwise, false.
      */
-    bool DispatchCompositionEventsForCommit(GtkIMContext* aContext,
-                                            const nsAString& aCommitString);
+    bool DispatchCompositionCommitEvent(
+             GtkIMContext* aContext,
+             const nsAString* aCommitString = nullptr);
 };
 
 #endif // __nsGtkIMModule_h__

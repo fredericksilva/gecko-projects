@@ -1,4 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -113,6 +114,7 @@ class nsCSPParser {
     void            directive();
     nsCSPDirective* directiveName();
     void            directiveValue(nsTArray<nsCSPBaseSrc*>& outSrcs);
+    void            referrerDirectiveValue();
     void            sourceList(nsTArray<nsCSPBaseSrc*>& outSrcs);
     nsCSPBaseSrc*   sourceExpression();
     nsCSPSchemeSrc* schemeSource();
@@ -128,8 +130,13 @@ class nsCSPParser {
     bool            path(nsCSPHostSrc* aCspHost);
 
     bool subHost();                                       // helper function to parse subDomains
+    bool atValidUnreservedChar();                         // helper function to parse unreserved
+    bool atValidSubDelimChar();                           // helper function to parse sub-delims
+    bool atValidPctEncodedChar();                         // helper function to parse pct-encoded
     bool subPath(nsCSPHostSrc* aCspHost);                 // helper function to parse paths
     void reportURIList(nsTArray<nsCSPBaseSrc*>& outSrcs); // helper function to parse report-uris
+    void percentDecodeStr(const nsAString& aEncStr,       // helper function to percent-decode
+                          nsAString& outDecStr);
 
     inline bool atEnd()
     {
@@ -221,6 +228,10 @@ class nsCSPParser {
     nsString           mCurValue;
     nsString           mCurToken;
     nsTArray<nsString> mCurDir;
+
+    // cache variables to ignore unsafe-inline if hash or nonce is specified
+    bool               mHasHashOrNonce; // false, if no hash or nonce is defined
+    nsCSPKeywordSrc*   mUnsafeInlineKeywordSrc; // null, otherwise invlidate()
 
     cspTokens          mTokens;
     nsIURI*            mSelfURI;

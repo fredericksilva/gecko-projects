@@ -36,7 +36,7 @@ Message::Message()
 #ifdef MOZ_TASK_TRACER
   header()->source_event_id = 0;
   header()->parent_task_id = 0;
-  header()->source_event_type = SourceEventType::UNKNOWN;
+  header()->source_event_type = SourceEventType::Unknown;
 #endif
   InitLoggingVariables();
 }
@@ -49,6 +49,8 @@ Message::Message(int32_t routing_id, msgid_t type, PriorityValue priority,
   header()->flags = priority;
   if (compression == COMPRESSION_ENABLED)
     header()->flags |= COMPRESS_BIT;
+  else if (compression == COMPRESSION_ALL)
+    header()->flags |= COMPRESSALL_BIT;
 #if defined(OS_POSIX)
   header()->num_fds = 0;
 #endif
@@ -61,7 +63,7 @@ Message::Message(int32_t routing_id, msgid_t type, PriorityValue priority,
 #ifdef MOZ_TASK_TRACER
   header()->source_event_id = 0;
   header()->parent_task_id = 0;
-  header()->source_event_type = SourceEventType::UNKNOWN;
+  header()->source_event_type = SourceEventType::Unknown;
 #endif
   InitLoggingVariables(name);
 }
@@ -96,11 +98,6 @@ Message::Message(Message&& other) : Pickle(mozilla::Move(other)) {
 
 void Message::InitLoggingVariables(const char* const name) {
   name_ = name;
-#ifdef IPC_MESSAGE_LOG_ENABLED
-  received_time_ = 0;
-  dont_log_ = false;
-  log_data_ = NULL;
-#endif
 }
 
 Message& Message::operator=(const Message& other) {
@@ -131,26 +128,6 @@ Message& Message::operator=(Message&& other) {
   return *this;
 }
 
-#ifdef IPC_MESSAGE_LOG_ENABLED
-void Message::set_sent_time(int64_t time) {
-  DCHECK((header()->flags & HAS_SENT_TIME_BIT) == 0);
-  header()->flags |= HAS_SENT_TIME_BIT;
-  WriteInt64(time);
-}
-
-int64_t Message::sent_time() const {
-  if ((header()->flags & HAS_SENT_TIME_BIT) == 0)
-    return 0;
-
-  const char* data = end_of_payload();
-  data -= sizeof(int64_t);
-  return *(reinterpret_cast<const int64_t*>(data));
-}
-
-void Message::set_received_time(int64_t time) const {
-  received_time_ = time;
-}
-#endif
 
 #if defined(OS_POSIX)
 bool Message::WriteFileDescriptor(const base::FileDescriptor& descriptor) {

@@ -10,11 +10,10 @@
 
 // Disable automatic network detection, so tests work correctly when
 // not connected to a network.
-let (ios = Cc["@mozilla.org/network/io-service;1"]
-           .getService(Ci.nsIIOService2)) {
-  ios.manageOfflineStatus = false;
-  ios.offline = false;
-}
+let ios = Cc["@mozilla.org/network/io-service;1"]
+          .getService(Ci.nsIIOService2);
+ios.manageOfflineStatus = false;
+ios.offline = false;
 
 var server; // for use in the shutdown handler, if necessary
 
@@ -45,19 +44,21 @@ function makeTagFunc(tagName)
   {
     var startChildren = 0;
     var response = "";
-    
+
     // write the start tag and attributes
     response += "<" + tagName;
     // if attr is an object, write attributes
     if (attrs && typeof attrs == 'object') {
       startChildren = 1;
-      for (var [key,value] in attrs) {
+
+      for (let key in attrs) {
+        const value = attrs[key];
         var val = "" + value;
         response += " " + key + '="' + val.replace('"','&quot;') + '"';
       }
     }
     response += ">";
-    
+
     // iterate through the rest of the args
     for (var i = startChildren; i < arguments.length; i++) {
       if (typeof arguments[i] == 'function') {
@@ -75,7 +76,7 @@ function makeTagFunc(tagName)
 
 function makeTags() {
   // map our global HTML generation functions
-  for each (var tag in tags) {
+  for (let tag of tags) {
       this[tag] = makeTagFunc(tag.toLowerCase());
   }
 }
@@ -210,6 +211,7 @@ function createMochitestServer(serverBasePath)
   server.registerDirectory("/", serverBasePath);
   server.registerPathHandler("/server/shutdown", serverShutdown);
   server.registerPathHandler("/server/debug", serverDebug);
+  server.registerPathHandler("/nested_oop", nestedTest);
   server.registerContentType("sjs", "sjs"); // .sjs == CGI-like functionality
   server.registerContentType("jar", "application/x-jar");
   server.registerContentType("ogg", "application/ogg");
@@ -313,7 +315,6 @@ function processLocations(server)
   while (more);
 }
 
-
 // PATH HANDLERS
 
 // /server/shutdown
@@ -393,11 +394,15 @@ function list(requestPath, directory, recurse)
 
   var dir = directory.QueryInterface(Ci.nsIFile);
   var links = {};
-  
+
   // The SimpleTest directory is hidden
-  var files = [file for (file in dirIter(dir))
-               if (file.exists() && file.path.indexOf("SimpleTest") == -1)];
-  
+  let files = [];
+  for (let file of dirIter(dir)) {
+    if (file.exists() && file.path.indexOf("SimpleTest") == -1) {
+      files.push(file);
+    }
+  }
+
   // Sort files by name, so that tests can be run in a pre-defined order inside
   // a given directory (see bug 384823)
   function leafNameComparator(first, second) {
@@ -408,9 +413,9 @@ function list(requestPath, directory, recurse)
     return 0;
   }
   files.sort(leafNameComparator);
-  
+
   count = files.length;
-  for each (var file in files) {
+  for (let file of files) {
     var key = path + file.leafName;
     var childCount = 0;
     if (file.isDirectory()) {
@@ -459,7 +464,8 @@ function linksToListItems(links)
 {
   var response = "";
   var children = "";
-  for (var [link, value] in links) {
+  for (let link in links) {
+    const value = links[link];
     var classVal = (!isTest(link) && !(value instanceof Object))
       ? "non-test invisible"
       : "test";
@@ -492,7 +498,8 @@ function linksToListItems(links)
 function linksToTableRows(links, recursionLevel)
 {
   var response = "";
-  for (var [link, value] in links) {
+  for (let link in links) {
+    const value = links[link];
     var classVal = (!isTest(link) && ((value instanceof Object) && ('test' in value)))
       ? "non-test invisible"
       : "";
@@ -534,7 +541,8 @@ function linksToTableRows(links, recursionLevel)
 }
 
 function arrayOfTestFiles(linkArray, fileArray, testPattern) {
-  for (var [link, value] in Iterator(linkArray)) {
+  for (let link in linkArray) {
+    const value = linkArray[link];
     if ((value instanceof Object) && !('test' in value)) {
       arrayOfTestFiles(value, fileArray, testPattern);
     } else if (isTest(link, testPattern) && (value instanceof Object)) {
@@ -549,7 +557,8 @@ function jsonArrayOfTestFiles(links)
 {
   var testFiles = [];
   arrayOfTestFiles(links, testFiles);
-  testFiles = ['"' + file['url'] + '"' for each(file in testFiles)];
+  testFiles = testFiles.map(function(file) { return '"' + file['url'] + '"'; });
+
   return "[" + testFiles.join(",\n") + "]";
 }
 
@@ -596,6 +605,31 @@ function convertManifestToTestLinks(root, manifest)
   var pathPrefix = '/' + root + '/'
   return [paths.reduce(function(t, p) { t[pathPrefix + p.path] = true; return t; }, {}),
           paths.length];
+}
+
+/**
+ * Produce a test harness page that has one remote iframe
+ */
+function nestedTest(metadata, response)
+{
+  response.setStatusLine("1.1", 200, "OK");
+  response.setHeader("Content-type", "text/html;charset=utf-8", false);
+  response.write(
+    HTML(
+      HEAD(
+        TITLE("Mochitest | ", metadata.path),
+        LINK({rel: "stylesheet",
+              type: "text/css", href: "/static/harness.css"}),
+        SCRIPT({type: "text/javascript",
+                src: "/nested_setup.js"}),
+        SCRIPT({type: "text/javascript"},
+               "window.onload = addPermissions; gTestURL = '/tests?" + metadata.queryString + "';")
+        ),
+      BODY(
+        DIV({class: "container"},
+          DIV({class: "frameholder", id: "holder-div"})
+        )
+        )));
 }
 
 /**

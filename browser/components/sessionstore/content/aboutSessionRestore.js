@@ -2,9 +2,14 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+"use strict";
+
 const {classes: Cc, interfaces: Ci, utils: Cu} = Components;
 
 Cu.import("resource://gre/modules/Services.jsm");
+Cu.import("resource://gre/modules/XPCOMUtils.jsm");
+XPCOMUtils.defineLazyModuleGetter(this, "AppConstants",
+  "resource://gre/modules/AppConstants.jsm");
 
 var gStateObject;
 var gTreeData;
@@ -84,7 +89,7 @@ function initTreeView() {
       };
     });
     gTreeData.push(winState);
-    for each (var tab in winState.tabs)
+    for (let tab of winState.tabs)
       gTreeData.push(tab);
   }, this);
 
@@ -122,7 +127,7 @@ function restoreSession() {
         if (gTreeData[t].checked === 0)
           // this window will be restored partially
           gStateObject.windows[ix].tabs =
-            gStateObject.windows[ix].tabs.filter(function(aTabData, aIx)
+            gStateObject.windows[ix].tabs.filter((aTabData, aIx) =>
                                                    gTreeData[t].tabs[aIx].checked);
         else if (!gTreeData[t].checked)
           // this window won't be restored at all
@@ -177,11 +182,9 @@ function onListClick(aEvent) {
   if (cell.col) {
     // Restore this specific tab in the same window for middle/double/accel clicking
     // on a tab's title.
-#ifdef XP_MACOSX
-    let accelKey = aEvent.metaKey;
-#else
-    let accelKey = aEvent.ctrlKey;
-#endif
+    let accelKey = AppConstants.platform == "macosx" ?
+                   aEvent.metaKey :
+                   aEvent.ctrlKey;
     if ((aEvent.button == 1 || aEvent.button == 0 && aEvent.detail == 2 || accelKey) &&
         cell.col.id == "title" &&
         !treeView.isContainer(cell.row)) {
@@ -216,15 +219,17 @@ function getBrowserWindow() {
 }
 
 function toggleRowChecked(aIx) {
+  function isChecked(aItem) {
+    return aItem.checked;
+  }
+
   var item = gTreeData[aIx];
   item.checked = !item.checked;
   treeView.treeBox.invalidateRow(aIx);
 
-  function isChecked(aItem) aItem.checked;
-
   if (treeView.isContainer(aIx)) {
     // (un)check all tabs of this window as well
-    for each (var tab in item.tabs) {
+    for (let tab of item.tabs) {
       tab.checked = item.checked;
       treeView.treeBox.invalidateRow(gTreeData.indexOf(tab));
     }

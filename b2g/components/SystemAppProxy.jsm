@@ -29,6 +29,11 @@ let SystemAppProxy = {
     this._pendingListeners = [];
   },
 
+  // Get the system app frame
+  getFrame: function () {
+    return this._frame;
+  },
+
   // To call when it is ready to receive events
   setIsReady: function () {
     if (this._isReady) {
@@ -89,8 +94,14 @@ let SystemAppProxy = {
   },
 
   // Now deprecated, use sendCustomEvent with a custom event name
-  dispatchEvent: function systemApp_sendChromeEvent(details, target) {
+  dispatchEvent: function systemApp_dispatchEvent(details, target) {
     return this._sendCustomEvent('mozChromeEvent', details, false, target);
+  },
+
+  dispatchKeyboardEvent: function systemApp_dispatchKeyboardEvent(type, details) {
+    let content = this._frame ? this._frame.contentWindow : null;
+    let e = new content.KeyboardEvent(type, details);
+    content.dispatchEvent(e);
   },
 
   // Listen for dom events on the system app

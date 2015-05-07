@@ -7,6 +7,8 @@
 #include "nsEscape.h"
 
 #include "mozilla/ArrayUtils.h"
+#include "mozilla/BinarySearch.h"
+#include "nsTArray.h"
 #include "nsCRT.h"
 #include "plstr.h"
 
@@ -41,6 +43,8 @@ static const int netCharType[256] =
 
 #define IS_OK(C) (netCharType[((unsigned int)(C))] & (aFlags))
 #define HEX_ESCAPE '%'
+
+static const uint32_t ENCODE_MAX_LEN = 6; // %uABCD
 
 static uint32_t
 AppendPercentHex(char* aBuffer, unsigned char aChar)
@@ -100,14 +104,11 @@ nsEscapeCount(const char* aStr, nsEscapeMask aFlags, size_t* aOutLen)
   }
 
   // fail if we need more than 4GB
-  // size_t is likely to be long unsigned int but nsMemory::Alloc(size_t)
-  // calls NS_Alloc_P(size_t) which calls PR_Malloc(uint32_t), so there is
-  // no chance to allocate more than 4GB using nsMemory::Alloc()
   if (dstSize > UINT32_MAX) {
     return 0;
   }
 
-  char* result = (char*)nsMemory::Alloc(dstSize);
+  char* result = (char*)moz_xmalloc(dstSize);
   if (!result) {
     return 0;
   }
@@ -229,7 +230,7 @@ nsEscapeHTML(const char* aString)
     return nullptr;
   }
 
-  rv = (char*)NS_Alloc((6 * len) + 1);
+  rv = (char*)moz_xmalloc((6 * len) + 1);
   char* ptr = rv;
 
   if (rv) {
@@ -287,7 +288,7 @@ nsEscapeHTML2(const char16_t* aSourceBuffer, int32_t aSourceBufferLen)
     return nullptr;
   }
 
-  char16_t* resultBuffer = (char16_t*)nsMemory::Alloc(
+  char16_t* resultBuffer = (char16_t*)moz_xmalloc(
     aSourceBufferLen * 6 * sizeof(char16_t) + sizeof(char16_t('\0')));
   char16_t* ptr = resultBuffer;
 
@@ -356,10 +357,10 @@ static const uint32_t EscapeChars[256] =
 {
      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,  // 0x
      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,  // 1x
-     0,1023,   0, 512,1023,   0,1023,   0,1023,1023,1023,1023,1023,1023, 953, 784,  // 2x   !"#$%&'()*+,-./
+     0,1023,   0, 512,1023,   0,1023, 112,1023,1023,1023,1023,1023,1023, 953, 784,  // 2x   !"#$%&'()*+,-./
   1023,1023,1023,1023,1023,1023,1023,1023,1023,1023,1008,1008,   0,1008,   0, 768,  // 3x  0123456789:;<=>?
   1008,1023,1023,1023,1023,1023,1023,1023,1023,1023,1023,1023,1023,1023,1023,1023,  // 4x  @ABCDEFGHIJKLMNO
-  1023,1023,1023,1023,1023,1023,1023,1023,1023,1023,1023,   0, 896,   0, 896,1023,  // 5x  PQRSTUVWXYZ[\]^_
+  1023,1023,1023,1023,1023,1023,1023,1023,1023,1023,1023, 896, 896, 896, 896,1023,  // 5x  PQRSTUVWXYZ[\]^_
      0,1023,1023,1023,1023,1023,1023,1023,1023,1023,1023,1023,1023,1023,1023,1023,  // 6x  `abcdefghijklmno
   1023,1023,1023,1023,1023,1023,1023,1023,1023,1023,1023, 896,1012, 896,1023,   0,  // 7x  pqrstuvwxyz{|}~ DEL
      0                                                                              // 80 to FF are zero
@@ -392,7 +393,6 @@ T_EscapeURL(const typename T::char_type* aPart, size_t aPartLen,
     return false;
   }
 
-  const uint32_t ENCODE_MAX_LEN = 6; // %uABCD
   bool forced = !!(aFlags & esc_Forced);
   bool ignoreNonAscii = !!(aFlags & esc_OnlyASCII);
   bool ignoreAscii = !!(aFlags & esc_OnlyNonASCII);
@@ -470,7 +470,60 @@ NS_EscapeURL(const char* aPart, int32_t aPartLen, uint32_t aFlags,
 const nsSubstring&
 NS_EscapeURL(const nsSubstring& aStr, uint32_t aFlags, nsSubstring& aResult)
 {
-  if (T_EscapeURL(aStr.Data(), aStr.Length(), aFlags, aResult)) {
+  if (T_EscapeURL<nsSubstring>(aStr.Data(), aStr.Length(), aFlags, aResult)) {
+    return aResult;
+  }
+  return aStr;
+}
+
+// Starting at aStr[aStart] find the first index in aStr that matches any
+// character in aForbidden. Return false if not found.
+static bool
+FindFirstMatchFrom(const nsAFlatString& aStr, size_t aStart,
+                   const nsTArray<char16_t>& aForbidden, size_t* aIndex)
+{
+  const size_t len = aForbidden.Length();
+  for (size_t j = aStart, l = aStr.Length(); j < l; ++j) {
+    size_t unused;
+    if (mozilla::BinarySearch(aForbidden, 0, len, aStr[j], &unused)) {
+      *aIndex = j;
+      return true;
+    }
+  }
+  return false;
+}
+
+const nsSubstring&
+NS_EscapeURL(const nsAFlatString& aStr, const nsTArray<char16_t>& aForbidden,
+             nsSubstring& aResult)
+{
+  bool didEscape = false;
+  for (size_t i = 0, len = aStr.Length(); i < len; ) {
+    size_t j;
+    if (MOZ_UNLIKELY(FindFirstMatchFrom(aStr, i, aForbidden, &j))) {
+      if (i == 0) {
+        didEscape = true;
+        aResult.Truncate();
+        aResult.SetCapacity(aStr.Length());
+      }
+      if (j != i) {
+        // The substring from 'i' up to 'j' that needs no escaping.
+        aResult.Append(nsDependentSubstring(aStr, i, j - i));
+      }
+      char16_t buffer[ENCODE_MAX_LEN];
+      uint32_t len = ::AppendPercentHex(buffer, aStr[j]);
+      MOZ_ASSERT(len <= ENCODE_MAX_LEN, "buffer overflow");
+      aResult.Append(buffer, len);
+      i = j + 1;
+    } else {
+      if (MOZ_UNLIKELY(didEscape)) {
+        // The tail of the string that needs no escaping.
+        aResult.Append(nsDependentSubstring(aStr, i, len - i));
+      }
+      break;
+    }
+  }
+  if (MOZ_UNLIKELY(didEscape)) {
     return aResult;
   }
   return aStr;

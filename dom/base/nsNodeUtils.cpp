@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=2 sw=2 et tw=99: */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -23,8 +23,11 @@
 #endif
 #include "nsBindingManager.h"
 #include "nsGenericHTMLElement.h"
+#include "mozilla/Assertions.h"
+#include "mozilla/dom/Animation.h"
 #include "mozilla/dom/HTMLImageElement.h"
 #include "mozilla/dom/HTMLMediaElement.h"
+#include "mozilla/dom/KeyframeEffect.h"
 #include "nsWrapperCacheInlines.h"
 #include "nsObjectLoadingContent.h"
 #include "nsDOMMutationObserver.h"
@@ -57,6 +60,34 @@ using mozilla::AutoJSContext;
       NS_OBSERVER_ARRAY_NOTIFY_OBSERVERS(                         \
         slots->mMutationObservers, nsIMutationObserver,           \
         func_, params_);                                          \
+    }                                                             \
+    ShadowRoot* shadow = ShadowRoot::FromNode(node);              \
+    if (shadow) {                                                 \
+      node = shadow->GetPoolHost();                               \
+    } else {                                                      \
+      node = node->GetParentNode();                               \
+    }                                                             \
+  } while (node);                                                 \
+  if (needsEnterLeave) {                                          \
+    nsDOMMutationObserver::LeaveMutationHandling();               \
+  }                                                               \
+  PR_END_MACRO
+
+#define IMPL_ANIMATION_NOTIFICATION(func_, content_, params_)     \
+  PR_BEGIN_MACRO                                                  \
+  bool needsEnterLeave = doc->MayHaveDOMMutationObservers();      \
+  if (needsEnterLeave) {                                          \
+    nsDOMMutationObserver::EnterMutationHandling();               \
+  }                                                               \
+  nsINode* node = content_;                                       \
+  do {                                                            \
+    nsINode::nsSlots* slots = node->GetExistingSlots();           \
+    if (slots && !slots->mMutationObservers.IsEmpty()) {          \
+      /* No need to explicitly notify the first observer first    \
+         since that'll happen anyway. */                          \
+      NS_OBSERVER_ARRAY_NOTIFY_OBSERVERS_WITH_QI(                 \
+        slots->mMutationObservers, nsIMutationObserver,           \
+        nsIAnimationObserver, func_, params_);                    \
     }                                                             \
     ShadowRoot* shadow = ShadowRoot::FromNode(node);              \
     if (shadow) {                                                 \
@@ -184,6 +215,70 @@ nsNodeUtils::ContentRemoved(nsINode* aContainer,
                               aPreviousSibling));
 }
 
+static inline Element*
+GetTarget(Animation* aAnimation)
+{
+  KeyframeEffectReadOnly* effect = aAnimation->GetEffect();
+  if (!effect) {
+    return nullptr;
+  }
+
+  Element* target;
+  nsCSSPseudoElements::Type pseudoType;
+  effect->GetTarget(target, pseudoType);
+
+  // If the animation targets a pseudo-element, we don't dispatch
+  // notifications for it.  (In the future we will have PseudoElement
+  // objects we can use as the target of the notifications.)
+  if (pseudoType != nsCSSPseudoElements::ePseudo_NotPseudoElement) {
+    return nullptr;
+  }
+
+  return effect->GetTarget();
+}
+
+void
+nsNodeUtils::AnimationAdded(Animation* aAnimation)
+{
+  Element* target = GetTarget(aAnimation);
+  if (!target) {
+    return;
+  }
+  nsIDocument* doc = target->OwnerDoc();
+
+  if (doc->MayHaveAnimationObservers()) {
+    IMPL_ANIMATION_NOTIFICATION(AnimationAdded, target, (aAnimation));
+  }
+}
+
+void
+nsNodeUtils::AnimationChanged(Animation* aAnimation)
+{
+  Element* target = GetTarget(aAnimation);
+  if (!target) {
+    return;
+  }
+  nsIDocument* doc = target->OwnerDoc();
+
+  if (doc->MayHaveAnimationObservers()) {
+    IMPL_ANIMATION_NOTIFICATION(AnimationChanged, target, (aAnimation));
+  }
+}
+
+void
+nsNodeUtils::AnimationRemoved(Animation* aAnimation)
+{
+  Element* target = GetTarget(aAnimation);
+  if (!target) {
+    return;
+  }
+  nsIDocument* doc = target->OwnerDoc();
+
+  if (doc->MayHaveAnimationObservers()) {
+    IMPL_ANIMATION_NOTIFICATION(AnimationRemoved, target, (aAnimation));
+  }
+}
+
 void
 nsNodeUtils::LastRelease(nsINode* aNode)
 {
@@ -223,7 +318,7 @@ nsNodeUtils::LastRelease(nsINode* aNode)
       static_cast<nsGenericHTMLFormElement*>(aNode)->ClearForm(true);
     }
 
-    if (aNode->IsElement() && aNode->AsElement()->IsHTML(nsGkAtoms::img) &&
+    if (aNode->IsHTMLElement(nsGkAtoms::img) &&
         aNode->HasFlag(ADDED_TO_FORM)) {
       HTMLImageElement* imageElem = static_cast<HTMLImageElement*>(aNode);
       imageElem->ClearForm(true);
@@ -324,6 +419,7 @@ nsNodeUtils::CloneAndAdopt(nsINode *aNode, bool aClone, bool aDeep,
   // if aDeep is true, deal with aNode's children (and recurse into their
   // attributes and children).
 
+  nsAutoScriptBlocker scriptBlocker;
   AutoJSContext cx;
   nsresult rv;
 
@@ -362,6 +458,24 @@ nsNodeUtils::CloneAndAdopt(nsINode *aNode, bool aClone, bool aDeep,
   if (aClone) {
     rv = aNode->Clone(nodeInfo, getter_AddRefs(clone));
     NS_ENSURE_SUCCESS(rv, rv);
+
+    if (clone->IsElement()) {
+      // The cloned node may be a custom element that may require
+      // enqueing created callback and prototype swizzling.
+      Element* elem = clone->AsElement();
+      if (nsContentUtils::IsCustomElementName(nodeInfo->NameAtom())) {
+        elem->OwnerDoc()->SetupCustomElement(elem, nodeInfo->NamespaceID());
+      } else {
+        // Check if node may be custom element by type extension.
+        // ex. <button is="x-button">
+        nsAutoString extension;
+        if (elem->GetAttr(kNameSpaceID_None, nsGkAtoms::is, extension) &&
+            !extension.IsEmpty()) {
+          elem->OwnerDoc()->SetupCustomElement(elem, nodeInfo->NamespaceID(),
+                                               &extension);
+        }
+      }
+    }
 
     if (aParent) {
       // If we're cloning we need to insert the cloned children into the cloned
@@ -437,6 +551,10 @@ nsNodeUtils::CloneAndAdopt(nsINode *aNode, bool aClone, bool aDeep,
       newDoc->SetMayHaveDOMMutationObservers();
     }
 
+    if (oldDoc != newDoc && oldDoc->MayHaveAnimationObservers()) {
+      newDoc->SetMayHaveAnimationObservers();
+    }
+
     if (elem) {
       elem->RecompileScriptEventListeners();
     }
@@ -444,17 +562,9 @@ nsNodeUtils::CloneAndAdopt(nsINode *aNode, bool aClone, bool aDeep,
     if (aReparentScope) {
       JS::Rooted<JSObject*> wrapper(cx);
       if ((wrapper = aNode->GetWrapper())) {
-        if (IsDOMObject(wrapper)) {
-          JSAutoCompartment ac(cx, wrapper);
-          rv = ReparentWrapper(cx, wrapper);
-        } else {
-          nsIXPConnect *xpc = nsContentUtils::XPConnect();
-          if (xpc) {
-            rv = xpc->ReparentWrappedNativeIfFound(cx, wrapper, aReparentScope, aNode);
-          } else {
-            rv = NS_ERROR_FAILURE;
-          }
-        }
+        MOZ_ASSERT(IsDOMObject(wrapper));
+        JSAutoCompartment ac(cx, wrapper);
+        rv = ReparentWrapper(cx, wrapper);
         if (NS_FAILED(rv)) {
           aNode->mNodeInfo.swap(nodeInfo);
 
@@ -512,8 +622,7 @@ nsNodeUtils::CloneAndAdopt(nsINode *aNode, bool aClone, bool aDeep,
   // cloning, so kids of the new node aren't confused about whether they're
   // in a document.
 #ifdef MOZ_XUL
-  if (aClone && !aParent && aNode->IsElement() &&
-      aNode->AsElement()->IsXUL()) {
+  if (aClone && !aParent && aNode->IsXULElement()) {
     if (!aNode->OwnerDoc()->IsLoadedAsInteractiveData()) {
       clone->SetFlags(NODE_FORCE_XBL_BINDINGS);
     }
@@ -550,7 +659,7 @@ nsNodeUtils::UnlinkUserData(nsINode *aNode)
 bool
 nsNodeUtils::IsTemplateElement(const nsINode *aNode)
 {
-  return aNode->IsElement() && aNode->AsElement()->IsHTML(nsGkAtoms::_template);
+  return aNode->IsHTMLElement(nsGkAtoms::_template);
 }
 
 nsIContent*

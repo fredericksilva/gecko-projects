@@ -37,6 +37,8 @@
 #include "nsEmbedCID.h"
 #include "nsToolkitCompsCID.h"
 
+#include "mozilla/net/ReferrerPolicy.h"
+
 #include "SQLFunctions.h"
 
 #include "mozilla/Preferences.h"
@@ -55,7 +57,6 @@
 
 #ifdef MOZ_WIDGET_ANDROID
 #include "AndroidBridge.h"
-using namespace mozilla::widget::android;
 #endif
 
 #ifdef MOZ_WIDGET_GTK
@@ -946,13 +947,8 @@ nsDownloadManager::Init()
   // When MOZ_JSDOWNLOADS is undefined, we still check the preference that can
   // be used to enable the JavaScript API during the migration process.
   mUseJSTransfer = Preferences::GetBool(PREF_BD_USEJSTRANSFER, false);
-#elif defined(XP_WIN)
-    // When MOZ_JSDOWNLOADS is defined on Windows, this component is disabled
-    // unless we are running in Windows Metro.  The conversion of Windows Metro
-    // to use the JavaScript API for downloads is tracked in bug 906042.
-    mUseJSTransfer = !IsRunningInWindowsMetro();
 #else
-    mUseJSTransfer = true;
+  mUseJSTransfer = true;
 #endif
 
   if (mUseJSTransfer)
@@ -1279,7 +1275,7 @@ nsDownloadManager::GetDownloadFromDB(mozIStorageConnection* aDBConn,
   }
 
   // Addrefing and returning
-  NS_ADDREF(*retVal = dl);
+  dl.forget(retVal);
   return NS_OK;
 }
 
@@ -1674,7 +1670,7 @@ nsDownloadManager::AddDownload(DownloadType aDownloadType,
     }
   }
 
-  NS_ADDREF(*aDownload = dl);
+  dl.forget(aDownload);
 
   return NS_OK;
 }
@@ -1859,7 +1855,10 @@ nsDownloadManager::RetryDownload(nsDownload* dl)
   dl->mCancelable = wbp;
   (void)wbp->SetProgressListener(dl);
 
-  rv = wbp->SavePrivacyAwareURI(dl->mSource, nullptr, nullptr, nullptr, nullptr,
+  // referrer policy can be anything since referrer is nullptr
+  rv = wbp->SavePrivacyAwareURI(dl->mSource, nullptr,
+                                nullptr, mozilla::net::RP_Default,
+                                nullptr, nullptr,
                                 dl->mTarget, dl->mPrivate);
   if (NS_FAILED(rv)) {
     dl->mCancelable = nullptr;
@@ -2520,9 +2519,9 @@ nsDownloadManager::Observe(nsISupports *aSubject,
 
     ConfirmCancelDownloads(mCurrentPrivateDownloads.Count(), cancelDownloads,
                            MOZ_UTF16("leavePrivateBrowsingCancelDownloadsAlertTitle"),
-                           MOZ_UTF16("leavePrivateBrowsingWindowsCancelDownloadsAlertMsgMultiple"),
-                           MOZ_UTF16("leavePrivateBrowsingWindowsCancelDownloadsAlertMsg"),
-                           MOZ_UTF16("dontLeavePrivateBrowsingButton"));
+                           MOZ_UTF16("leavePrivateBrowsingWindowsCancelDownloadsAlertMsgMultiple2"),
+                           MOZ_UTF16("leavePrivateBrowsingWindowsCancelDownloadsAlertMsg2"),
+                           MOZ_UTF16("dontLeavePrivateBrowsingButton2"));
   }
 
   return NS_OK;
@@ -2751,7 +2750,7 @@ nsDownload::SetState(DownloadState aState)
                   message, !removeWhenDone,
                   mPrivate ? NS_LITERAL_STRING("private") : NS_LITERAL_STRING("non-private"),
                   mDownloadManager, EmptyString(), NS_LITERAL_STRING("auto"),
-                  EmptyString(), EmptyString(), nullptr);
+                  EmptyString(), EmptyString(), nullptr, mPrivate);
             }
         }
       }
@@ -2782,7 +2781,7 @@ nsDownload::SetState(DownloadState aState)
             if (mimeInfo)
               mimeInfo->GetMIMEType(contentType);
 
-            mozilla::widget::android::DownloadsIntegration::ScanMedia(path, NS_ConvertUTF8toUTF16(contentType));
+            mozilla::widget::DownloadsIntegration::ScanMedia(path, NS_ConvertUTF8toUTF16(contentType));
           }
 #else
           if (addToRecentDocs && !mPrivate) {

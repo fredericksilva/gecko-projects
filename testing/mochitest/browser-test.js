@@ -5,24 +5,29 @@ var gConfig;
 
 if (Cc === undefined) {
   var Cc = Components.classes;
+}
+if (Ci === undefined) {
   var Ci = Components.interfaces;
+}
+if (Cu === undefined) {
   var Cu = Components.utils;
 }
 
 Cu.import("resource://gre/modules/XPCOMUtils.jsm");
 Cu.import("resource://gre/modules/Task.jsm");
+Cu.import("resource://gre/modules/AppConstants.jsm");
 
 XPCOMUtils.defineLazyModuleGetter(this, "Services",
   "resource://gre/modules/Services.jsm");
-
-XPCOMUtils.defineLazyModuleGetter(this, "BrowserNewTabPreloader",
-  "resource:///modules/BrowserNewTabPreloader.jsm");
 
 XPCOMUtils.defineLazyModuleGetter(this, "CustomizationTabPreloader",
   "resource:///modules/CustomizationTabPreloader.jsm");
 
 XPCOMUtils.defineLazyModuleGetter(this, "ContentSearch",
   "resource:///modules/ContentSearch.jsm");
+
+XPCOMUtils.defineLazyModuleGetter(this, "SelfSupportBackend",
+  "resource:///modules/SelfSupportBackend.jsm");
 
 const SIMPLETEST_OVERRIDES =
   ["ok", "is", "isnot", "ise", "todo", "todo_is", "todo_isnot", "info", "expectAssertions", "requestCompleteLog"];
@@ -35,10 +40,54 @@ window.addEventListener("load", function testOnLoad() {
   });
 });
 
+function b2gStart() {
+  let homescreen = document.getElementById('systemapp');
+  var webNav = homescreen.contentWindow.QueryInterface(Ci.nsIInterfaceRequestor)
+                                   .getInterface(Ci.nsIWebNavigation);
+  var url = "chrome://mochikit/content/harness.xul?manifestFile=tests.json";
+
+  webNav.loadURI(url, null, null, null, null);
+}
+
+let TabDestroyObserver = {
+  outstanding: new Set(),
+  promiseResolver: null,
+
+  init: function() {
+    Services.obs.addObserver(this, "message-manager-close", false);
+    Services.obs.addObserver(this, "message-manager-disconnect", false);
+  },
+
+  destroy: function() {
+    Services.obs.removeObserver(this, "message-manager-close");
+    Services.obs.removeObserver(this, "message-manager-disconnect");
+  },
+
+  observe: function(subject, topic, data) {
+    if (topic == "message-manager-close") {
+      this.outstanding.add(subject);
+    } else if (topic == "message-manager-disconnect") {
+      this.outstanding.delete(subject);
+      if (!this.outstanding.size && this.promiseResolver) {
+        this.promiseResolver();
+      }
+    }
+  },
+
+  wait: function() {
+    if (!this.outstanding.size) {
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve) => {
+      this.promiseResolver = resolve;
+    });
+  },
+};
+
 function testInit() {
   gConfig = readConfig();
   if (gConfig.testRoot == "browser" ||
-      gConfig.testRoot == "metro" ||
       gConfig.testRoot == "webapprtChrome") {
     // Make sure to launch the test harness for the first opened window only
     var prefs = Services.prefs;
@@ -75,7 +124,16 @@ function testInit() {
   }
   if (gConfig.e10s) {
     e10s_init();
+    let globalMM = Cc["@mozilla.org/globalmessagemanager;1"]
+                     .getService(Ci.nsIMessageListenerManager);
+    globalMM.loadFrameScript("chrome://mochikit/content/shutdown-leaks-collector.js", true);
+  } else {
+    // In non-e10s, only run the ShutdownLeaksCollector in the parent process.
+    Components.utils.import("chrome://mochikit/content/ShutdownLeaksCollector.jsm");
   }
+
+  let gmm = Cc["@mozilla.org/globalmessagemanager;1"].getService(Ci.nsIMessageListenerManager);
+  gmm.loadFrameScript("chrome://mochikit/content/tests/SimpleTest/AsyncUtilsContent.js", true);
 }
 
 function Tester(aTests, aDumper, aCallback) {
@@ -86,6 +144,7 @@ function Tester(aTests, aDumper, aCallback) {
   this.openedURLs = {};
 
   this._scriptLoader = Services.scriptloader;
+  this.EventUtils = {};
   this._scriptLoader.loadSubScript("chrome://mochikit/content/tests/SimpleTest/EventUtils.js", this.EventUtils);
   var simpleTestScope = {};
   this._scriptLoader.loadSubScript("chrome://mochikit/content/tests/SimpleTest/specialpowersAPI.js", simpleTestScope);
@@ -100,6 +159,9 @@ function Tester(aTests, aDumper, aCallback) {
 
   this.MemoryStats = simpleTestScope.MemoryStats;
   this.Task = Task;
+  this.ContentTask = Components.utils.import("resource://testing-common/ContentTask.jsm", null).ContentTask;
+  this.BrowserTestUtils = Components.utils.import("resource://testing-common/BrowserTestUtils.jsm", null).BrowserTestUtils;
+  this.TestUtils = Components.utils.import("resource://testing-common/TestUtils.jsm", null).TestUtils;
   this.Task.Debugging.maintainStack = true;
   this.Promise = Components.utils.import("resource://gre/modules/Promise.jsm", null).Promise;
   this.Assert = Components.utils.import("resource://testing-common/Assert.jsm", null).Assert;
@@ -144,6 +206,7 @@ Tester.prototype = {
   EventUtils: {},
   SimpleTest: {},
   Task: null,
+  ContentTask: null,
   Assert: null,
 
   repeat: 0,
@@ -162,6 +225,8 @@ Tester.prototype = {
   },
 
   start: function Tester_start() {
+    TabDestroyObserver.init();
+
     //if testOnLoad was not called, then gConfig is not defined
     if (!gConfig)
       gConfig = readConfig();
@@ -263,11 +328,17 @@ Tester.prototype = {
       this.nextTest();
     }
     else{
+      TabDestroyObserver.destroy();
       Services.console.unregisterListener(this);
       Services.obs.removeObserver(this, "chrome-document-global-created");
       Services.obs.removeObserver(this, "content-document-global-created");
       this.Promise.Debugging.clearUncaughtErrorObservers();
       this._treatUncaughtRejectionsAsFailures = false;
+
+      // In the main process, we print the ShutdownLeaksCollector message here.
+      let pid = Cc["@mozilla.org/xre/app-info;1"].getService(Ci.nsIXULRuntime).processID;
+      dump("Completed ShutdownLeaks collections in process " + pid + "\n");
+
       this.dumper.structuredLogger.info("TEST-START | Shutdown");
 
       if (this.tests.length) {
@@ -363,7 +434,7 @@ Tester.prototype = {
       }
 
       if (testScope.__expected == 'fail' && testScope.__num_failed <= 0) {
-        this.currentTest.addResult(new testResult(false, "We expected at least one assertion to fail because this test file was marked as fail-if in the manifest", "", false));
+        this.currentTest.addResult(new testResult(false, "We expected at least one assertion to fail because this test file was marked as fail-if in the manifest!", "", true));
       }
 
       this.Promise.Debugging.flushUncaughtErrors();
@@ -445,8 +516,7 @@ Tester.prototype = {
           .getService(Ci.nsIXULRuntime)
           .processType == Ci.nsIXULRuntime.PROCESS_TYPE_DEFAULT)
       {
-        this.MemoryStats.dump(this.dumper.structuredLogger,
-                              this.currentTestIndex,
+        this.MemoryStats.dump(this.currentTestIndex,
                               this.currentTest.path,
                               gConfig.dumpOutputDirectory,
                               gConfig.dumpAboutMemoryAfterTest,
@@ -484,31 +554,41 @@ Tester.prototype = {
         // frames and browser intentionally kept alive until shutdown to
         // eliminate false positives.
         if (gConfig.testRoot == "browser") {
-          // Replace the document currently loaded in the browser's sidebar.
-          // This will prevent false positives for tests that were the last
-          // to touch the sidebar. They will thus not be blamed for leaking
-          // a document.
-          let sidebar = document.getElementById("sidebar");
-          sidebar.setAttribute("src", "data:text/html;charset=utf-8,");
-          sidebar.docShell.createAboutBlankContentViewer(null);
-          sidebar.setAttribute("src", "about:blank");
+          //Skip if SeaMonkey
+          if (AppConstants.MOZ_APP_NAME != "seamonkey") {
+            // Replace the document currently loaded in the browser's sidebar.
+            // This will prevent false positives for tests that were the last
+            // to touch the sidebar. They will thus not be blamed for leaking
+            // a document.
+            let sidebar = document.getElementById("sidebar");
+            sidebar.setAttribute("src", "data:text/html;charset=utf-8,");
+            sidebar.docShell.createAboutBlankContentViewer(null);
+            sidebar.setAttribute("src", "about:blank");
 
-          // Do the same for the social sidebar.
-          let socialSidebar = document.getElementById("social-sidebar-browser");
-          socialSidebar.setAttribute("src", "data:text/html;charset=utf-8,");
-          socialSidebar.docShell.createAboutBlankContentViewer(null);
-          socialSidebar.setAttribute("src", "about:blank");
+            // Do the same for the social sidebar.
+            let socialSidebar = document.getElementById("social-sidebar-browser");
+            socialSidebar.setAttribute("src", "data:text/html;charset=utf-8,");
+            socialSidebar.docShell.createAboutBlankContentViewer(null);
+            socialSidebar.setAttribute("src", "about:blank");
+
+            SelfSupportBackend.uninit();
+            CustomizationTabPreloader.uninit();
+            SocialFlyout.unload();
+            SocialShare.uninit();
+            TabView.uninit();
+          }
 
           // Destroy BackgroundPageThumbs resources.
           let {BackgroundPageThumbs} =
             Cu.import("resource://gre/modules/BackgroundPageThumbs.jsm", {});
           BackgroundPageThumbs._destroy();
 
-          BrowserNewTabPreloader.uninit();
-          CustomizationTabPreloader.uninit();
-          SocialFlyout.unload();
-          SocialShare.uninit();
-          TabView.uninit();
+          // Destroy preloaded browsers.
+          if (gBrowser._preloadedBrowser) {
+            let browser = gBrowser._preloadedBrowser;
+            gBrowser._preloadedBrowser = null;
+            gBrowser.getNotificationBox(browser).remove();
+          }
         }
 
         // Schedule GC and CC runs before finishing in order to detect
@@ -548,10 +628,17 @@ Tester.prototype = {
         Services.obs.notifyObservers({wrappedJSObject: barrier},
           "shutdown-leaks-before-check", null);
 
+        barrier.client.addBlocker("ShutdownLeaks: Wait for tabs to finish closing",
+                                  TabDestroyObserver.wait());
+
         barrier.wait().then(() => {
           // Simulate memory pressure so that we're forced to free more resources
           // and thus get rid of more false leaks like already terminated workers.
           Services.obs.notifyObservers(null, "memory-pressure", "heap-minimize");
+
+          let ppmm = Cc["@mozilla.org/parentprocessmessagemanager;1"]
+                       .getService(Ci.nsIMessageBroadcaster);
+          ppmm.broadcastAsyncMessage("browser-test:collect-request");
 
           checkForLeakedGlobalWindows(aResults => {
             if (aResults.length == 0) {
@@ -592,6 +679,9 @@ Tester.prototype = {
     this.currentTest.scope.SimpleTest = this.SimpleTest;
     this.currentTest.scope.gTestPath = this.currentTest.path;
     this.currentTest.scope.Task = this.Task;
+    this.currentTest.scope.ContentTask = this.ContentTask;
+    this.currentTest.scope.BrowserTestUtils = this.BrowserTestUtils;
+    this.currentTest.scope.TestUtils = this.TestUtils;
     // Pass a custom report function for mochitest style reporting.
     this.currentTest.scope.Assert = new this.Assert(function(err, message, stack) {
       let res;
@@ -699,7 +789,8 @@ Tester.prototype = {
       var self = this;
       var timeoutExpires = Date.now() + gTimeoutSeconds * 1000;
       var waitUntilAtLeast = timeoutExpires - 1000;
-      this.currentTest.scope.__waitTimer = setTimeout(function timeoutFn() {
+      this.currentTest.scope.__waitTimer =
+        this.SimpleTest._originalSetTimeout.apply(window, [function timeoutFn() {
         // We sometimes get woken up long before the gTimeoutSeconds
         // have elapsed (when running in chaos mode for example). This
         // code ensures that we don't wrongly time out in that case.
@@ -738,7 +829,7 @@ Tester.prototype = {
         self.currentTest.timedOut = true;
         self.currentTest.scope.__waitTimer = null;
         self.nextTest();
-      }, gTimeoutSeconds * 1000);
+      }, gTimeoutSeconds * 1000]);
     }
   },
 
@@ -820,9 +911,9 @@ function testScope(aTester, aTest, expected) {
 
   var self = this;
   this.ok = function test_ok(condition, name, diag, stack) {
-    if (this.__expected == 'fail') {
+    if (self.__expected == 'fail') {
         if (!condition) {
-          this.__num_failed++;
+          self.__num_failed++;
           condition = true;
         }
     }
@@ -986,6 +1077,9 @@ testScope.prototype = {
   EventUtils: {},
   SimpleTest: {},
   Task: null,
+  ContentTask: null,
+  BrowserTestUtils: null,
+  TestUtils: null,
   Assert: null,
 
   /**

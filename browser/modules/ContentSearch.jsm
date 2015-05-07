@@ -24,6 +24,8 @@ XPCOMUtils.defineLazyModuleGetter(this, "SearchSuggestionController",
 
 const INBOUND_MESSAGE = "ContentSearch";
 const OUTBOUND_MESSAGE = INBOUND_MESSAGE;
+const MAX_LOCAL_SUGGESTIONS = 3;
+const MAX_SUGGESTIONS = 6;
 
 /**
  * ContentSearch receives messages named INBOUND_MESSAGE and sends messages
@@ -205,11 +207,28 @@ this.ContentSearch = {
       "searchString",
       "whence",
     ]);
-    let browserWin = msg.target.ownerDocument.defaultView;
     let engine = Services.search.getEngineByName(data.engineName);
-    browserWin.BrowserSearch.recordSearchInHealthReport(engine, data.whence, data.selection);
     let submission = engine.getSubmission(data.searchString, "", data.whence);
-    browserWin.loadURI(submission.uri.spec, null, submission.postData);
+    let browser = msg.target;
+    let newTab;
+    if (data.useNewTab) {
+      newTab = browser.getTabBrowser().addTab();
+      browser = newTab.linkedBrowser;
+    }
+    try {
+      browser.loadURIWithFlags(submission.uri.spec,
+                               Ci.nsIWebNavigation.LOAD_FLAGS_NONE, null, null,
+                               submission.postData);
+    }
+    catch (err) {
+      // The browser may have been closed between the time its content sent the
+      // message and the time we handle it.  In that case, trying to call any
+      // method on it will throw.
+      return Promise.resolve();
+    }
+    let win = browser.ownerDocument.defaultView;
+    win.BrowserSearch.recordSearchInHealthReport(engine, data.whence,
+                                                 data.selection || null);
     return Promise.resolve();
   },
 
@@ -220,6 +239,12 @@ this.ContentSearch = {
 
   _onMessageManageEngines: function (msg, data) {
     let browserWin = msg.target.ownerDocument.defaultView;
+
+    if (Services.prefs.getBoolPref("browser.search.showOneOffButtons")) {
+      browserWin.openPreferences("paneSearch");
+      return Promise.resolve();
+    }
+
     let wm = Components.classes["@mozilla.org/appshell/window-mediator;1"].
              getService(Components.interfaces.nsIWindowMediator);
     let window = wm.getMostRecentWindow("Browser:SearchManager");
@@ -250,8 +275,8 @@ this.ContentSearch = {
     let browserData = this._suggestionDataForBrowser(msg.target, true);
     let { controller } = browserData;
     let ok = SearchSuggestionController.engineOffersSuggestions(engine);
-    controller.maxLocalResults = ok ? 2 : 6;
-    controller.maxRemoteResults = ok ? 6 : 0;
+    controller.maxLocalResults = ok ? MAX_LOCAL_SUGGESTIONS : MAX_SUGGESTIONS;
+    controller.maxRemoteResults = ok ? MAX_SUGGESTIONS : 0;
     controller.remoteTimeout = data.remoteTimeout || undefined;
     let priv = PrivateBrowsingUtils.isBrowserPrivate(msg.target);
     // fetch() rejects its promise if there's a pending request, but since we

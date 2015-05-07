@@ -12,7 +12,7 @@
 #include "vm/Stack-inl.h"
 
 /* static */ inline bool
-js::Debugger::onLeaveFrame(JSContext *cx, AbstractFramePtr frame, bool ok)
+js::Debugger::onLeaveFrame(JSContext* cx, AbstractFramePtr frame, bool ok)
 {
     MOZ_ASSERT_IF(frame.isInterpreterFrame(), frame.asInterpreterFrame() == cx->interpreterFrame());
     MOZ_ASSERT_IF(frame.script()->isDebuggee(), frame.isDebuggee());
@@ -22,18 +22,19 @@ js::Debugger::onLeaveFrame(JSContext *cx, AbstractFramePtr frame, bool ok)
     MOZ_ASSERT_IF(evalTraps, frame.isDebuggee());
     if (frame.isDebuggee())
         ok = slowPathOnLeaveFrame(cx, frame, ok);
+    MOZ_ASSERT(!inFrameMaps(frame));
     return ok;
 }
 
-/* static */ inline js::Debugger *
-js::Debugger::fromJSObject(JSObject *obj)
+/* static */ inline js::Debugger*
+js::Debugger::fromJSObject(JSObject* obj)
 {
     MOZ_ASSERT(js::GetObjectClass(obj) == &jsclass);
-    return (Debugger *) obj->as<NativeObject>().getPrivate();
+    return (Debugger*) obj->as<NativeObject>().getPrivate();
 }
 
 /* static */ JSTrapStatus
-js::Debugger::onEnterFrame(JSContext *cx, AbstractFramePtr frame)
+js::Debugger::onEnterFrame(JSContext* cx, AbstractFramePtr frame)
 {
     MOZ_ASSERT_IF(frame.script()->isDebuggee(), frame.isDebuggee());
     if (!frame.isDebuggee())
@@ -42,16 +43,15 @@ js::Debugger::onEnterFrame(JSContext *cx, AbstractFramePtr frame)
 }
 
 /* static */ JSTrapStatus
-js::Debugger::onDebuggerStatement(JSContext *cx, AbstractFramePtr frame, MutableHandleValue vp)
+js::Debugger::onDebuggerStatement(JSContext* cx, AbstractFramePtr frame)
 {
-    MOZ_ASSERT_IF(frame.script()->isDebuggee(), frame.isDebuggee());
-    return frame.isDebuggee()
-           ? dispatchHook(cx, vp, OnDebuggerStatement)
-           : JSTRAP_CONTINUE;
+    if (!cx->compartment()->isDebuggee())
+        return JSTRAP_CONTINUE;
+    return slowPathOnDebuggerStatement(cx, frame);
 }
 
 /* static */ JSTrapStatus
-js::Debugger::onExceptionUnwind(JSContext *cx, AbstractFramePtr frame)
+js::Debugger::onExceptionUnwind(JSContext* cx, AbstractFramePtr frame)
 {
     if (!cx->compartment()->isDebuggee())
         return JSTRAP_CONTINUE;

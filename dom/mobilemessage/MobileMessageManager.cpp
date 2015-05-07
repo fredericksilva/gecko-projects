@@ -1,4 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -15,6 +16,7 @@
 #include "mozilla/dom/MozMmsEvent.h"
 #include "mozilla/dom/MozMobileMessageManagerBinding.h"
 #include "mozilla/dom/MozSmsEvent.h"
+#include "mozilla/dom/Promise.h"
 #include "mozilla/dom/ToJSValue.h"
 #include "mozilla/Preferences.h"
 #include "mozilla/Services.h"
@@ -35,8 +37,8 @@
 #include "android/MobileMessageDatabaseService.h"
 #include "android/SmsService.h"
 #elif defined(MOZ_WIDGET_GONK) && defined(MOZ_B2G_RIL)
-#include "nsIRilMobileMessageDatabaseService.h"
-#include "gonk/SmsService.h"
+#include "nsIGonkMobileMessageDatabaseService.h"
+#include "nsIGonkSmsService.h"
 #endif
 #include "nsXULAppAPI.h" // For XRE_GetProcessType()
 
@@ -111,9 +113,9 @@ MobileMessageManager::Shutdown()
 }
 
 JSObject*
-MobileMessageManager::WrapObject(JSContext* aCx)
+MobileMessageManager::WrapObject(JSContext* aCx, JS::Handle<JSObject*> aGivenProto)
 {
-  return MozMobileMessageManagerBinding::Wrap(aCx, this);
+  return MozMobileMessageManagerBinding::Wrap(aCx, this, aGivenProto);
 }
 
 already_AddRefed<DOMRequest>
@@ -697,6 +699,72 @@ MobileMessageManager::GetSmscAddress(const Optional<uint32_t>& aServiceId,
   return request.forget();
 }
 
+already_AddRefed<Promise>
+MobileMessageManager::SetSmscAddress(const SmscAddress& aSmscAddress,
+                                     const Optional<uint32_t>& aServiceId,
+                                     ErrorResult& aRv)
+{
+  nsCOMPtr<nsISmsService> smsService = do_GetService(SMS_SERVICE_CONTRACTID);
+  if (!smsService) {
+    aRv.Throw(NS_ERROR_FAILURE);
+    return nullptr;
+  }
+
+  // Use the default one unless |serviceId| is available.
+  uint32_t serviceId;
+  nsresult rv;
+  if (aServiceId.WasPassed()) {
+    serviceId = aServiceId.Value();
+  } else {
+    rv = smsService->GetSmsDefaultServiceId(&serviceId);
+    if (NS_FAILED(rv)) {
+      aRv.Throw(rv);
+      return nullptr;
+    }
+  }
+
+  nsCOMPtr<nsIGlobalObject> global = do_QueryInterface(GetOwner());
+  if (!global) {
+    aRv.Throw(NS_ERROR_UNEXPECTED);
+    return nullptr;
+  }
+
+  nsRefPtr<Promise> promise = Promise::Create(global, aRv);
+  if (aRv.Failed()) {
+    return nullptr;
+  }
+
+  if (!aSmscAddress.mAddress.WasPassed()) {
+    NS_WARNING("SmscAddress.address is a mandatory field and can not be omitted.");
+    promise->MaybeReject(NS_ERROR_DOM_INVALID_ACCESS_ERR);
+    return promise.forget();
+  }
+
+  nsString address = aSmscAddress.mAddress.Value();
+  TypeOfNumber ton = aSmscAddress.mTypeOfAddress.mTypeOfNumber;
+  NumberPlanIdentification npi =
+    aSmscAddress.mTypeOfAddress.mNumberPlanIdentification;
+
+  // If the address begins with +, set TON to international no matter what has
+  // passed in.
+  if (!address.IsEmpty() && address[0] == '+') {
+    ton = TypeOfNumber::International;
+  }
+
+  nsCOMPtr<nsIMobileMessageCallback> msgCallback =
+    new MobileMessageCallback(promise);
+
+  rv = smsService->SetSmscAddress(serviceId, address,
+    static_cast<uint32_t>(ton), static_cast<uint32_t>(npi), msgCallback);
+  if (NS_FAILED(rv)) {
+    promise->MaybeReject(rv);
+    return promise.forget();
+  }
+
+  return promise.forget();
+}
+
+
 } // namespace dom
 } // namespace mozilla
 
@@ -711,7 +779,7 @@ NS_CreateSmsService()
 #ifdef MOZ_WIDGET_ANDROID
     smsService = new SmsService();
 #elif defined(MOZ_WIDGET_GONK) && defined(MOZ_B2G_RIL)
-    smsService = new SmsService();
+    smsService = do_GetService(GONK_SMSSERVICE_CONTRACTID);
 #endif
   }
 
@@ -729,7 +797,7 @@ NS_CreateMobileMessageDatabaseService()
     mobileMessageDBService = new MobileMessageDatabaseService();
 #elif defined(MOZ_WIDGET_GONK) && defined(MOZ_B2G_RIL)
     mobileMessageDBService =
-      do_CreateInstance(RIL_MOBILE_MESSAGE_DATABASE_SERVICE_CONTRACTID);
+      do_CreateInstance(GONK_MOBILE_MESSAGE_DATABASE_SERVICE_CONTRACTID);
 #endif
   }
 
@@ -745,7 +813,7 @@ NS_CreateMmsService()
     mmsService = SmsIPCService::GetSingleton();
   } else {
 #if defined(MOZ_WIDGET_GONK) && defined(MOZ_B2G_RIL)
-    mmsService = do_CreateInstance("@mozilla.org/mms/rilmmsservice;1");
+    mmsService = do_CreateInstance("@mozilla.org/mms/gonkmmsservice;1");
 #endif
   }
 

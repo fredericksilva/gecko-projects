@@ -8,18 +8,27 @@
  *
  */
 
-[Pref="dom.serviceWorkers.enabled",
- Exposed=Window]
+[Func="mozilla::dom::ServiceWorkerRegistrationVisible",
+ Exposed=(Window,Worker)]
 interface ServiceWorkerRegistration : EventTarget {
   [Unforgeable] readonly attribute ServiceWorker? installing;
   [Unforgeable] readonly attribute ServiceWorker? waiting;
   [Unforgeable] readonly attribute ServiceWorker? active;
 
-  readonly attribute ScalarValueString scope;
+  readonly attribute USVString scope;
+
+  void update();
 
   [Throws]
   Promise<boolean> unregister();
 
   // event
   attribute EventHandler onupdatefound;
+};
+
+partial interface ServiceWorkerRegistration {
+#ifndef MOZ_SIMPLEPUSH
+  [Throws, Exposed=Window, Pref="dom.push.enabled"]
+  readonly attribute PushManager pushManager;
+#endif
 };

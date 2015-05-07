@@ -32,12 +32,15 @@ def GeckoBinary(linkage='dependent', msvcrt='dynamic', mozglue=None):
         xpcomglue = 'xpcomglue_staticruntime'
         if not CONFIG['GNU_CC']:
             mozglue = None
+            if linkage == 'dependent':
+                USE_LIBS += [
+                    'mozalloc_staticruntime',
+                ]
     else:
         error('msvcrt must be "dynamic" or "static"')
 
     if linkage == 'dependent':
         USE_LIBS += [
-            'mozalloc',
             'nspr',
             '%s_s' % xpcomglue,
             'xul',
@@ -52,9 +55,7 @@ def GeckoBinary(linkage='dependent', msvcrt='dynamic', mozglue=None):
         error('`linkage` must be "dependent", "standalone" or None')
 
     if mozglue:
-        if CONFIG['JS_STANDALONE']:
-            pass
-        elif CONFIG['MOZ_CRT']:
+        if CONFIG['MOZ_CRT']:
             if msvcrt == 'dynamic':
                 USE_LIBS += ['mozcrt']
             elif msvcrt == 'static':
@@ -78,6 +79,11 @@ def GeckoBinary(linkage='dependent', msvcrt='dynamic', mozglue=None):
             else:
                 error('`mozglue` must be "program" or "library"')
 
+    if not CONFIG['JS_STANDALONE']:
+        USE_LIBS += [
+            'fallible',
+        ]
+
 
 @template
 def GeckoProgram(name, linkage='standalone', **kwargs):
@@ -90,7 +96,9 @@ def GeckoProgram(name, linkage='standalone', **kwargs):
     '''
     Program(name)
 
-    GeckoBinary(linkage=linkage, mozglue='program', **kwargs)
+    kwargs.setdefault('mozglue', 'program')
+
+    GeckoBinary(linkage=linkage, **kwargs)
 
 
 @template
@@ -103,7 +111,9 @@ def GeckoSimplePrograms(names, **kwargs):
     '''
     SimplePrograms(names)
 
-    GeckoBinary(mozglue='program', **kwargs)
+    kwargs.setdefault('mozglue', 'program')
+
+    GeckoBinary(**kwargs)
 
 
 @template
@@ -116,7 +126,9 @@ def GeckoCppUnitTests(names, **kwargs):
     '''
     CppUnitTests(names)
 
-    GeckoBinary(mozglue='program', **kwargs)
+    kwargs.setdefault('mozglue', 'program')
+
+    GeckoBinary(**kwargs)
 
 
 @template
@@ -128,7 +140,9 @@ def GeckoSharedLibrary(name, **kwargs):
     '''
     SharedLibrary(name)
 
-    GeckoBinary(mozglue='library', **kwargs)
+    kwargs.setdefault('mozglue', 'library')
+
+    GeckoBinary(**kwargs)
 
 
 @template
@@ -140,16 +154,17 @@ def GeckoFramework(name, **kwargs):
     '''
     Framework(name)
 
-    GeckoBinary(mozglue='library', **kwargs)
+    kwargs.setdefault('mozglue', 'library')
+
+    GeckoBinary(**kwargs)
 
 
 @template
-def XPCOMBinaryComponent(name):
+def XPCOMBinaryComponent(name, **kwargs):
     '''Template defining an XPCOM binary component for Gecko.
 
     `name` is the name of the component.
     '''
-    GeckoSharedLibrary(name)
+    GeckoSharedLibrary(name, **kwargs)
 
     IS_COMPONENT = True
-

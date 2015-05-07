@@ -1,5 +1,5 @@
 /* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=2 et sw=2 tw=80: */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -8,9 +8,13 @@
 #define mozilla_dom_indexeddb_keypath_h__
 
 #include "mozilla/dom/BindingDeclarations.h"
+#include "mozilla/dom/Nullable.h"
 
 namespace mozilla {
 namespace dom {
+
+class OwningStringOrStringSequence;
+
 namespace indexedDB {
 
 class IndexMetadata;
@@ -39,8 +43,7 @@ public:
 
   void SetType(KeyPathType aType);
 
-  // This does not set exceptions.
-  bool AppendStringWithValidation(JSContext* aCx, const nsAString& aString);
+  bool AppendStringWithValidation(const nsAString& aString);
 
   explicit KeyPath(int aDummy)
   : mType(NONEXISTENT)
@@ -60,13 +63,13 @@ public:
   }
 
   static nsresult
-  Parse(JSContext* aCx, const nsAString& aString, KeyPath* aKeyPath);
+  Parse(const nsAString& aString, KeyPath* aKeyPath);
 
   static nsresult
-  Parse(JSContext* aCx, const Sequence<nsString>& aStrings, KeyPath* aKeyPath);
+  Parse(const Sequence<nsString>& aStrings, KeyPath* aKeyPath);
 
   static nsresult
-  Parse(JSContext* aCx, const JS::Value& aValue, KeyPath* aKeyPath);
+  Parse(const Nullable<OwningStringOrStringSequence>& aValue, KeyPath* aKeyPath);
 
   nsresult
   ExtractKey(JSContext* aCx, const JS::Value& aValue, Key& aKey) const;

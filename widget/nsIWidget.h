@@ -15,26 +15,29 @@
 #include "nsAutoPtr.h"
 #include "nsWidgetInitData.h"
 #include "nsTArray.h"
+#include "nsITheme.h"
 #include "nsITimer.h"
 #include "nsXULAppAPI.h"
 #include "mozilla/EventForwards.h"
 #include "mozilla/layers/LayersTypes.h"
 #include "mozilla/RefPtr.h"
 #include "mozilla/TimeStamp.h"
+#include "mozilla/gfx/Point.h"
+#include "nsDataHashtable.h"
+#include "nsIObserver.h"
 #include "Units.h"
 
 // forward declarations
-class   nsFontMetrics;
-class   nsDeviceContext;
-struct  nsFont;
 class   nsIRollupListener;
 class   imgIContainer;
 class   nsIContent;
 class   ViewWrapper;
 class   nsIWidgetListener;
 class   nsIntRegion;
+class   nsIScreen;
 
 namespace mozilla {
+class CompositorVsyncDispatcher;
 namespace dom {
 class TabChild;
 }
@@ -47,9 +50,13 @@ class CompositorChild;
 class LayerManager;
 class LayerManagerComposite;
 class PLayerTransactionChild;
+struct ScrollableLayerGuid;
 }
 namespace gfx {
 class DrawTarget;
+}
+namespace widget {
+class TextEventDispatcher;
 }
 }
 
@@ -71,8 +78,7 @@ typedef nsEventStatus (* EVENT_CALLBACK)(mozilla::WidgetGUIEvent* aEvent);
 typedef void* nsNativeWidget;
 
 /**
- * Flags for the getNativeData function.
- * See getNativeData()
+ * Flags for the GetNativeData and SetNativeData functions
  */
 #define NS_NATIVE_WINDOW      0
 #define NS_NATIVE_GRAPHIC     1
@@ -89,6 +95,7 @@ typedef void* nsNativeWidget;
 // Has to match to NPNVnetscapeWindow, and shareable across processes
 // HWND on Windows and XID on X11
 #define NS_NATIVE_SHAREABLE_WINDOW 11
+#define NS_NATIVE_OPENGL_CONTEXT   12
 #ifdef XP_MACOSX
 #define NS_NATIVE_PLUGIN_PORT_QD    100
 #define NS_NATIVE_PLUGIN_PORT_CG    101
@@ -99,10 +106,16 @@ typedef void* nsNativeWidget;
 #define NS_NATIVE_TSF_DISPLAY_ATTR_MGR 102
 #define NS_NATIVE_ICOREWINDOW          103 // winrt specific
 #endif
+#if defined(MOZ_WIDGET_GTK)
+// set/get nsPluginNativeWindowGtk, e10s specific
+#define NS_NATIVE_PLUGIN_OBJECT_PTR    104
+#endif
+// See RegisterPluginWindowForRemoteUpdates
+#define NS_NATIVE_PLUGIN_ID            105
 
 #define NS_IWIDGET_IID \
-{ 0x13239ca, 0xaf3f, 0x4f27, \
-  { 0xaf, 0x83, 0x47, 0xa9, 0x82, 0x3d, 0x99, 0xee } };
+{ 0x316E4600, 0x15DB, 0x47AE, \
+  { 0xBF, 0xE4, 0x5B, 0xCD, 0xFF, 0x80, 0x80, 0x83 } };
 
 /*
  * Window shadow styles
@@ -222,7 +235,7 @@ struct nsIMEUpdatePreference {
 
   typedef uint8_t Notifications;
 
-  enum MOZ_ENUM_TYPE(Notifications)
+  enum : Notifications
   {
     NOTIFY_NOTHING                       = 0,
     NOTIFY_SELECTION_CHANGE              = 1 << 0,
@@ -405,7 +418,10 @@ struct IMEState {
 };
 
 struct InputContext {
-  InputContext() : mNativeIMEContext(nullptr) {}
+  InputContext()
+    : mNativeIMEContext(nullptr)
+    , mOrigin(XRE_IsParentProcess() ? ORIGIN_MAIN : ORIGIN_CONTENT)
+  {}
 
   bool IsPasswordEditor() const
   {
@@ -427,6 +443,37 @@ struct InputContext {
      SetInputContext().  If there is only one context in the process, this may
      be nullptr. */
   void* mNativeIMEContext;
+
+
+  /**
+   * mOrigin indicates whether this focus event refers to main or remote content.
+   */
+  enum Origin
+  {
+    // Adjusting focus of content on the main process
+    ORIGIN_MAIN,
+    // Adjusting focus of content in a remote process
+    ORIGIN_CONTENT
+  };
+  Origin mOrigin;
+
+  bool IsOriginMainProcess() const
+  {
+    return mOrigin == ORIGIN_MAIN;
+  }
+
+  bool IsOriginContentProcess() const
+  {
+    return mOrigin == ORIGIN_CONTENT;
+  }
+
+  bool IsOriginCurrentProcess() const
+  {
+    if (XRE_IsParentProcess()) {
+      return IsOriginMainProcess();
+    }
+    return IsOriginContentProcess();
+  }
 };
 
 struct InputContextAction {
@@ -498,22 +545,22 @@ struct SizeConstraints {
   {
   }
 
-  SizeConstraints(nsIntSize aMinSize,
-                  nsIntSize aMaxSize)
+  SizeConstraints(mozilla::LayoutDeviceIntSize aMinSize,
+                  mozilla::LayoutDeviceIntSize aMaxSize)
   : mMinSize(aMinSize),
     mMaxSize(aMaxSize)
   {
   }
 
-  nsIntSize mMinSize;
-  nsIntSize mMaxSize;
+  mozilla::LayoutDeviceIntSize mMinSize;
+  mozilla::LayoutDeviceIntSize mMaxSize;
 };
 
 // IMEMessage is shared by IMEStateManager and TextComposition.
 // Update values in GeckoEditable.java if you make changes here.
 // XXX Negative values are used in Android...
 typedef int8_t IMEMessageType;
-enum IMEMessage MOZ_ENUM_TYPE(IMEMessageType)
+enum IMEMessage : IMEMessageType
 {
   // An editable content is getting focus
   NOTIFY_IME_OF_FOCUS = 1,
@@ -666,6 +713,59 @@ struct IMENotification
   }
 };
 
+struct AutoObserverNotifier {
+  AutoObserverNotifier(nsIObserver* aObserver,
+                       const char* aTopic)
+    : mObserver(aObserver)
+    , mTopic(aTopic)
+  {
+  }
+
+  void SkipNotification()
+  {
+    mObserver = nullptr;
+  }
+
+  uint64_t SaveObserver()
+  {
+    if (!mObserver) {
+      return 0;
+    }
+    uint64_t observerId = ++sObserverId;
+    sSavedObservers.Put(observerId, mObserver);
+    SkipNotification();
+    return observerId;
+  }
+
+  ~AutoObserverNotifier()
+  {
+    if (mObserver) {
+      mObserver->Observe(nullptr, mTopic, nullptr);
+    }
+  }
+
+  static void NotifySavedObserver(const uint64_t& aObserverId,
+                                  const char* aTopic)
+  {
+    nsCOMPtr<nsIObserver> observer = sSavedObservers.Get(aObserverId);
+    if (!observer) {
+      MOZ_ASSERT(aObserverId == 0, "We should always find a saved observer for nonzero IDs");
+      return;
+    }
+
+    sSavedObservers.Remove(aObserverId);
+    observer->Observe(nullptr, aTopic, nullptr);
+  }
+
+private:
+  nsCOMPtr<nsIObserver> mObserver;
+  const char* mTopic;
+
+private:
+  static uint64_t sObserverId;
+  static nsDataHashtable<nsUint64HashKey, nsCOMPtr<nsIObserver>> sSavedObservers;
+};
+
 } // namespace widget
 } // namespace mozilla
 
@@ -690,17 +790,20 @@ class nsIWidget : public nsISupports {
     typedef mozilla::widget::InputContext InputContext;
     typedef mozilla::widget::InputContextAction InputContextAction;
     typedef mozilla::widget::SizeConstraints SizeConstraints;
+    typedef mozilla::widget::TextEventDispatcher TextEventDispatcher;
+    typedef mozilla::CompositorVsyncDispatcher CompositorVsyncDispatcher;
 
     // Used in UpdateThemeGeometries.
     struct ThemeGeometry {
-      // The -moz-appearance value for the themed widget
-      uint8_t mWidgetType;
+      // The ThemeGeometryType value for the themed widget, see
+      // nsITheme::ThemeGeometryTypeForWidget.
+      nsITheme::ThemeGeometryType mType;
       // The device-pixel rect within the window for the themed widget
       nsIntRect mRect;
 
-      ThemeGeometry(uint8_t aWidgetType, const nsIntRect& aRect)
-       : mWidgetType(aWidgetType)
-       , mRect(aRect)
+      ThemeGeometry(nsITheme::ThemeGeometryType aType, const nsIntRect& aRect)
+        : mType(aType)
+        , mRect(aRect)
       { }
     };
 
@@ -714,7 +817,7 @@ class nsIWidget : public nsISupports {
       , mZIndex(0)
 
     {
-      ClearNativeTouchSequence();
+      ClearNativeTouchSequence(nullptr);
     }
 
         
@@ -744,14 +847,12 @@ class nsIWidget : public nsISupports {
      * @param     aParent       parent nsIWidget
      * @param     aNativeParent native parent widget
      * @param     aRect         the widget dimension
-     * @param     aContext
      * @param     aInitData     data that is used for widget initialization
      *
      */
     NS_IMETHOD Create(nsIWidget        *aParent,
                       nsNativeWidget   aNativeParent,
                       const nsIntRect  &aRect,
-                      nsDeviceContext *aContext,
                       nsWidgetInitData *aInitData = nullptr) = 0;
 
     /**
@@ -772,7 +873,6 @@ class nsIWidget : public nsISupports {
      */
     virtual already_AddRefed<nsIWidget>
     CreateChild(const nsIntRect  &aRect,
-                nsDeviceContext  *aContext,
                 nsWidgetInitData *aInitData = nullptr,
                 bool             aForceUseIWidgetParent = false) = 0;
 
@@ -789,10 +889,8 @@ class nsIWidget : public nsISupports {
      *
      * aUseAttachedEvents if true, events are sent to the attached listener
      * instead of the normal listener.
-     * aContext The new device context for the view
      */
-    NS_IMETHOD AttachViewToTopLevel(bool aUseAttachedEvents,
-                                    nsDeviceContext *aContext) = 0;
+    NS_IMETHOD AttachViewToTopLevel(bool aUseAttachedEvents) = 0;
 
     /**
      * Accessor functions to get and set the attached listener. Used by
@@ -833,9 +931,6 @@ class nsIWidget : public nsISupports {
      */
     NS_IMETHOD SetParent(nsIWidget* aNewParent) = 0;
 
-    NS_IMETHOD RegisterTouchWindow() = 0;
-    NS_IMETHOD UnregisterTouchWindow() = 0;
-
     /**
      * Return the parent Widget of this Widget or nullptr if this is a 
      * top level window
@@ -867,6 +962,11 @@ class nsIWidget : public nsISupports {
      * the number of device pixels per inch.
      */
     virtual float GetDPI() = 0;
+
+    /**
+     * Returns the CompositorVsyncDispatcher associated with this widget
+     */
+    virtual CompositorVsyncDispatcher* GetCompositorVsyncDispatcher() = 0;
 
     /**
      * Return the default scale factor for the window. This is the
@@ -1227,6 +1327,18 @@ class nsIWidget : public nsISupports {
      */
     virtual nsIntPoint GetClientOffset() = 0;
 
+
+    /**
+     * Equivalent to GetClientBounds but only returns the size.
+     */
+    virtual mozilla::gfx::IntSize GetClientSize() {
+      // Dependeing on the backend, overloading this method may be useful if
+      // if requesting the client offset is expensive.
+      nsIntRect rect;
+      GetClientBounds(rect);
+      return mozilla::gfx::IntSize(rect.width, rect.height);
+    }
+
     /**
      * Set the background color for this widget
      *
@@ -1316,6 +1428,8 @@ class nsIWidget : public nsISupports {
      */
     struct Configuration {
         nsIWidget* mChild;
+        uintptr_t mWindowID; // e10s specific, the unique plugin port id
+        bool mVisible; // e10s specific, widget visibility
         nsIntRect mBounds;
         nsTArray<nsIntRect> mClipRegion;
     };
@@ -1326,12 +1440,12 @@ class nsIWidget : public nsISupports {
      * mClipRegion, all relative to the top-left of the child
      * widget. Clip regions are not implemented on all platforms and only
      * need to actually work for children that are plugins.
-     * 
+     *
      * Also sets the bounds of each child to mBounds.
-     * 
+     *
      * This will invalidate areas of the children that have changed, but
      * does not need to invalidate any part of this widget.
-     * 
+     *
      * Children should be moved in the order given; the array is
      * sorted so to minimize unnecessary invalidation if children are
      * moved in that order.
@@ -1346,6 +1460,30 @@ class nsIWidget : public nsISupports {
      * (0, 0, bounds.width, bounds.height).
      */
     virtual void GetWindowClipRegion(nsTArray<nsIntRect>* aRects) = 0;
+
+    /**
+     * Register or unregister native plugin widgets which receive Configuration
+     * data from the content process via the compositor.
+     *
+     * Lookups are used by the main thread via the compositor to lookup widgets
+     * based on a unique window id. On Windows and Linux this is the
+     * NS_NATIVE_PLUGIN_PORT (hwnd/XID). This tracking maintains a reference to
+     * widgets held. Consumers are responsible for removing widgets from this
+     * list.
+     */
+    virtual void RegisterPluginWindowForRemoteUpdates() = 0;
+    virtual void UnregisterPluginWindowForRemoteUpdates() = 0;
+    static nsIWidget* LookupRegisteredPluginWindow(uintptr_t aWindowID);
+
+    /**
+     * Iterates across the list of registered plugin widgets and updates thier
+     * visibility based on which plugins are included in the 'visible' list.
+     *
+     * The compositor knows little about tabs, but it does know which plugin
+     * widgets are currently included in the visible layer tree. It calls this
+     * helper to hide widgets it knows nothing about.
+     */
+    static void UpdateRegisteredPluginWindowVisibility(nsTArray<uintptr_t>& aVisibleList);
 
     /**
      * Set the shadow style of the window.
@@ -1405,9 +1543,12 @@ class nsIWidget : public nsISupports {
 
     /**
      * Put the toplevel window into or out of fullscreen mode.
-     *
+     * If aTargetScreen is given, attempt to go fullscreen on that screen,
+     * if possible.  (If not, it behaves as if aTargetScreen is null.)
+     * If !aFullScreen, aTargetScreen is ignored.
+     * aTargetScreen support is currently only implemented on Windows.
      */
-    NS_IMETHOD MakeFullScreen(bool aFullScreen) = 0;
+    NS_IMETHOD MakeFullScreen(bool aFullScreen, nsIScreen* aTargetScreen = nullptr) = 0;
 
     /**
      * Invalidate a specified rect for a widget so that it will be repainted
@@ -1550,7 +1691,7 @@ class nsIWidget : public nsISupports {
      */
     virtual void UpdateWindowDraggingRegion(const nsIntRegion& aRegion) {}
 
-    /** 
+    /**
      * Internal methods
      */
 
@@ -1558,10 +1699,8 @@ class nsIWidget : public nsISupports {
     virtual void AddChild(nsIWidget* aChild) = 0;
     virtual void RemoveChild(nsIWidget* aChild) = 0;
     virtual void* GetNativeData(uint32_t aDataType) = 0;
+    virtual void SetNativeData(uint32_t aDataType, uintptr_t aVal) = 0;
     virtual void FreeNativeData(void * data, uint32_t aDataType) = 0;//~~~
-
-    // GetDeviceContext returns a weak pointer to this widget's device context
-    virtual nsDeviceContext* GetDeviceContext() = 0;
 
     //@}
 
@@ -1586,19 +1725,24 @@ class nsIWidget : public nsISupports {
     NS_IMETHOD SetIcon(const nsAString& anIconSpec) = 0;
 
     /**
-     * Return this widget's origin in screen coordinates.
+     * Return this widget's origin in screen coordinates. The untyped version
+     * exists temporarily to ease conversion to typed coordinates.
      *
      * @return screen coordinates stored in the x,y members
      */
 
-    virtual nsIntPoint WidgetToScreenOffset() = 0;
+    virtual mozilla::LayoutDeviceIntPoint WidgetToScreenOffset() = 0;
+    virtual nsIntPoint WidgetToScreenOffsetUntyped() {
+      return mozilla::LayoutDeviceIntPoint::ToUntyped(WidgetToScreenOffset());
+    }
 
     /**
      * Given the specified client size, return the corresponding window size,
      * which includes the area for the borders and titlebar. This method
      * should work even when the window is not yet visible.
      */
-    virtual nsIntSize ClientToWindowSize(const nsIntSize& aClientSize) = 0;
+    virtual mozilla::LayoutDeviceIntSize ClientToWindowSize(
+                const mozilla::LayoutDeviceIntSize& aClientSize) = 0;
 
     /**
      * Dispatches an event to the widget
@@ -1606,6 +1750,29 @@ class nsIWidget : public nsISupports {
      */
     NS_IMETHOD DispatchEvent(mozilla::WidgetGUIEvent* event,
                              nsEventStatus & aStatus) = 0;
+
+    virtual bool IsMultiProcessWindow() = 0;
+
+    /**
+     * Dispatches an event that must be handled by APZ first, when APZ is
+     * enabled. If invoked in the child process, it is forwarded to the
+     * parent process synchronously.
+     */
+    virtual nsEventStatus DispatchAPZAwareEvent(mozilla::WidgetInputEvent* aEvent) = 0;
+
+    /**
+     * Dispatches an event that must be transformed by APZ first, but is not
+     * actually handled by APZ. If invoked in the child process, it is
+     * forwarded to the parent process synchronously.
+     */
+    virtual nsEventStatus DispatchInputEvent(mozilla::WidgetInputEvent* aEvent) = 0;
+
+    /**
+     * Confirm an APZ-aware event target. This should be used when APZ will
+     * not need a layers update to process the event.
+     */
+    virtual void SetConfirmedTargetAPZC(uint64_t aInputBlockId,
+                                        const nsTArray<mozilla::layers::ScrollableLayerGuid>& aTargets) const = 0;
 
     /**
      * Enables the dropping of files to a widget (XXX this is temporary)
@@ -1747,6 +1914,8 @@ class nsIWidget : public nsISupports {
      * @param aUnmodifiedCharacters characters that the OS would decide
      * to generate from the event if modifier keys (other than shift)
      * were assumed inactive. Needed on Mac, ignored on Windows.
+     * @param aObserver the observer that will get notified once the events
+     * have been dispatched.
      * @return NS_ERROR_NOT_AVAILABLE to indicate that the keyboard
      * layout is not supported and the event was not fired
      */
@@ -1754,7 +1923,8 @@ class nsIWidget : public nsISupports {
                                               int32_t aNativeKeyCode,
                                               uint32_t aModifierFlags,
                                               const nsAString& aCharacters,
-                                              const nsAString& aUnmodifiedCharacters) = 0;
+                                              const nsAString& aUnmodifiedCharacters,
+                                              nsIObserver* aObserver) = 0;
 
     /**
      * Utility method intended for testing. Dispatches native mouse events
@@ -1769,16 +1939,22 @@ class nsIWidget : public nsISupports {
      * NSMouseMoved; on Windows, MOUSEEVENTF_MOVE, MOUSEEVENTF_LEFTDOWN etc)
      * @param aModifierFlags *platform-specific* modifier flags (ignored
      * on Windows)
+     * @param aObserver the observer that will get notified once the events
+     * have been dispatched.
      */
-    virtual nsresult SynthesizeNativeMouseEvent(nsIntPoint aPoint,
+    virtual nsresult SynthesizeNativeMouseEvent(mozilla::LayoutDeviceIntPoint aPoint,
                                                 uint32_t aNativeMessage,
-                                                uint32_t aModifierFlags) = 0;
+                                                uint32_t aModifierFlags,
+                                                nsIObserver* aObserver) = 0;
 
     /**
      * A shortcut to SynthesizeNativeMouseEvent, abstracting away the native message.
      * aPoint is location in device pixels to which the mouse pointer moves to.
+     * @param aObserver the observer that will get notified once the events
+     * have been dispatched.
      */
-    virtual nsresult SynthesizeNativeMouseMove(nsIntPoint aPoint) = 0;
+    virtual nsresult SynthesizeNativeMouseMove(mozilla::LayoutDeviceIntPoint aPoint,
+                                               nsIObserver* aObserver) = 0;
 
     /**
      * Utility method intended for testing. Dispatching native mouse scroll
@@ -1800,14 +1976,17 @@ class nsIWidget : public nsISupports {
      * @param aModifierFlags    Must be values of Modifiers, or zero.
      * @param aAdditionalFlags  See nsIDOMWidnowUtils' consts and their
      *                          document.
+     * @param aObserver         The observer that will get notified once the
+     *                          events have been dispatched.
      */
-    virtual nsresult SynthesizeNativeMouseScrollEvent(nsIntPoint aPoint,
+    virtual nsresult SynthesizeNativeMouseScrollEvent(mozilla::LayoutDeviceIntPoint aPoint,
                                                       uint32_t aNativeMessage,
                                                       double aDeltaX,
                                                       double aDeltaY,
                                                       double aDeltaZ,
                                                       uint32_t aModifierFlags,
-                                                      uint32_t aAdditionalFlags) = 0;
+                                                      uint32_t aAdditionalFlags,
+                                                      nsIObserver* aObserver) = 0;
 
     /*
      * TouchPointerState states for SynthesizeNativeTouchPoint. Match
@@ -1815,16 +1994,19 @@ class nsIWidget : public nsISupports {
      */
     enum TouchPointerState {
       // The pointer is in a hover state above the digitizer
-      TOUCH_HOVER    = 0x01,
+      TOUCH_HOVER    = (1 << 0),
       // The pointer is in contact with the digitizer
-      TOUCH_CONTACT  = 0x02,
+      TOUCH_CONTACT  = (1 << 1),
       // The pointer has been removed from the digitizer detection area
-      TOUCH_REMOVE   = 0x04,
+      TOUCH_REMOVE   = (1 << 2),
       // The pointer has been canceled. Will cancel any pending os level
       // gestures that would triggered as a result of completion of the
       // input sequence. This may not cancel moz platform related events
       // that might get tirggered by input already delivered.
-      TOUCH_CANCEL   = 0x08
+      TOUCH_CANCEL   = (1 << 3),
+
+      // ALL_BITS used for validity checking during IPC serialization
+      ALL_BITS       = (1 << 4) - 1
     };
 
     /*
@@ -1839,38 +2021,48 @@ class nsIWidget : public nsISupports {
      * @param aPressure 0.0 -> 1.0 float val indicating pressure
      * @param aOrientation 0 -> 359 degree value indicating the
      * orientation of the pointer. Use 90 for normal taps.
+     * @param aObserver The observer that will get notified once the events
+     * have been dispatched.
      */
     virtual nsresult SynthesizeNativeTouchPoint(uint32_t aPointerId,
                                                 TouchPointerState aPointerState,
                                                 nsIntPoint aPointerScreenPoint,
                                                 double aPointerPressure,
-                                                uint32_t aPointerOrientation) = 0;
-
-    /*
-     * Cancels all active simulated touch input points and pending long taps.
-     * Native widgets should track existing points such that they can clear the
-     * digitizer state when this call is made.
-     */
-    virtual nsresult ClearNativeTouchSequence();
+                                                uint32_t aPointerOrientation,
+                                                nsIObserver* aObserver) = 0;
 
     /*
      * Helper for simulating a simple tap event with one touch point. When
      * aLongTap is true, simulates a native long tap with a duration equal to
      * ui.click_hold_context_menus.delay. This pref is compatible with the
      * apzc long tap duration. Defaults to 1.5 seconds.
+     * @param aObserver The observer that will get notified once the events
+     * have been dispatched.
      */
-    nsresult SynthesizeNativeTouchTap(nsIntPoint aPointerScreenPoint,
-                                      bool aLongTap);
+    virtual nsresult SynthesizeNativeTouchTap(nsIntPoint aPointerScreenPoint,
+                                              bool aLongTap,
+                                              nsIObserver* aObserver);
+
+    /*
+     * Cancels all active simulated touch input points and pending long taps.
+     * Native widgets should track existing points such that they can clear the
+     * digitizer state when this call is made.
+     * @param aObserver The observer that will get notified once the touch
+     * sequence has been cleared.
+     */
+    virtual nsresult ClearNativeTouchSequence(nsIObserver* aObserver);
 
 private:
   class LongTapInfo
   {
   public:
     LongTapInfo(int32_t aPointerId, nsIntPoint& aPoint,
-                mozilla::TimeDuration aDuration) :
+                mozilla::TimeDuration aDuration,
+                nsIObserver* aObserver) :
       mPointerId(aPointerId),
       mPosition(aPoint),
       mDuration(aDuration),
+      mObserver(aObserver),
       mStamp(mozilla::TimeStamp::Now())
     {
     }
@@ -1878,6 +2070,7 @@ private:
     int32_t mPointerId;
     nsIntPoint mPosition;
     mozilla::TimeDuration mDuration;
+    nsCOMPtr<nsIObserver> mObserver;
     mozilla::TimeStamp mStamp;
   };
 
@@ -1928,6 +2121,28 @@ public:
      */
     NS_IMETHOD NotifyIME(const IMENotification& aIMENotification) = 0;
 
+    /**
+     * Start plugin IME.  If this results in a string getting committed, the
+     * result is in aCommitted (otherwise aCommitted is empty).
+     *
+     * aKeyboardEvent     The event with which plugin IME is to be started
+     * panelX and panelY  Location in screen coordinates of the IME input panel
+     *                    (should be just under the plugin)
+     * aCommitted         The string committed during IME -- otherwise empty
+     */
+    NS_IMETHOD StartPluginIME(const mozilla::WidgetKeyboardEvent& aKeyboardEvent,
+                              int32_t aPanelX, int32_t aPanelY,
+                              nsString& aCommitted) = 0;
+
+    /**
+     * Tells the widget whether or not a plugin (inside the widget) has the
+     * keyboard focus.  Should be sent when the keyboard focus changes too or
+     * from a plugin.
+     *
+     * aFocused  Whether or not a plugin is focused
+     */
+    NS_IMETHOD SetPluginFocused(bool& aFocused) = 0;
+
     /*
      * Notifies the input context changes.
      */
@@ -1962,11 +2177,6 @@ public:
                         const mozilla::WidgetKeyboardEvent& aEvent,
                         DoCommandCallback aCallback,
                         void* aCallbackData) = 0;
-
-    /**
-     * Set layers acceleration to 'True' or 'False'
-     */
-    NS_IMETHOD SetLayersAcceleration(bool aEnabled) = 0;
 
     /*
      * Get toggled key states.
@@ -2154,6 +2364,12 @@ public:
      */
     virtual int32_t RoundsWidgetCoordinatesTo() { return 1; }
 
+    /**
+     * GetTextEventDispatcher() returns TextEventDispatcher belonging to the
+     * widget.  Note that this never returns nullptr.
+     */
+    NS_IMETHOD_(TextEventDispatcher*) GetTextEventDispatcher() = 0;
+
 protected:
     /**
      * Like GetDefaultScale, but taking into account only the system settings
@@ -2168,9 +2384,9 @@ protected:
     // lastchild pointers are weak, which is fine as long as they are
     // maintained properly.
     nsCOMPtr<nsIWidget> mFirstChild;
-    nsIWidget* mLastChild;
+    nsIWidget* MOZ_NON_OWNING_REF mLastChild;
     nsCOMPtr<nsIWidget> mNextSibling;
-    nsIWidget* mPrevSibling;
+    nsIWidget* MOZ_NON_OWNING_REF mPrevSibling;
     // When Destroy() is called, the sub class should set this true.
     bool mOnDestroyCalled;
     nsWindowType mWindowType;

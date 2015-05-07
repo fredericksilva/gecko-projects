@@ -118,6 +118,10 @@ function testInit() {
 
   Services.prefs.setBoolPref("testing.jetpackTestHarness.running", true);
 
+  // Need to set this very early, otherwise the false value gets cached in
+  // DOM bindings code.
+  Services.prefs.setBoolPref("dom.indexedDB.experimental", true);
+
   // Get the list of tests to run
   let config = readConfig();
   getTestList(config, function(links) {
@@ -128,11 +132,6 @@ function testInit() {
 
       if (config.startAt || config.endAt) {
         fileNames = skipTests(fileNames, config.startAt, config.endAt);
-      }
-
-      if (config.totalChunks && config.thisChunk) {
-        fileNames = chunkifyTests(fileNames, config.totalChunks,
-                                  config.thisChunk, config.chunkByDir);
       }
 
       // The SDK assumes it is being run from resource URIs
@@ -155,6 +154,9 @@ function testInit() {
         output: {
           logLevel: "verbose",
           format: "tbpl",
+        },
+        console: {
+          logLevel: "info",
         },
       }
       setPrefs("extensions." + TEST_ID + ".sdk", options);
@@ -227,6 +229,9 @@ function testInit() {
 
           if (config.closeWhenDone) {
             require("sdk/system").exit(failed == 0 ? 0 : 1);
+          }
+          else {
+            loaderModule.unload(loader, "shutdown");
           }
         }
 

@@ -63,7 +63,6 @@ public:
     // Returns true on success. Can fail on OOM or when aContext is null
     // and extents were not (successfully) prefetched.
     bool GetTightGlyphExtentsAppUnits(gfxFont *aFont,
-            gfxFont::Orientation aOrientation,
             gfxContext *aContext, uint32_t aGlyphID, gfxRect *aExtents);
 
     void SetContainedGlyphWidthAppUnits(uint32_t aGlyphID, uint16_t aWidth) {
@@ -137,8 +136,8 @@ private:
 
 private:
     // not implemented:
-    gfxGlyphExtents(const gfxGlyphExtents& aOther) MOZ_DELETE;
-    gfxGlyphExtents& operator=(const gfxGlyphExtents& aOther) MOZ_DELETE;
+    gfxGlyphExtents(const gfxGlyphExtents& aOther) = delete;
+    gfxGlyphExtents& operator=(const gfxGlyphExtents& aOther) = delete;
 };
 
 #endif

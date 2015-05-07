@@ -3,19 +3,17 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#ifndef WEBGLTRANSFORMFEEDBACK_H_
-#define WEBGLTRANSFORMFEEDBACK_H_
+#ifndef WEBGL_TRANSFORM_FEEDBACK_H_
+#define WEBGL_TRANSFORM_FEEDBACK_H_
 
+#include "mozilla/LinkedList.h"
+#include "nsWrapperCache.h"
 #include "WebGLBindableName.h"
 #include "WebGLObjectModel.h"
 
-#include "nsWrapperCache.h"
-
-#include "mozilla/LinkedList.h"
-
 namespace mozilla {
 
-class WebGLTransformFeedback MOZ_FINAL
+class WebGLTransformFeedback final
     : public nsWrapperCache
     , public WebGLBindableName<GLenum>
     , public WebGLRefCountedObject<WebGLTransformFeedback>
@@ -23,26 +21,25 @@ class WebGLTransformFeedback MOZ_FINAL
     , public WebGLContextBoundObject
 {
     friend class WebGLContext;
+    friend class WebGL2Context;
 
 public:
-
-    explicit WebGLTransformFeedback(WebGLContext* aContext);
+    explicit WebGLTransformFeedback(WebGLContext* webgl, GLuint tf);
 
     void Delete();
     WebGLContext* GetParentObject() const;
-
-    // -------------------------------------------------------------------------
-    // IMPLEMENT NS
-    virtual JSObject* WrapObject(JSContext* cx) MOZ_OVERRIDE;
+    virtual JSObject* WrapObject(JSContext* cx, JS::Handle<JSObject*> aGivenProto) override;
 
     NS_INLINE_DECL_CYCLE_COLLECTING_NATIVE_REFCOUNTING(WebGLTransformFeedback)
     NS_DECL_CYCLE_COLLECTION_SCRIPT_HOLDER_NATIVE_CLASS(WebGLTransformFeedback)
 
 private:
-
     ~WebGLTransformFeedback();
+    GLenum mMode;
+    bool mIsActive;
+    bool mIsPaused;
 };
 
-}
+} // namespace mozilla
 
-#endif // !WEBGLTRANSFORMFEEDBACK_H_
+#endif // WEBGL_TRANSFORM_FEEDBACK_H_

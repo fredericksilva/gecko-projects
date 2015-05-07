@@ -99,15 +99,12 @@ nsAboutCacheEntry::NewChannel(nsIURI* uri,
     nsCOMPtr<nsIInputStream> stream;
     rv = GetContentStream(uri, getter_AddRefs(stream));
     if (NS_FAILED(rv)) return rv;
-
-    return NS_NewInputStreamChannel(result,
-                                    uri,
-                                    stream,
-                                    nsContentUtils::GetSystemPrincipal(),
-                                    nsILoadInfo::SEC_NORMAL,
-                                    nsIContentPolicy::TYPE_OTHER,
-                                    NS_LITERAL_CSTRING("text/html"),
-                                    NS_LITERAL_CSTRING("utf-8"));
+    return NS_NewInputStreamChannelInternal(result,
+                                            uri,
+                                            stream,
+                                            NS_LITERAL_CSTRING("text/html"),
+                                            NS_LITERAL_CSTRING("utf-8"),
+                                            aLoadInfo);
 }
 
 NS_IMETHODIMP
@@ -376,7 +373,7 @@ nsAboutCacheEntry::WriteCacheEntryDescription(nsICacheEntry *entry)
     } else {
         buffer.Append(escapedStr);
     }
-    nsMemory::Free(escapedStr);
+    free(escapedStr);
     buffer.AppendLiteral("</td>\n"
                          "  </tr>\n");
 
@@ -509,7 +506,7 @@ nsAboutCacheEntry::OnMetaDataElement(char const * key, char const * value)
                            "    <td>");
     char* escapedValue = nsEscapeHTML(value);
     mBuffer->Append(escapedValue);
-    nsMemory::Free(escapedValue);
+    free(escapedValue);
     mBuffer->AppendLiteral("</td>\n"
                            "  </tr>\n");
 

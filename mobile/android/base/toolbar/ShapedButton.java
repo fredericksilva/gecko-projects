@@ -5,9 +5,9 @@
 package org.mozilla.gecko.toolbar;
 
 import org.mozilla.gecko.GeckoApplication;
-import org.mozilla.gecko.LightweightTheme;
-import org.mozilla.gecko.LightweightThemeDrawable;
 import org.mozilla.gecko.R;
+import org.mozilla.gecko.lwt.LightweightTheme;
+import org.mozilla.gecko.lwt.LightweightThemeDrawable;
 import org.mozilla.gecko.tabs.TabCurve;
 import org.mozilla.gecko.widget.ThemedImageButton;
 
@@ -23,14 +23,12 @@ import android.util.AttributeSet;
 
 public class ShapedButton extends ThemedImageButton
                           implements CanvasDelegate.DrawManager {
-    protected final LightweightTheme mTheme;
 
     protected final Path mPath;
     protected final CanvasDelegate mCanvasDelegate;
 
     public ShapedButton(Context context, AttributeSet attrs) {
         super(context, attrs);
-        mTheme = ((GeckoApplication) context.getApplicationContext()).getLightweightTheme();
 
         // Path is clipped.
         mPath = new Path();
@@ -60,8 +58,8 @@ public class ShapedButton extends ThemedImageButton
     // The drawable is constructed as per @drawable/shaped_button.
     @Override
     public void onLightweightThemeChanged() {
-        final int background = getResources().getColor(R.color.background_tabs);
-        final LightweightThemeDrawable lightWeight = mTheme.getColorDrawable(this, background);
+        final int background = getResources().getColor(R.color.text_and_tabs_tray_grey);
+        final LightweightThemeDrawable lightWeight = getTheme().getColorDrawable(this, background);
 
         if (lightWeight == null)
             return;
@@ -71,7 +69,7 @@ public class ShapedButton extends ThemedImageButton
         final StateListDrawable stateList = new StateListDrawable();
         stateList.addState(PRESSED_ENABLED_STATE_SET, getColorDrawable(R.color.highlight_shaped));
         stateList.addState(FOCUSED_STATE_SET, getColorDrawable(R.color.highlight_shaped_focused));
-        stateList.addState(PRIVATE_STATE_SET, getColorDrawable(R.color.background_tabs));
+        stateList.addState(PRIVATE_STATE_SET, getColorDrawable(R.color.text_and_tabs_tray_grey));
         stateList.addState(EMPTY_STATE_SET, lightWeight);
 
         setBackgroundDrawable(stateList);

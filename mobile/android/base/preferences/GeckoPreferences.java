@@ -12,6 +12,7 @@ import java.util.Locale;
 import java.util.Map;
 
 import android.os.Build;
+
 import org.json.JSONObject;
 import org.mozilla.gecko.AppConstants;
 import org.mozilla.gecko.AppConstants.Versions;
@@ -27,7 +28,7 @@ import org.mozilla.gecko.GeckoProfile;
 import org.mozilla.gecko.GeckoSharedPrefs;
 import org.mozilla.gecko.GuestSession;
 import org.mozilla.gecko.LocaleManager;
-import org.mozilla.gecko.NewTabletUI;
+import org.mozilla.gecko.Locales;
 import org.mozilla.gecko.PrefsHelper;
 import org.mozilla.gecko.R;
 import org.mozilla.gecko.RestrictedProfiles;
@@ -37,6 +38,7 @@ import org.mozilla.gecko.TelemetryContract.Method;
 import org.mozilla.gecko.background.common.GlobalConstants;
 import org.mozilla.gecko.background.healthreport.HealthReportConstants;
 import org.mozilla.gecko.db.BrowserContract.SuggestedSites;
+import org.mozilla.gecko.updater.UpdateService;
 import org.mozilla.gecko.updater.UpdateServiceHelper;
 import org.mozilla.gecko.util.GeckoEventListener;
 import org.mozilla.gecko.util.HardwareUtils;
@@ -113,7 +115,9 @@ OnSharedPreferenceChangeListener
     private static final String PREFS_CRASHREPORTER_ENABLED = "datareporting.crashreporter.submitEnabled";
     private static final String PREFS_MENU_CHAR_ENCODING = "browser.menu.showCharacterEncoding";
     private static final String PREFS_MP_ENABLED = "privacy.masterpassword.enabled";
+    private static final String PREFS_LOGIN_MANAGE = NON_PREF_PREFIX + "signon.manage";
     private static final String PREFS_UPDATER_AUTODOWNLOAD = "app.update.autodownload";
+    private static final String PREFS_UPDATER_URL = "app.update.url.android";
     private static final String PREFS_GEO_REPORTING = NON_PREF_PREFIX + "app.geo.reportdata";
     private static final String PREFS_GEO_LEARN_MORE = NON_PREF_PREFIX + "geo.learn_more";
     private static final String PREFS_HEALTHREPORT_LINK = NON_PREF_PREFIX + "healthreport.link";
@@ -121,6 +125,8 @@ OnSharedPreferenceChangeListener
     private static final String PREFS_DISPLAY_REFLOW_ON_ZOOM = "browser.zoom.reflowOnZoom";
     private static final String PREFS_DISPLAY_TITLEBAR_MODE = "browser.chrome.titlebarMode";
     private static final String PREFS_SYNC = NON_PREF_PREFIX + "sync";
+    private static final String PREFS_TRACKING_PROTECTION = "privacy.trackingprotection.enabled";
+    private static final String PREFS_TRACKING_PROTECTION_LEARN_MORE = NON_PREF_PREFIX + "trackingprotection.learn_more";
 
     private static final String ACTION_STUMBLER_UPLOAD_PREF = AppConstants.ANDROID_PACKAGE_NAME + ".STUMBLER_PREF";
 
@@ -129,7 +135,10 @@ OnSharedPreferenceChangeListener
 
     public static final String PREFS_RESTORE_SESSION = NON_PREF_PREFIX + "restoreSession3";
     public static final String PREFS_SUGGESTED_SITES = NON_PREF_PREFIX + "home_suggested_sites";
-    public static final String PREFS_NEW_TABLET_UI = NON_PREF_PREFIX + "new_tablet_ui";
+    public static final String PREFS_TAB_QUEUE = NON_PREF_PREFIX + "tab_queue";
+    public static final String PREFS_CUSTOMIZE_SCREEN = NON_PREF_PREFIX + "customize_screen";
+    public static final String PREFS_TAB_QUEUE_LAST_SITE = NON_PREF_PREFIX + "last_site";
+    public static final String PREFS_TAB_QUEUE_LAST_TIME = NON_PREF_PREFIX + "last_time";
 
     // These values are chosen to be distinct from other Activity constants.
     private static final int REQUEST_CODE_PREF_SCREEN = 5;
@@ -299,10 +308,6 @@ OnSharedPreferenceChangeListener
         // Make sure RestrictedProfiles is ready.
         RestrictedProfiles.initWithProfile(GeckoProfile.get(this));
 
-        if (GeckoProfile.get(this).inGuestMode()) {
-            GuestSession.configureWindow(getWindow());
-        }
-
         // Apply the current user-selected locale, if necessary.
         checkLocale();
 
@@ -340,6 +345,7 @@ OnSharedPreferenceChangeListener
         }
 
         super.onCreate(savedInstanceState);
+        initActionBar();
 
         // Use setResourceToOpen to specify these extras.
         Bundle intentExtras = getIntent().getExtras();
@@ -398,13 +404,6 @@ OnSharedPreferenceChangeListener
             }
         });
 
-        if (Versions.feature14Plus) {
-            final ActionBar actionBar = getActionBar();
-            if (actionBar != null) {
-                actionBar.setHomeButtonEnabled(true);
-            }
-        }
-
         // N.B., if we ever need to redisplay the locale selection UI without
         // just finishing and recreating the activity, right here we'll need to
         // capture EXTRA_SHOW_FRAGMENT_TITLE from the intent and store the title ID.
@@ -413,6 +412,27 @@ OnSharedPreferenceChangeListener
         if (intentExtras != null && intentExtras.containsKey(DataReportingNotification.ALERT_NAME_DATAREPORTING_NOTIFICATION)) {
             NotificationManager notificationManager = (NotificationManager) this.getSystemService(Context.NOTIFICATION_SERVICE);
             notificationManager.cancel(DataReportingNotification.ALERT_NAME_DATAREPORTING_NOTIFICATION.hashCode());
+        }
+    }
+
+    /**
+     * Initializes the action bar configuration in code.
+     *
+     * Declaring these attributes in XML does not work on some devices for an unknown reason
+     * (e.g. the back button stops working or the logo disappears; see bug 1152314) so we
+     * duplicate those attributes in code here. Note: the order of these calls matters.
+     *
+     * We keep the XML attributes because not all of these methods are available on pre-v14.
+     */
+    private void initActionBar() {
+        if (Versions.feature14Plus) {
+            final ActionBar actionBar = getActionBar();
+            if (actionBar != null) {
+                actionBar.setHomeButtonEnabled(true);
+                actionBar.setDisplayHomeAsUpEnabled(true);
+                actionBar.setLogo(R.drawable.logo);
+                actionBar.setDisplayUseLogoEnabled(true);
+            }
         }
     }
 
@@ -660,6 +680,10 @@ OnSharedPreferenceChangeListener
                 } else if (pref instanceof PanelsPreferenceCategory) {
                     mPanelsPreferenceCategory = (PanelsPreferenceCategory) pref;
                 }
+                if((AppConstants.MOZ_ANDROID_TAB_QUEUE && AppConstants.NIGHTLY_BUILD) && (PREFS_CUSTOMIZE_SCREEN.equals(key))) {
+                    // Only change the customize pref screen summary on nightly builds with the tab queue build flag.
+                    pref.setSummary(getString(R.string.pref_category_customize_alt_summary));
+                }
                 setupPreferences((PreferenceGroup) pref, prefs);
             } else {
                 pref.setOnPreferenceChangeListener(this);
@@ -668,15 +692,20 @@ OnSharedPreferenceChangeListener
                     preferences.removePreference(pref);
                     i--;
                     continue;
+                } else if (!AppConstants.NIGHTLY_BUILD &&
+                           PREFS_LOGIN_MANAGE.equals(key)) {
+                    preferences.removePreference(pref);
+                    i--;
                 } else if (AppConstants.RELEASE_BUILD &&
                            PREFS_DISPLAY_REFLOW_ON_ZOOM.equals(key)) {
                     // Remove UI for reflow on release builds.
                     preferences.removePreference(pref);
                     i--;
                     continue;
-                } else if ((AppConstants.RELEASE_BUILD || !HardwareUtils.isTablet()) &&
-                           PREFS_NEW_TABLET_UI.equals(key)) {
-                    // Remove toggle for new tablet UI on release builds and phones.
+                } else if (!AppConstants.NIGHTLY_BUILD &&
+                           (PREFS_TRACKING_PROTECTION.equals(key) ||
+                            PREFS_TRACKING_PROTECTION_LEARN_MORE.equals(key))) {
+                    // Remove UI for tracking protection preference on non-Nightly builds.
                     preferences.removePreference(pref);
                     i--;
                     continue;
@@ -734,7 +763,7 @@ OnSharedPreferenceChangeListener
                         }
                     });
                 } else if (PREFS_DISPLAY_TITLEBAR_MODE.equals(key) &&
-                           NewTabletUI.isEnabled(this)) {
+                           HardwareUtils.isTablet()) {
                     // New tablet always shows URLS, not titles.
                     preferences.removePreference(pref);
                     i--;
@@ -746,6 +775,11 @@ OnSharedPreferenceChangeListener
                         i--;
                         continue;
                     }
+                } else if (!(AppConstants.MOZ_ANDROID_TAB_QUEUE && AppConstants.NIGHTLY_BUILD) && PREFS_TAB_QUEUE.equals(key)) {
+                    // Only show tab queue pref on nightly builds with the tab queue build flag.
+                    preferences.removePreference(pref);
+                    i--;
+                    continue;
                 }
 
                 // Some Preference UI elements are not actually preferences,
@@ -887,7 +921,7 @@ OnSharedPreferenceChangeListener
                 .putExtra("pref", PREFS_GEO_REPORTING)
                 .putExtra("branch", GeckoSharedPrefs.APP_PREFS_NAME)
                 .putExtra("enabled", value)
-                .putExtra("moz_mozilla_api_key", AppConstants.MOZ_STUMBLER_API_KEY);
+                .putExtra("moz_mozilla_api_key", AppConstants.MOZ_MOZILLA_API_KEY);
        if (GeckoAppShell.getGeckoInterface() != null) {
            intent.putExtra("user_agent", GeckoAppShell.getGeckoInterface().getDefaultUAString());
        }
@@ -1014,12 +1048,10 @@ OnSharedPreferenceChangeListener
     @Override
     public void onSharedPreferenceChanged(SharedPreferences sharedPreferences, String key) {
         if (PREFS_BROWSER_LOCALE.equals(key)) {
-            onLocaleSelected(BrowserLocaleManager.getLanguageTag(lastLocale),
+            onLocaleSelected(Locales.getLanguageTag(lastLocale),
                              sharedPreferences.getString(key, null));
         } else if (PREFS_SUGGESTED_SITES.equals(key)) {
             refreshSuggestedSites();
-        } else if (PREFS_NEW_TABLET_UI.equals(key)) {
-            Toast.makeText(this, R.string.new_tablet_restart, Toast.LENGTH_SHORT).show();
         }
     }
 
@@ -1054,13 +1086,15 @@ OnSharedPreferenceChangeListener
         if (PREFS_BROWSER_LOCALE.equals(prefName)) {
             // Even though this is a list preference, we don't want to handle it
             // below, so we return here.
-            return onLocaleSelected(BrowserLocaleManager.getLanguageTag(lastLocale), (String) newValue);
+            return onLocaleSelected(Locales.getLanguageTag(lastLocale), (String) newValue);
         }
 
         if (PREFS_MENU_CHAR_ENCODING.equals(prefName)) {
             setCharEncodingState(((String) newValue).equals("true"));
         } else if (PREFS_UPDATER_AUTODOWNLOAD.equals(prefName)) {
-            UpdateServiceHelper.registerForUpdates(this, (String) newValue);
+            UpdateServiceHelper.setAutoDownloadPolicy(this, UpdateService.AutoDownloadPolicy.get((String) newValue));
+        } else if (PREFS_UPDATER_URL.equals(prefName)) {
+            UpdateServiceHelper.setUpdateUrl(this, (String) newValue);
         } else if (PREFS_HEALTHREPORT_UPLOAD_ENABLED.equals(prefName)) {
             // The healthreport pref only lives in Android, so we do not persist
             // to Gecko, but we do broadcast intent to the health report
@@ -1078,7 +1112,7 @@ OnSharedPreferenceChangeListener
 
         // Send Gecko-side pref changes to Gecko
         if (isGeckoPref(prefName)) {
-            PrefsHelper.setPref(prefName, newValue);
+            PrefsHelper.setPref(prefName, newValue, true /* flush */);
         }
 
         if (preference instanceof ListPreference) {
@@ -1181,6 +1215,7 @@ OnSharedPreferenceChangeListener
                                 JSONObject jsonPref = new JSONObject();
                                 try {
                                     jsonPref.put("name", PREFS_MP_ENABLED);
+                                    jsonPref.put("flush", true);
                                     jsonPref.put("type", "string");
                                     jsonPref.put("value", input1.getText().toString());
 

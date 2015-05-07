@@ -1,7 +1,12 @@
 /* Any copyright is dedicated to the Public Domain.
    http://creativecommons.org/publicdomain/zero/1.0/ */
 
+"use strict";
+
 const {classes: Cc, interfaces: Ci, utils: Cu, results: Cr} = Components;
+
+// Initialize this before the imports, as some of them need it.
+do_get_profile();
 
 Cu.import("resource://gre/modules/XPCOMUtils.jsm");
 Cu.import("resource://gre/modules/Services.jsm");
@@ -11,7 +16,9 @@ Cu.import("resource:///modules/loop/MozLoopService.jsm");
 Cu.import("resource://gre/modules/Promise.jsm");
 Cu.import("resource:///modules/loop/LoopCalls.jsm");
 Cu.import("resource:///modules/loop/LoopRooms.jsm");
+Cu.import("resource://gre/modules/osfile.jsm");
 const { MozLoopServiceInternal } = Cu.import("resource:///modules/loop/MozLoopService.jsm", {});
+const { LoopRoomsInternal } = Cu.import("resource:///modules/loop/LoopRooms.jsm", {});
 
 XPCOMUtils.defineLazyModuleGetter(this, "MozLoopPushHandler",
                                   "resource:///modules/loop/MozLoopPushHandler.jsm");
@@ -19,7 +26,7 @@ XPCOMUtils.defineLazyModuleGetter(this, "MozLoopPushHandler",
 const kMockWebSocketChannelName = "Mock WebSocket Channel";
 const kWebSocketChannelContractID = "@mozilla.org/network/protocol;1?name=wss";
 
-const kServerPushUrl = "http://localhost:3456";
+const kServerPushUrl = "ws://localhost";
 const kLoopServerUrl = "http://localhost:3465";
 const kEndPointUrl = "http://example.com/fake";
 const kUAID = "f47ac11b-58ca-4372-9567-0e02b2c3d479";
@@ -32,14 +39,13 @@ Services.prefs.setBoolPref("loop.enabled", true);
 
 // Cleanup function for all tests
 do_register_cleanup(() => {
+  Services.prefs.clearUserPref("loop.enabled");
   MozLoopService.errors.clear();
 });
 
 function setupFakeLoopServer() {
   loopServer = new HttpServer();
   loopServer.start(-1);
-
-  Services.prefs.setCharPref("services.push.serverURL", kServerPushUrl);
 
   Services.prefs.setCharPref("loop.server",
     "http://localhost:" + loopServer.identity.primaryPort);
@@ -49,6 +55,19 @@ function setupFakeLoopServer() {
   do_register_cleanup(function() {
     loopServer.stop(function() {});
     MozLoopServiceInternal.mocks.pushHandler = undefined;
+  });
+}
+
+/**
+ * Sets up the userProfile to make the service think we're logged into FxA.
+ */
+function setupFakeFxAUserProfile() {
+  MozLoopServiceInternal.fxAOAuthTokenData = { token_type: "bearer" };
+  MozLoopServiceInternal.fxAOAuthProfile = { email: "fake@invalid.com" };
+
+  do_register_cleanup(function() {
+    MozLoopServiceInternal.fxAOAuthTokenData = null;
+    MozLoopServiceInternal.fxAOAuthProfile = null;
   });
 }
 
@@ -73,7 +92,7 @@ function waitForCondition(aConditionFn, aMaxTries=50, aCheckInterval=100) {
 }
 
 function getLoopString(stringID) {
-  return MozLoopServiceInternal.localizedStrings[stringID].textContent;
+  return MozLoopServiceInternal.localizedStrings.get(stringID);
 }
 
 /**
@@ -104,6 +123,10 @@ let mockPushHandler = {
     registerCallback(this.registrationResult, this.registrationPushURL, channelId);
   },
 
+  unregister: function(channelID) {
+    return;
+  },
+
   /**
    * Test-only API to simplify notifying a push notification result.
    */
@@ -117,12 +140,19 @@ let mockPushHandler = {
  * enables us to check parameters and return messages similar to the push
  * server.
  */
-let MockWebSocketChannel = function(options = {}) {
-  this.defaultMsgHandler = options.defaultMsgHandler;
-};
+function MockWebSocketChannel() {}
 
 MockWebSocketChannel.prototype = {
   QueryInterface: XPCOMUtils.generateQI(Ci.nsIWebSocketChannel),
+
+  initRegStatus: 0,
+
+  defaultMsgHandler: function(msg) {
+    // Treat as a ping
+    this.listener.onMessageAvailable(this.context,
+                                     JSON.stringify({}));
+    return;
+  },
 
   /**
    * nsIWebSocketChannel implementations.
@@ -164,6 +194,10 @@ MockWebSocketChannel.prototype = {
     }
   },
 
+  close: function(aCode, aReason) {
+    this.stop(aCode);
+  },
+
   notify: function(version) {
     this.listener.onMessageAvailable(this.context,
       JSON.stringify({
@@ -180,5 +214,12 @@ MockWebSocketChannel.prototype = {
 
   serverClose: function (err) {
     this.listener.onServerClose(this.context, err || -1);
-  },
+  }
+};
+
+const extend = function(target, source) {
+  for (let key of Object.getOwnPropertyNames(source)) {
+    target[key] = source[key];
+  }
+  return target;
 };

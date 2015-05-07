@@ -1,4 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -175,9 +176,9 @@ ImageDocument::Init()
 }
 
 JSObject*
-ImageDocument::WrapNode(JSContext* aCx)
+ImageDocument::WrapNode(JSContext* aCx, JS::Handle<JSObject*> aGivenProto)
 {
-  return ImageDocumentBinding::Wrap(aCx, this);
+  return ImageDocumentBinding::Wrap(aCx, this, aGivenProto);
 }
 
 nsresult
@@ -325,7 +326,7 @@ ImageDocument::GetImageRequest(imgIRequest** aImageRequest)
 {
   ErrorResult rv;
   *aImageRequest = GetImageRequest(rv).take();
-  return rv.ErrorCode();
+  return rv.StealNSResult();
 }
 
 void
@@ -459,20 +460,14 @@ ImageDocument::Notify(imgIRequest* aRequest, int32_t aType, const nsIntRect* aDa
   if (aType == imgINotificationObserver::SIZE_AVAILABLE) {
     nsCOMPtr<imgIContainer> image;
     aRequest->GetImage(getter_AddRefs(image));
-    return OnStartContainer(aRequest, image);
+    return OnSizeAvailable(aRequest, image);
   }
 
-  // Do these two off a script runner because decode complete notifications often
-  // come during painting and these will trigger invalidation.
-  if (aType == imgINotificationObserver::DECODE_COMPLETE) {
+  // Run this using a script runner because HAS_TRANSPARENCY notifications can
+  // come during painting and this will trigger invalidation.
+  if (aType == imgINotificationObserver::HAS_TRANSPARENCY) {
     nsCOMPtr<nsIRunnable> runnable =
-      NS_NewRunnableMethod(this, &ImageDocument::AddDecodedClass);
-    nsContentUtils::AddScriptRunner(runnable);
-  }
-
-  if (aType == imgINotificationObserver::DISCARD) {
-    nsCOMPtr<nsIRunnable> runnable =
-      NS_NewRunnableMethod(this, &ImageDocument::RemoveDecodedClass);
+      NS_NewRunnableMethod(this, &ImageDocument::OnHasTransparency);
     nsContentUtils::AddScriptRunner(runnable);
   }
 
@@ -481,14 +476,14 @@ ImageDocument::Notify(imgIRequest* aRequest, int32_t aType, const nsIntRect* aDa
     aRequest->GetImageStatus(&reqStatus);
     nsresult status =
         reqStatus & imgIRequest::STATUS_ERROR ? NS_ERROR_FAILURE : NS_OK;
-    return OnStopRequest(aRequest, status);
+    return OnLoadComplete(aRequest, status);
   }
 
   return NS_OK;
 }
 
 void
-ImageDocument::AddDecodedClass()
+ImageDocument::OnHasTransparency()
 {
   if (!mImageContent || nsContentUtils::IsChildOfSameType(this)) {
     return;
@@ -496,23 +491,7 @@ ImageDocument::AddDecodedClass()
 
   nsDOMTokenList* classList = mImageContent->AsElement()->ClassList();
   mozilla::ErrorResult rv;
-  // Update the background-color of the image only after the
-  // image has been decoded to prevent flashes of just the
-  // background-color.
-  classList->Add(NS_LITERAL_STRING("decoded"), rv);
-}
-
-void
-ImageDocument::RemoveDecodedClass()
-{
-  if (!mImageContent || nsContentUtils::IsChildOfSameType(this)) {
-    return;
-  }
-
-  nsDOMTokenList* classList = mImageContent->AsElement()->ClassList();
-  mozilla::ErrorResult rv;
-  // Remove any decoded-related styling when the image is unloaded.
-  classList->Remove(NS_LITERAL_STRING("decoded"), rv);
+  classList->Add(NS_LITERAL_STRING("transparent"), rv);
 }
 
 void
@@ -535,7 +514,7 @@ ImageDocument::SetModeClass(eModeClasses mode)
 }
 
 nsresult
-ImageDocument::OnStartContainer(imgIRequest* aRequest, imgIContainer* aImage)
+ImageDocument::OnSizeAvailable(imgIRequest* aRequest, imgIContainer* aImage)
 {
   // Styles have not yet been applied, so we don't know the final size. For now,
   // default to the image's intrinsic size.
@@ -551,8 +530,7 @@ ImageDocument::OnStartContainer(imgIRequest* aRequest, imgIContainer* aImage)
 }
 
 nsresult
-ImageDocument::OnStopRequest(imgIRequest *aRequest,
-                             nsresult aStatus)
+ImageDocument::OnLoadComplete(imgIRequest* aRequest, nsresult aStatus)
 {
   UpdateTitleAndCharset();
 
@@ -656,7 +634,7 @@ ImageDocument::CreateSyntheticDocument()
     return NS_ERROR_FAILURE;
   }
 
-  nsRefPtr<NodeInfo> nodeInfo;
+  nsRefPtr<mozilla::dom::NodeInfo> nodeInfo;
   nodeInfo = mNodeInfoManager->GetNodeInfo(nsGkAtoms::img, nullptr,
                                            kNameSpaceID_XHTML,
                                            nsIDOMNode::ELEMENT_NODE);

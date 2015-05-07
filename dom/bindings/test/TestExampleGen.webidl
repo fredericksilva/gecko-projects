@@ -36,6 +36,22 @@ interface TestExampleInterface {
   readonly attribute byte cachedConstantByte;
   [Cached, Pure]
   attribute byte cachedWritableByte;
+  [Affects=Nothing]
+  attribute byte sideEffectFreeByte;
+  [Affects=Nothing, DependsOn=DOMState]
+  attribute byte domDependentByte;
+  [Affects=Nothing, DependsOn=Nothing]
+  readonly attribute byte constantByte;
+  [DependsOn=DeviceState, Affects=Nothing]
+  readonly attribute byte deviceStateDependentByte;
+  [Affects=Nothing]
+  byte returnByteSideEffectFree();
+  [Affects=Nothing, DependsOn=DOMState]
+  byte returnDOMDependentByte();
+  [Affects=Nothing, DependsOn=Nothing]
+  byte returnConstantByte();
+  [DependsOn=DeviceState, Affects=Nothing]
+  byte returnDeviceStateDependentByte();
 
   readonly attribute short readonlyShort;
   attribute short writableShort;
@@ -255,6 +271,7 @@ interface TestExampleInterface {
   sequence<object?> receiveNullableObjectSequence();
 
   void passSequenceOfSequences(sequence<sequence<long>> arg);
+  void passSequenceOfSequencesOfSequences(sequence<sequence<sequence<long>>> arg);
   //XXXbz No support for sequence of sequence return values yet.
   //sequence<sequence<long>> receiveSequenceOfSequences();
 
@@ -327,15 +344,15 @@ interface TestExampleInterface {
   void passVariadicByteString(ByteString... arg);
   void passUnionByteString((ByteString or long) arg);
 
-  // ScalarValueString types
-  void passSVS(ScalarValueString arg);
-  void passNullableSVS(ScalarValueString? arg);
-  void passOptionalSVS(optional ScalarValueString arg);
-  void passOptionalSVSWithDefaultValue(optional ScalarValueString arg = "abc");
-  void passOptionalNullableSVS(optional ScalarValueString? arg);
-  void passOptionalNullableSVSWithDefaultValue(optional ScalarValueString? arg = null);
-  void passVariadicSVS(ScalarValueString... arg);
-  ScalarValueString receiveSVS();
+  // USVString types
+  void passSVS(USVString arg);
+  void passNullableSVS(USVString? arg);
+  void passOptionalSVS(optional USVString arg);
+  void passOptionalSVSWithDefaultValue(optional USVString arg = "abc");
+  void passOptionalNullableSVS(optional USVString? arg);
+  void passOptionalNullableSVSWithDefaultValue(optional USVString? arg = null);
+  void passVariadicSVS(USVString... arg);
+  USVString receiveSVS();
 
   // Enumerated types
   void passEnum(TestEnum arg);
@@ -443,7 +460,7 @@ interface TestExampleInterface {
   void passUnionWithMozMap((MozMap<DOMString> or DOMString) arg);
   void passUnionWithMozMapAndSequence((MozMap<DOMString> or sequence<DOMString>) arg);
   void passUnionWithSequenceAndMozMap((sequence<DOMString> or MozMap<DOMString>) arg);
-  void passUnionWithSVS((ScalarValueString or long) arg);
+  void passUnionWithSVS((USVString or long) arg);
 #endif
   void passUnionWithNullable((object? or long) arg);
   void passNullableUnion((object or long)? arg);
@@ -532,6 +549,7 @@ interface TestExampleInterface {
   attribute byte otherAttributeRenamedFrom;
 
   void passDictionary(optional Dict x);
+  void passDictionary2(Dict x);
   [Cached, Pure]
   readonly attribute Dict readonlyDictionary;
   [Cached, Pure]
@@ -572,10 +590,26 @@ interface TestExampleInterface {
   AnotherNameForTestInterface exerciseTypedefInterfaces2(NullableTestInterface arg);
   void exerciseTypedefInterfaces3(YetAnotherNameForTestInterface arg);
 
+  // Deprecated methods and attributes
+  [Deprecated="GetAttributeNode"]
+  attribute boolean deprecatedAttribute;
+  [Deprecated="GetAttributeNode"]
+  void deprecatedMethod(boolean arg);
+  [Deprecated="GetAttributeNode"]
+  void deprecatedMethodWithContext(any arg);
+
   // Static methods and attributes
   static attribute boolean staticAttribute;
   static void staticMethod(boolean arg);
   static void staticMethodWithContext(any arg);
+
+  // Deprecated methods and attributes;
+  [Deprecated="GetAttributeNode"]
+  static attribute boolean staticDeprecatedAttribute;
+  [Deprecated="GetAttributeNode"]
+  static void staticDeprecatedMethod(boolean arg);
+  [Deprecated="GetAttributeNode"]
+  static void staticDeprecatedMethodWithContext(any arg);
 
   // Overload resolution tests
   //void overload1(DOMString... strs);

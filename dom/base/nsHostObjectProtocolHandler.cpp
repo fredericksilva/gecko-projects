@@ -36,7 +36,7 @@ static nsClassHashtable<nsCStringHashKey, DataInfo>* gDataTable;
 // Memory reporting for the hash table.
 namespace mozilla {
 
-class HostObjectURLsReporter MOZ_FINAL : public nsIMemoryReporter
+class HostObjectURLsReporter final : public nsIMemoryReporter
 {
   ~HostObjectURLsReporter() {}
 
@@ -44,7 +44,7 @@ class HostObjectURLsReporter MOZ_FINAL : public nsIMemoryReporter
   NS_DECL_ISUPPORTS
 
   NS_IMETHOD CollectReports(nsIHandleReportCallback* aHandleReport,
-                            nsISupports* aData, bool aAnonymize)
+                            nsISupports* aData, bool aAnonymize) override
   {
     return MOZ_COLLECT_REPORT(
       "host-object-urls", KIND_OTHER, UNITS_COUNT,
@@ -56,13 +56,13 @@ class HostObjectURLsReporter MOZ_FINAL : public nsIMemoryReporter
 
 NS_IMPL_ISUPPORTS(HostObjectURLsReporter, nsIMemoryReporter)
 
-class BlobURLsReporter MOZ_FINAL : public nsIMemoryReporter
+class BlobURLsReporter final : public nsIMemoryReporter
 {
  public:
   NS_DECL_ISUPPORTS
 
   NS_IMETHOD CollectReports(nsIHandleReportCallback* aCallback,
-                            nsISupports* aData, bool aAnonymize)
+                            nsISupports* aData, bool aAnonymize) override
   {
     EnumArg env;
     env.mCallback = aCallback;
@@ -163,6 +163,43 @@ class BlobURLsReporter MOZ_FINAL : public nsIMemoryReporter
     return PL_DHASH_NEXT;
   }
 
+  static void BuildPath(nsAutoCString& path,
+                        nsCStringHashKey::KeyType aKey,
+                        DataInfo* aInfo,
+                        bool anonymize)
+  {
+    nsCOMPtr<nsIURI> principalURI;
+    nsAutoCString url, owner;
+    if (NS_SUCCEEDED(aInfo->mPrincipal->GetURI(getter_AddRefs(principalURI))) &&
+        principalURI != nullptr &&
+        NS_SUCCEEDED(principalURI->GetSpec(owner)) &&
+        !owner.IsEmpty()) {
+      owner.ReplaceChar('/', '\\');
+      path += "owner(";
+      if (anonymize) {
+        path += "<anonymized>";
+      } else {
+        path += owner;
+      }
+      path += ")";
+    } else {
+      path += "owner unknown";
+    }
+    path += "/";
+    if (anonymize) {
+      path += "<anonymized-stack>";
+    } else {
+      path += aInfo->mStack;
+    }
+    url = aKey;
+    url.ReplaceChar('/', '\\');
+    if (anonymize) {
+      path += "<anonymized-url>";
+    } else {
+      path += url;
+    }
+  }
+
   static PLDHashOperator ReportCallback(nsCStringHashKey::KeyType aKey,
                                         DataInfo* aInfo,
                                         void* aUserArg)
@@ -195,34 +232,8 @@ class BlobURLsReporter MOZ_FINAL : public nsIMemoryReporter
       }
 
       path = isMemoryFile ? "memory-blob-urls/" : "file-blob-urls/";
-      if (NS_SUCCEEDED(aInfo->mPrincipal->GetURI(getter_AddRefs(principalURI))) &&
-          principalURI != nullptr &&
-          NS_SUCCEEDED(principalURI->GetSpec(owner)) &&
-          !owner.IsEmpty()) {
-        owner.ReplaceChar('/', '\\');
-        path += "owner(";
-        if (envp->mAnonymize) {
-          path += "<anonymized>";
-        } else {
-          path += owner;
-        }
-        path += ")";
-      } else {
-        path += "owner unknown";
-      }
-      path += "/";
-      if (envp->mAnonymize) {
-        path += "<anonymized-stack>";
-      } else {
-        path += aInfo->mStack;
-      }
-      url = aKey;
-      url.ReplaceChar('/', '\\');
-      if (envp->mAnonymize) {
-        path += "<anonymized-url>";
-      } else {
-        path += url;
-      }
+      BuildPath(path, aKey, aInfo, envp->mAnonymize);
+
       if (refCount > 1) {
         nsAutoCString addrStr;
 
@@ -268,7 +279,27 @@ class BlobURLsReporter MOZ_FINAL : public nsIMemoryReporter
             descString,
             envp->mData);
       }
+    } else {
+      // Just report the path for the DOMMediaStream or MediaSource.
+      nsCOMPtr<mozilla::dom::MediaSource> ms(do_QueryInterface(aInfo->mObject));
+      nsAutoCString path;
+      path = ms ? "media-source-urls/" : "dom-media-stream-urls/";
+      BuildPath(path, aKey, aInfo, envp->mAnonymize);
+
+      NS_NAMED_LITERAL_CSTRING
+        (desc, "An object URL allocated with URL.createObjectURL; the referenced "
+               "data cannot be freed until all URLs for it have been explicitly "
+               "invalidated with URL.revokeObjectURL.");
+
+      envp->mCallback->Callback(EmptyCString(),
+          path,
+          KIND_OTHER,
+          UNITS_COUNT,
+          1,
+          desc,
+          envp->mData);
     }
+
     return PL_DHASH_NEXT;
   }
 };
@@ -485,7 +516,7 @@ nsHostObjectProtocolHandler::NewURI(const nsACString& aSpec,
 
 NS_IMETHODIMP
 nsHostObjectProtocolHandler::NewChannel2(nsIURI* uri,
-                                         nsILoadInfo *aLoadinfo,
+                                         nsILoadInfo* aLoadInfo,
                                          nsIChannel** result)
 {
   *result = nullptr;
@@ -499,8 +530,8 @@ nsHostObjectProtocolHandler::NewChannel2(nsIURI* uri,
     return NS_ERROR_DOM_BAD_URI;
   }
 
-  nsCOMPtr<PIFileImpl> blobImpl = do_QueryInterface(info->mObject);
-  if (!blobImpl) {
+  nsCOMPtr<FileImpl> blob = do_QueryInterface(info->mObject);
+  if (!blob) {
     return NS_ERROR_DOM_BAD_URI;
   }
 
@@ -513,19 +544,17 @@ nsHostObjectProtocolHandler::NewChannel2(nsIURI* uri,
   }
 #endif
 
-  FileImpl* blob = static_cast<FileImpl*>(blobImpl.get());
   nsCOMPtr<nsIInputStream> stream;
   nsresult rv = blob->GetInternalStream(getter_AddRefs(stream));
   NS_ENSURE_SUCCESS(rv, rv);
 
   nsCOMPtr<nsIChannel> channel;
-  rv = NS_NewInputStreamChannel(getter_AddRefs(channel),
-                                uri,
-                                stream,
-                                info->mPrincipal,
-                                nsILoadInfo::SEC_FORCE_INHERIT_PRINCIPAL,
-                                nsIContentPolicy::TYPE_OTHER);
-
+  rv = NS_NewInputStreamChannelInternal(getter_AddRefs(channel),
+                                        uri,
+                                        stream,
+                                        EmptyCString(), // aContentType
+                                        EmptyCString(), // aContentCharset
+                                        aLoadInfo);
   NS_ENSURE_SUCCESS(rv, rv);
 
   nsString type;
@@ -540,7 +569,7 @@ nsHostObjectProtocolHandler::NewChannel2(nsIURI* uri,
   ErrorResult error;
   uint64_t size = blob->GetSize(error);
   if (NS_WARN_IF(error.Failed())) {
-    return error.ErrorCode();
+    return error.StealNSResult();
   }
 
   channel->SetOriginalURI(uri);
@@ -602,12 +631,11 @@ NS_GetBlobForBlobURI(nsIURI* aURI, FileImpl** aBlob)
 
   *aBlob = nullptr;
 
-  nsCOMPtr<PIFileImpl> blobImpl = do_QueryInterface(GetDataObject(aURI));
-  if (!blobImpl) {
+  nsCOMPtr<FileImpl> blob = do_QueryInterface(GetDataObject(aURI));
+  if (!blob) {
     return NS_ERROR_DOM_BAD_URI;
   }
 
-  nsRefPtr<FileImpl> blob = static_cast<FileImpl*>(blobImpl.get());
   blob.forget(aBlob);
   return NS_OK;
 }
@@ -629,8 +657,13 @@ NS_GetStreamForMediaStreamURI(nsIURI* aURI, mozilla::DOMMediaStream** aStream)
 {
   NS_ASSERTION(IsMediaStreamURI(aURI), "Only call this with mediastream URIs");
 
+  nsISupports* dataObject = GetDataObject(aURI);
+  if (!dataObject) {
+    return NS_ERROR_DOM_BAD_URI;
+  }
+
   *aStream = nullptr;
-  return CallQueryInterface(GetDataObject(aURI), aStream);
+  return CallQueryInterface(dataObject, aStream);
 }
 
 NS_IMETHODIMP

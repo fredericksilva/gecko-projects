@@ -3,6 +3,8 @@
 %brandDTD;
 <!ENTITY % browserDTD SYSTEM "chrome://browser/locale/browser.dtd" >
 %browserDTD;
+<!ENTITY % browserPocketDTD SYSTEM "chrome://browser/content/browser-pocket.dtd" >
+%browserPocketDTD;
 <!ENTITY % baseMenuDTD SYSTEM "chrome://browser/locale/baseMenuOverlay.dtd" >
 %baseMenuDTD;
 <!ENTITY % charsetDTD SYSTEM "chrome://global/locale/charsetMenu.dtd" >
@@ -19,5 +21,7 @@
 #endif
 <!ENTITY % aboutHomeDTD SYSTEM "chrome://browser/locale/aboutHome.dtd">
 %aboutHomeDTD;
+<!ENTITY % syncBrandDTD SYSTEM "chrome://browser/locale/syncBrand.dtd">
+%syncBrandDTD;
 ]>
 

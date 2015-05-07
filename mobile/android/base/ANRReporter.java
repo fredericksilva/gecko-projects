@@ -15,6 +15,7 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.Reader;
+import java.util.Locale;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
@@ -320,7 +321,7 @@ public final class ANRReporter extends BroadcastReceiver
                 "\"appUpdateChannel\":" + JSONObject.quote(AppConstants.MOZ_UPDATE_CHANNEL) + "," +
                 // Technically the platform build ID may be different, but we'll never know
                 "\"platformBuildID\":" + JSONObject.quote(AppConstants.MOZ_APP_BUILDID) + "," +
-                "\"locale\":" + JSONObject.quote(SysInfo.getLocale()) + "," +
+                "\"locale\":" + JSONObject.quote(Locales.getLanguageTag(Locale.getDefault())) + "," +
                 "\"cpucount\":" + String.valueOf(SysInfo.getCPUCount()) + "," +
                 "\"memsize\":" + String.valueOf(SysInfo.getMemSize()) + "," +
                 "\"arch\":" + JSONObject.quote(SysInfo.getArchABI()) + "," +
@@ -471,9 +472,12 @@ public final class ANRReporter extends BroadcastReceiver
 
     private static void processTraces(Reader traces, File pingFile) {
 
-        // Unwinding is memory intensive; only unwind if we have enough memory
-        boolean haveNativeStack = requestNativeStack(
-            /* unwind */ SysInfo.getMemSize() >= 640);
+        // Only get native stack if Gecko is running.
+        // Also, unwinding is memory intensive, so only unwind if we have enough memory.
+        final boolean haveNativeStack =
+            GeckoThread.checkLaunchState(GeckoThread.LaunchState.GeckoRunning) ?
+            requestNativeStack(/* unwind */ SysInfo.getMemSize() >= 640) : false;
+
         try {
             OutputStream ping = new BufferedOutputStream(
                 new FileOutputStream(pingFile), TRACES_BLOCK_SIZE);

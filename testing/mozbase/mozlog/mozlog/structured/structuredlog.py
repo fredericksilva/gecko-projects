@@ -24,6 +24,7 @@ Allowed actions, and subfields:
 
   test_start
       test - ID for the test
+      path - Relative path to test (optional)
 
   test_end
       test - ID for the test
@@ -36,7 +37,7 @@ Allowed actions, and subfields:
   test_status
       test - ID for the test
       subtest - Name of the subtest
-      status [PASS | FAIL | TIMEOUT | NOTRUN] - test status
+      status [PASS | FAIL | TIMEOUT | NOTRUN | SKIP] - test status
       expected [As for status] - Status that the subtest was expected to get,
                                  or absent if the subtest got the expected status
 
@@ -101,7 +102,11 @@ class LoggerState(object):
         self.handlers = []
         self.running_tests = set()
         self.suite_started = False
+        self.component_states = {}
 
+class ComponentState(object):
+    def __init__(self):
+        self.filter_ = None
 
 class StructuredLogger(object):
     _lock = Lock()
@@ -120,9 +125,11 @@ class StructuredLogger(object):
             if name not in self._logger_states:
                 self._logger_states[name] = LoggerState()
 
-    @property
-    def _state(self):
-        return self._logger_states[self.name]
+            if component not in self._logger_states[name].component_states:
+                self._logger_states[name].component_states[component] = ComponentState()
+
+        self._state = self._logger_states[name]
+        self._component_state = self._state.component_states[component]
 
     def add_handler(self, handler):
         """Add a handler to the current logger"""
@@ -130,16 +137,37 @@ class StructuredLogger(object):
 
     def remove_handler(self, handler):
         """Remove a handler from the current logger"""
-        for i, candidate_handler in enumerate(self._state.handlers[:]):
-            if candidate_handler == handler:
-                del self._state.handlers[i]
-                break
+        self._state.handlers.remove(handler)
+
+    def send_message(self, topic, command, *args):
+        """Send a message to each handler configured for this logger. This
+        part of the api is useful to those users requiring dynamic control
+        of a handler's behavior.
+
+        :param topic: The name used by handlers to subscribe to a message.
+        :param command: The name of the command to issue.
+        :param args: Any arguments known to the target for specialized
+                     behavior.
+        """
+        rv = []
+        for handler in self._state.handlers:
+            if hasattr(handler, "handle_message"):
+                rv += handler.handle_message(topic, command, *args)
+        return rv
 
     @property
     def handlers(self):
         """A list of handlers that will be called when a
         message is logged from this logger"""
         return self._state.handlers
+
+    @property
+    def component_filter(self):
+        return self._component_state.filter_
+
+    @component_filter.setter
+    def component_filter(self, value):
+        self._component_state.filter_ = value
 
     def log_raw(self, raw_data):
         if "action" not in raw_data:
@@ -170,6 +198,11 @@ class StructuredLogger(object):
 
     def _handle_log(self, data):
         with self._lock:
+            if self.component_filter:
+                data = self.component_filter(data)
+                if data is None:
+                    return
+
             for handler in self.handlers:
                 handler(data)
 
@@ -216,11 +249,14 @@ class StructuredLogger(object):
 
         self._log_data("suite_end")
 
-    @log_action(TestId("test"))
+    @log_action(TestId("test"),
+                Unicode("path", default=None, optional=True))
     def test_start(self, data):
         """Log a test_start message
 
         :param test: Identifier of the test that will run.
+        :param path: Path to test relative to some base (typically the root of
+                     the source tree).
         """
         if not self._state.suite_started:
             self.error("Got test_start message before suite_start for test %s" %

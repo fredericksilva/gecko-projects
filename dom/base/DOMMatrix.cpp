@@ -1,4 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -22,6 +23,11 @@ namespace mozilla {
 namespace dom {
 
 static const double radPerDegree = 2.0 * M_PI / 360.0;
+
+NS_IMPL_CYCLE_COLLECTION_WRAPPERCACHE(DOMMatrixReadOnly, mParent)
+
+NS_IMPL_CYCLE_COLLECTION_ROOT_NATIVE(DOMMatrixReadOnly, AddRef)
+NS_IMPL_CYCLE_COLLECTION_UNROOT_NATIVE(DOMMatrixReadOnly, Release)
 
 already_AddRefed<DOMMatrix>
 DOMMatrixReadOnly::Translate(double aTx,
@@ -302,11 +308,6 @@ DOMMatrixReadOnly::Stringify(nsAString& aResult)
 
   aResult = matrixStr;
 }
-
-NS_IMPL_CYCLE_COLLECTION_WRAPPERCACHE(DOMMatrix, mParent)
-
-NS_IMPL_CYCLE_COLLECTION_ROOT_NATIVE(DOMMatrix, AddRef)
-NS_IMPL_CYCLE_COLLECTION_UNROOT_NATIVE(DOMMatrix, Release)
 
 already_AddRefed<DOMMatrix>
 DOMMatrix::Constructor(const GlobalObject& aGlobal, ErrorResult& aRv)
@@ -658,9 +659,9 @@ DOMMatrix::SetMatrixValue(const nsAString& aTransformList, ErrorResult& aRv)
 }
 
 JSObject*
-DOMMatrix::WrapObject(JSContext* aCx)
+DOMMatrix::WrapObject(JSContext* aCx, JS::Handle<JSObject*> aGivenProto)
 {
-  return DOMMatrixBinding::Wrap(aCx, this);
+  return DOMMatrixBinding::Wrap(aCx, this, aGivenProto);
 }
 
 } // namespace dom

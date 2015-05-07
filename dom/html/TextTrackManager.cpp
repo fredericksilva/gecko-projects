@@ -1,6 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim:set tw=80 expandtab softtabstop=2 ts=2 sw=2: */
-
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -91,13 +90,12 @@ TextTrackManager::TextTrackManager(HTMLMediaElement *aMediaElement)
   : mMediaElement(aMediaElement)
   , performedTrackSelection(false)
 {
-  bool hasHadScriptObject = true;
-  nsIScriptGlobalObject* scriptObject =
-    mMediaElement->OwnerDoc()->GetScriptHandlingObject(hasHadScriptObject);
+  nsISupports* parentObject =
+    mMediaElement->OwnerDoc()->GetParentObject();
 
-  NS_ENSURE_TRUE_VOID(scriptObject || !hasHadScriptObject);
+  NS_ENSURE_TRUE_VOID(parentObject);
 
-  nsCOMPtr<nsPIDOMWindow> window = do_QueryInterface(scriptObject);
+  nsCOMPtr<nsPIDOMWindow> window = do_QueryInterface(parentObject);
   mNewCues = new TextTrackCueList(window);
   mTextTracks = new TextTrackList(window, this);
   mPendingTextTracks = new TextTrackList(window, this);
@@ -115,7 +113,7 @@ TextTrackManager::~TextTrackManager()
 }
 
 TextTrackList*
-TextTrackManager::TextTracks() const
+TextTrackManager::GetTextTracks() const
 {
   return mTextTracks;
 }

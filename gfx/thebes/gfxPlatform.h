@@ -37,11 +37,10 @@ class gfxTextRun;
 class nsIURI;
 class nsIAtom;
 class nsIObserver;
-struct gfxRGBA;
+class SRGBOverrideObserver;
 
 namespace mozilla {
 namespace gl {
-class GLContext;
 class SkiaGLGlue;
 }
 namespace gfx {
@@ -50,6 +49,7 @@ class SourceSurface;
 class DataSourceSurface;
 class ScaledFont;
 class DrawEventRecorder;
+class VsyncSource;
 
 inline uint32_t
 BackendTypeBit(BackendType b)
@@ -157,7 +157,21 @@ GetBackendName(mozilla::gfx::BackendType aBackend)
   MOZ_CRASH("Incomplete switch");
 }
 
+enum class DeviceResetReason
+{
+  OK = 0,
+  HUNG,
+  REMOVED,
+  RESET,
+  DRIVER_ERROR,
+  INVALID_CALL,
+  OUT_OF_MEMORY,
+  UNKNOWN
+};
+
 class gfxPlatform {
+    friend class SRGBOverrideObserver;
+
 public:
     typedef mozilla::gfx::Color Color;
     typedef mozilla::gfx::DataSourceSurface DataSourceSurface;
@@ -247,8 +261,6 @@ public:
       return false;
     }
 
-    virtual void FenceContentDrawing() {}
-    virtual void WaitContentDrawing() {}
     /**
      * Returns true if we should use Azure to render content with aTarget. For
      * example, it is possible that we are using Direct2D for rendering and thus
@@ -275,7 +287,6 @@ public:
 
     /// These should be used instead of directly accessing the preference,
     /// as different platforms may override the behaviour.
-    virtual bool UseTiling() { return gfxPrefs::LayersTilesEnabledDoNotUseDirectly(); }
     virtual bool UseProgressivePaint() { return gfxPrefs::ProgressivePaintDoNotUseDirectly(); }
 
     void GetAzureBackendInfo(mozilla::widget::InfoObject &aObj) {
@@ -284,6 +295,7 @@ public:
       aObj.DefineProperty("AzureFallbackCanvasBackend", GetBackendName(mFallbackCanvasBackend));
       aObj.DefineProperty("AzureContentBackend", GetBackendName(mContentBackend));
     }
+    void GetApzSupportInfo(mozilla::widget::InfoObject& aObj);
 
     mozilla::gfx::BackendType GetContentBackend() {
       return mContentBackend;
@@ -434,7 +446,7 @@ public:
     // check whether format is supported on a platform or not (if unclear, returns true)
     virtual bool IsFontFormatSupported(nsIURI *aFontURI, uint32_t aFormatFlags) { return false; }
 
-    virtual bool DidRenderingDeviceReset() { return false; }
+    virtual bool DidRenderingDeviceReset(DeviceResetReason* aResetReason = nullptr) { return false; }
 
     void GetPrefFonts(nsIAtom *aLanguage, nsString& array, bool aAppendUnicode = true);
 
@@ -479,10 +491,15 @@ public:
         // platform-specific override, by default do nothing
     }
 
+    // Are we in safe mode?
+    static bool InSafeMode();
+
     static bool OffMainThreadCompositingEnabled();
 
     static bool CanUseDirect3D9();
     static bool CanUseDirect3D11();
+    static bool CanUseHardwareVideoDecoding();
+    static bool CanUseDirect3D11ANGLE();
 
     /**
      * Is it possible to use buffer rotation.  Note that these
@@ -585,12 +602,46 @@ public:
     static bool UsesOffMainThreadCompositing();
 
     bool HasEnoughTotalSystemMemoryForSkiaGL();
+
+    /**
+     * Get the hardware vsync source for each platform.
+     * Should only exist and be valid on the parent process
+     */
+    virtual mozilla::gfx::VsyncSource* GetHardwareVsync() {
+      MOZ_ASSERT(mVsyncSource != nullptr);
+      MOZ_ASSERT(XRE_IsParentProcess());
+      return mVsyncSource;
+    }
+
+    /**
+     * True if layout rendering should use ASAP mode, which means
+     * the refresh driver and compositor should render ASAP.
+     * Used for talos testing purposes
+     */
+    static bool IsInLayoutAsapMode();
+
+    /**
+     * Used to test which input types are handled via APZ.
+     */
+    virtual bool SupportsApzWheelInput() const {
+      return false;
+    }
+    virtual bool SupportsApzTouchInput() const {
+      return false;
+    }
+
+    virtual void FlushContentDrawing() {}
 protected:
     gfxPlatform();
     virtual ~gfxPlatform();
 
-    void AppendCJKPrefLangs(eFontPrefLang aPrefLangs[], uint32_t &aLen, 
+    void AppendCJKPrefLangs(eFontPrefLang aPrefLangs[], uint32_t &aLen,
                             eFontPrefLang aCharLang, eFontPrefLang aPageLang);
+
+    /**
+     * Initialized hardware vsync based on each platform.
+     */
+    virtual already_AddRefed<mozilla::gfx::VsyncSource> CreateHardwareVsyncSource();
 
     /**
      * Helper method, creates a draw target for a specific Azure backend.
@@ -656,6 +707,11 @@ protected:
 
     uint32_t mTotalSystemMemory;
 
+    // Hardware vsync source. Only valid on parent process
+    nsRefPtr<mozilla::gfx::VsyncSource> mVsyncSource;
+
+    mozilla::RefPtr<mozilla::gfx::DrawTarget> mScreenReferenceDrawTarget;
+
 private:
     /**
      * Start up Thebes.
@@ -671,7 +727,6 @@ private:
     virtual void GetPlatformCMSOutputProfile(void *&mem, size_t &size);
 
     nsRefPtr<gfxASurface> mScreenReferenceSurface;
-    mozilla::RefPtr<mozilla::gfx::DrawTarget> mScreenReferenceDrawTarget;
     nsTArray<uint32_t> mCJKPrefLangs;
     nsCOMPtr<nsIObserver> mSRGBOverrideObserver;
     nsCOMPtr<nsIObserver> mFontPrefsObserver;
@@ -690,6 +745,7 @@ private:
     int mTileHeight;
 
     mozilla::widget::GfxInfoCollector<gfxPlatform> mAzureCanvasBackendCollector;
+    mozilla::widget::GfxInfoCollector<gfxPlatform> mApzSupportCollector;
 
     mozilla::RefPtr<mozilla::gfx::DrawEventRecorder> mRecorder;
     mozilla::RefPtr<mozilla::gl::SkiaGLGlue> mSkiaGlue;

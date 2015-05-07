@@ -1,5 +1,5 @@
 /* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=2 et sw=2 tw=80: */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -19,7 +19,6 @@
 #include "nsTHashtable.h"
 
 class nsIDocument;
-class nsIWeakReference;
 class nsPIDOMWindow;
 
 namespace mozilla {
@@ -32,7 +31,8 @@ namespace dom {
 class File;
 class DOMStringList;
 struct IDBObjectStoreParameters;
-template <typename> class Sequence;
+template <class> class Optional;
+class StringOrStringSequence;
 
 namespace indexedDB {
 
@@ -46,11 +46,14 @@ class IDBRequest;
 class IDBTransaction;
 class PBackgroundIDBDatabaseFileChild;
 
-class IDBDatabase MOZ_FINAL
+class IDBDatabase final
   : public IDBWrapperCache
 {
   typedef mozilla::dom::StorageType StorageType;
   typedef mozilla::dom::quota::PersistenceType PersistenceType;
+
+  class LogWarningRunnable;
+  friend class LogWarningRunnable;
 
   class Observer;
   friend class Observer;
@@ -171,7 +174,7 @@ public:
   UnregisterTransaction(IDBTransaction* aTransaction);
 
   void
-  AbortTransactions();
+  AbortTransactions(bool aShouldWarn);
 
   PBackgroundIDBDatabaseFileChild*
   GetOrCreateFileActorForBlob(File* aBlob);
@@ -196,6 +199,12 @@ public:
   void
   NoteFinishedMutableFile(IDBMutableFile* aMutableFile);
 
+  void
+  OnNewFileHandle();
+
+  void
+  OnFileHandleFinished();
+
   nsPIDOMWindow*
   GetParentObject() const;
 
@@ -203,23 +212,24 @@ public:
   ObjectStoreNames() const;
 
   already_AddRefed<IDBObjectStore>
-  CreateObjectStore(JSContext* aCx,
-                    const nsAString& aName,
+  CreateObjectStore(const nsAString& aName,
                     const IDBObjectStoreParameters& aOptionalParameters,
                     ErrorResult& aRv);
 
   void
   DeleteObjectStore(const nsAString& name, ErrorResult& aRv);
 
+  // This will be called from the DOM.
   already_AddRefed<IDBTransaction>
-  Transaction(const nsAString& aStoreName,
+  Transaction(const StringOrStringSequence& aStoreNames,
               IDBTransactionMode aMode,
               ErrorResult& aRv);
 
-  already_AddRefed<IDBTransaction>
-  Transaction(const Sequence<nsString>& aStoreNames,
+  // This can be called from C++ to avoid JS exception.
+  nsresult
+  Transaction(const StringOrStringSequence& aStoreNames,
               IDBTransactionMode aMode,
-              ErrorResult& aRv);
+              IDBTransaction** aTransaction);
 
   StorageType
   Storage() const;
@@ -260,14 +270,14 @@ public:
 
   // nsIDOMEventTarget
   virtual void
-  LastRelease() MOZ_OVERRIDE;
+  LastRelease() override;
 
   virtual nsresult
-  PostHandleEvent(EventChainPostVisitor& aVisitor) MOZ_OVERRIDE;
+  PostHandleEvent(EventChainPostVisitor& aVisitor) override;
 
   // nsWrapperCache
   virtual JSObject*
-  WrapObject(JSContext* aCx) MOZ_OVERRIDE;
+  WrapObject(JSContext* aCx, JS::Handle<JSObject*> aGivenProto) override;
 
 private:
   IDBDatabase(IDBWrapperCache* aOwnerCache,
@@ -299,6 +309,11 @@ private:
 
   void
   InvalidateMutableFiles();
+
+  void
+  LogWarning(const char* aMessageName,
+             const nsAString& aFilename,
+             uint32_t aLineNumber);
 };
 
 } // namespace indexedDB

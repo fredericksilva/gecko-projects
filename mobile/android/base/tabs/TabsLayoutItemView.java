@@ -6,12 +6,14 @@ package org.mozilla.gecko.tabs;
 
 import org.mozilla.gecko.R;
 import org.mozilla.gecko.Tab;
+import org.mozilla.gecko.util.HardwareUtils;
 import org.mozilla.gecko.widget.TabThumbnailWrapper;
 
 import android.content.Context;
 import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
 import android.util.AttributeSet;
+import android.util.TypedValue;
 import android.view.TouchDelegate;
 import android.view.View;
 import android.view.ViewTreeObserver;
@@ -30,7 +32,7 @@ public class TabsLayoutItemView extends LinearLayout
     private int mTabId;
     private TextView mTitle;
     private ImageView mThumbnail;
-    private ImageButton mCloseButton;
+    private ImageView mCloseButton;
     private TabThumbnailWrapper mThumbnailWrapper;
 
     public TabsLayoutItemView(Context context, AttributeSet attrs) {
@@ -46,6 +48,11 @@ public class TabsLayoutItemView extends LinearLayout
         }
 
         return drawableState;
+    }
+
+    @Override
+    public boolean isEnabled() {
+        return true;
     }
 
     @Override
@@ -85,20 +92,31 @@ public class TabsLayoutItemView extends LinearLayout
         super.onFinishInflate();
         mTitle = (TextView) findViewById(R.id.title);
         mThumbnail = (ImageView) findViewById(R.id.thumbnail);
-        mCloseButton = (ImageButton) findViewById(R.id.close);
+        mCloseButton = (ImageView) findViewById(R.id.close);
         mThumbnailWrapper = (TabThumbnailWrapper) findViewById(R.id.wrapper);
 
+        if (HardwareUtils.isTablet()) {
+            growCloseButtonHitArea();
+        }
+    }
+
+    private void growCloseButtonHitArea() {
         getViewTreeObserver().addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
             @Override
             public boolean onPreDraw() {
                 getViewTreeObserver().removeOnPreDrawListener(this);
 
-                final Rect r = new Rect();
-                mCloseButton.getHitRect(r);
-                r.left -= 25;
-                r.bottom += 25;
+                // Ideally we want the close button hit area to be 40x40dp but we are constrained by the height of the parent, so
+                // we make it as tall as the parent view and 40dp across.
+                final int targetHitArea = (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 40, getResources().getDisplayMetrics());;
 
-                setTouchDelegate(new TouchDelegate(r, mCloseButton));
+                final Rect hitRect = new Rect();
+                hitRect.top = 0;
+                hitRect.right = getWidth();
+                hitRect.left = getWidth() - targetHitArea;
+                hitRect.bottom = targetHitArea;
+
+                setTouchDelegate(new TouchDelegate(hitRect, mCloseButton));
 
                 return true;
             }

@@ -20,10 +20,10 @@
 #include "nsCOMArray.h"
 #include "nsCycleCollectionParticipant.h"
 
-class nsAutoCompleteController MOZ_FINAL : public nsIAutoCompleteController,
-                                           public nsIAutoCompleteObserver,
-                                           public nsITimerCallback,
-                                           public nsITreeView
+class nsAutoCompleteController final : public nsIAutoCompleteController,
+                                       public nsIAutoCompleteObserver,
+                                       public nsITimerCallback,
+                                       public nsITreeView
 {
 public:
   NS_DECL_CYCLE_COLLECTING_ISUPPORTS
@@ -50,6 +50,8 @@ protected:
   nsresult ClearSearchTimer();
   void MaybeCompletePlaceholder();
 
+  void HandleSearchResult(nsIAutoCompleteSearch *aSearch,
+                          nsIAutoCompleteResult *aResult);
   nsresult ProcessResult(int32_t aSearchIndex, nsIAutoCompleteResult *aResult);
   nsresult PostSearchCleanup();
 
@@ -151,6 +153,14 @@ protected:
   uint32_t mSearchesFailed;
   bool mFirstSearchResult;
   uint32_t mImmediateSearchesCount;
+  // The index of the match on the popup that was selected using the keyboard,
+  // if the completeselectedindex attribute is set.
+  // This is used to distinguish that selection (which would have been put in
+  // the input on being selected) from a moused-over selectedIndex value. This
+  // distinction is used to prevent mouse moves from inadvertently changing
+  // what happens once the user hits Enter on the keyboard.
+  // See bug 1043584 for more details.
+  int32_t  mCompletedSelectionIndex;
 };
 
 #endif /* __nsAutoCompleteController__ */

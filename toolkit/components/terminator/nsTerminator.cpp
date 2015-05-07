@@ -301,7 +301,7 @@ struct ShutdownStep
   char const* const mTopic;
   int mTicks;
 
-  MOZ_CONSTEXPR ShutdownStep(const char *const topic)
+  MOZ_CONSTEXPR explicit ShutdownStep(const char *const topic)
     : mTopic(topic)
     , mTicks(-1)
   {}
@@ -392,7 +392,7 @@ void
 nsTerminator::StartWriter()
 {
 
-  if (!Telemetry::CanRecord()) {
+  if (!Telemetry::CanRecordExtended()) {
     return;
   }
   nsCOMPtr<nsIFile> profLD;
@@ -476,7 +476,7 @@ nsTerminator::UpdateHeartbeat(const char* aTopic)
 void
 nsTerminator::UpdateTelemetry()
 {
-  if (!Telemetry::CanRecord() || !gWriteReady) {
+  if (!Telemetry::CanRecordExtended() || !gWriteReady) {
     return;
   }
 

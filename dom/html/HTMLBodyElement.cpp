@@ -1,4 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -62,10 +63,10 @@ BodyRule::MapRuleInfoInto(nsRuleData* aData)
     if (value && value->Type() == nsAttrValue::eInteger) {
       bodyMarginWidth = value->GetIntegerValue();
       if (bodyMarginWidth < 0) bodyMarginWidth = 0;
-      nsCSSValue* marginLeft = aData->ValueForMarginLeftValue();
+      nsCSSValue* marginLeft = aData->ValueForMarginLeft();
       if (marginLeft->GetUnit() == eCSSUnit_Null)
         marginLeft->SetFloatValue((float)bodyMarginWidth, eCSSUnit_Pixel);
-      nsCSSValue* marginRight = aData->ValueForMarginRightValue();
+      nsCSSValue* marginRight = aData->ValueForMarginRight();
       if (marginRight->GetUnit() == eCSSUnit_Null)
         marginRight->SetFloatValue((float)bodyMarginWidth, eCSSUnit_Pixel);
     }
@@ -107,7 +108,7 @@ BodyRule::MapRuleInfoInto(nsRuleData* aData)
     if (value && value->Type() == nsAttrValue::eInteger) {
       bodyLeftMargin = value->GetIntegerValue();
       if (bodyLeftMargin < 0) bodyLeftMargin = 0;
-      nsCSSValue* marginLeft = aData->ValueForMarginLeftValue();
+      nsCSSValue* marginLeft = aData->ValueForMarginLeft();
       if (marginLeft->GetUnit() == eCSSUnit_Null)
         marginLeft->SetFloatValue((float)bodyLeftMargin, eCSSUnit_Pixel);
     }
@@ -117,7 +118,7 @@ BodyRule::MapRuleInfoInto(nsRuleData* aData)
     if (value && value->Type() == nsAttrValue::eInteger) {
       bodyRightMargin = value->GetIntegerValue();
       if (bodyRightMargin < 0) bodyRightMargin = 0;
-      nsCSSValue* marginRight = aData->ValueForMarginRightValue();
+      nsCSSValue* marginRight = aData->ValueForMarginRight();
       if (marginRight->GetUnit() == eCSSUnit_Null)
         marginRight->SetFloatValue((float)bodyRightMargin, eCSSUnit_Pixel);
     }
@@ -147,10 +148,10 @@ BodyRule::MapRuleInfoInto(nsRuleData* aData)
       }
 
       if ((bodyMarginWidth == -1) && (frameMarginWidth >= 0)) {
-        nsCSSValue* marginLeft = aData->ValueForMarginLeftValue();
+        nsCSSValue* marginLeft = aData->ValueForMarginLeft();
         if (marginLeft->GetUnit() == eCSSUnit_Null)
           marginLeft->SetFloatValue((float)frameMarginWidth, eCSSUnit_Pixel);
-        nsCSSValue* marginRight = aData->ValueForMarginRightValue();
+        nsCSSValue* marginRight = aData->ValueForMarginRight();
         if (marginRight->GetUnit() == eCSSUnit_Null)
           marginRight->SetFloatValue((float)frameMarginWidth, eCSSUnit_Pixel);
       }
@@ -171,8 +172,11 @@ BodyRule::MapRuleInfoInto(nsRuleData* aData)
 /* virtual */ void
 BodyRule::List(FILE* out, int32_t aIndent) const
 {
-  for (int32_t index = aIndent; --index >= 0; ) fputs("  ", out);
-  fputs("[body rule] {}\n", out);
+  nsAutoCString indent;
+  for (int32_t index = aIndent; --index >= 0; ) {
+    indent.AppendLiteral("  ");
+  }
+  fprintf_stderr(out, "%s[body rule] {}\n", indent.get());
 }
 #endif
 
@@ -186,9 +190,9 @@ HTMLBodyElement::~HTMLBodyElement()
 }
 
 JSObject*
-HTMLBodyElement::WrapNode(JSContext *aCx)
+HTMLBodyElement::WrapNode(JSContext *aCx, JS::Handle<JSObject*> aGivenProto)
 {
-  return HTMLBodyElementBinding::Wrap(aCx, this);
+  return HTMLBodyElementBinding::Wrap(aCx, this, aGivenProto);
 }
 
 NS_IMPL_ISUPPORTS_INHERITED(HTMLBodyElement, nsGenericHTMLElement,
@@ -201,15 +205,15 @@ HTMLBodyElement::SetBackground(const nsAString& aBackground)
 {
   ErrorResult rv;
   SetBackground(aBackground, rv);
-  return rv.ErrorCode();
+  return rv.StealNSResult();
 }
 
 NS_IMETHODIMP
 HTMLBodyElement::GetBackground(nsAString& aBackground)
 {
-  nsString background;
+  DOMString background;
   GetBackground(background);
-  aBackground = background;
+  background.ToString(aBackground);
   return NS_OK;
 }
 
@@ -218,15 +222,15 @@ HTMLBodyElement::SetVLink(const nsAString& aVLink)
 {
   ErrorResult rv;
   SetVLink(aVLink, rv);
-  return rv.ErrorCode();
+  return rv.StealNSResult();
 }
 
 NS_IMETHODIMP
 HTMLBodyElement::GetVLink(nsAString& aVLink)
 {
-  nsString vLink;
+  DOMString vLink;
   GetVLink(vLink);
-  aVLink = vLink;
+  vLink.ToString(aVLink);
   return NS_OK;
 }
 
@@ -235,15 +239,15 @@ HTMLBodyElement::SetALink(const nsAString& aALink)
 {
   ErrorResult rv;
   SetALink(aALink, rv);
-  return rv.ErrorCode();
+  return rv.StealNSResult();
 }
 
 NS_IMETHODIMP
 HTMLBodyElement::GetALink(nsAString& aALink)
 {
-  nsString aLink;
+  DOMString aLink;
   GetALink(aLink);
-  aALink = aLink;
+  aLink.ToString(aALink);
   return NS_OK;
 }
 
@@ -252,15 +256,15 @@ HTMLBodyElement::SetLink(const nsAString& aLink)
 {
   ErrorResult rv;
   SetLink(aLink, rv);
-  return rv.ErrorCode();
+  return rv.StealNSResult();
 }
 
 NS_IMETHODIMP
 HTMLBodyElement::GetLink(nsAString& aLink)
 {
-  nsString link;
+  DOMString link;
   GetLink(link);
-  aLink = link;
+  link.ToString(aLink);
   return NS_OK;
 }
 
@@ -269,15 +273,15 @@ HTMLBodyElement::SetText(const nsAString& aText)
 {
   ErrorResult rv;
   SetText(aText, rv);
-  return rv.ErrorCode();
+  return rv.StealNSResult();
 }
 
 NS_IMETHODIMP
 HTMLBodyElement::GetText(nsAString& aText)
 {
-  nsString text;
+  DOMString text;
   GetText(text);
-  aText = text;
+  text.ToString(aText);
   return NS_OK;
 }
 
@@ -286,15 +290,15 @@ HTMLBodyElement::SetBgColor(const nsAString& aBgColor)
 {
   ErrorResult rv;
   SetBgColor(aBgColor, rv);
-  return rv.ErrorCode();
+  return rv.StealNSResult();
 }
 
 NS_IMETHODIMP
 HTMLBodyElement::GetBgColor(nsAString& aBgColor)
 {
-  nsString bgColor;
+  DOMString bgColor;
   GetBgColor(bgColor);
-  aBgColor = bgColor;
+  bgColor.ToString(aBgColor);
   return NS_OK;
 }
 

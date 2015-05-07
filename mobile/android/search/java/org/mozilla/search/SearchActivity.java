@@ -5,7 +5,7 @@
 package org.mozilla.search;
 
 import org.mozilla.gecko.GeckoAppShell;
-import org.mozilla.gecko.LocaleAware;
+import org.mozilla.gecko.Locales;
 import org.mozilla.gecko.R;
 import org.mozilla.gecko.Telemetry;
 import org.mozilla.gecko.TelemetryContract;
@@ -39,7 +39,7 @@ import com.nineoldandroids.animation.ObjectAnimator;
  * State management is delegated to child fragments. Fragments communicate
  * with each other by passing messages through this activity.
  */
-public class SearchActivity extends LocaleAware.LocaleAwareFragmentActivity
+public class SearchActivity extends Locales.LocaleAwareFragmentActivity
         implements AcceptsSearchQuery, SearchEngineCallback {
 
     private static final String LOGTAG = "GeckoSearchActivity";
@@ -340,6 +340,11 @@ public class SearchActivity extends LocaleAware.LocaleAwareFragmentActivity
 
             @Override
             public void onAnimationEnd(Animator animation) {
+                // Don't do anything if the activity is destroyed before the animation ends.
+                if (searchEngineManager == null) {
+                    return;
+                }
+
                 setEditState(EditState.WAITING);
                 setSearchState(SearchState.POSTSEARCH);
 

@@ -1,4 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -11,17 +12,29 @@
 #include "nsContentUtils.h"
 #include "nsIScriptSecurityManager.h"
 #include "nsIDOMWindow.h"
+#include "nsILoadInfo.h"
 #include "nsIURI.h"
+#include "nsThreadUtils.h"
 #include "PerformanceEntry.h"
+#include "PerformanceMark.h"
+#include "PerformanceMeasure.h"
 #include "PerformanceResourceTiming.h"
+#include "mozilla/ErrorResult.h"
 #include "mozilla/dom/PerformanceBinding.h"
 #include "mozilla/dom/PerformanceTimingBinding.h"
 #include "mozilla/dom/PerformanceNavigationBinding.h"
+#include "mozilla/IntegerPrintfMacros.h"
 #include "mozilla/TimeStamp.h"
-#include "nsThreadUtils.h"
-#include "nsILoadInfo.h"
+#include "js/HeapAPI.h"
+
+#ifdef MOZ_WIDGET_GONK
+#define PERFLOG(msg, ...)  __android_log_print(ANDROID_LOG_INFO, "PerformanceTiming", msg, ##__VA_ARGS__)
+#else
+#define PERFLOG(msg, ...) printf_stderr(msg, ##__VA_ARGS__)
+#endif
 
 using namespace mozilla;
+using namespace mozilla::dom;
 
 NS_IMPL_CYCLE_COLLECTION_WRAPPERCACHE(nsPerformanceTiming, mPerformance)
 
@@ -185,11 +198,11 @@ DOMTimeMilliSec
 nsPerformanceTiming::RedirectStart()
 {
   if (!IsInitialized()) {
-    return mZeroTime;
+    return 0;
   }
   // We have to check if all the redirect URIs had the same origin (since there
   // is no check in RedirectStartHighRes())
-  if (mAllRedirectsSameOrigin) {
+  if (mAllRedirectsSameOrigin && mRedirectCount) {
     return static_cast<int64_t>(RedirectStartHighRes());
   }
   return 0;
@@ -218,11 +231,11 @@ DOMTimeMilliSec
 nsPerformanceTiming::RedirectEnd()
 {
   if (!IsInitialized()) {
-    return mZeroTime;
+    return 0;
   }
   // We have to check if all the redirect URIs had the same origin (since there
   // is no check in RedirectEndHighRes())
-  if (mAllRedirectsSameOrigin) {
+  if (mAllRedirectsSameOrigin && mRedirectCount) {
     return static_cast<int64_t>(RedirectEndHighRes());
   }
   return 0;
@@ -249,7 +262,9 @@ nsPerformanceTiming::DomainLookupEndHighRes()
   if (!nsContentUtils::IsPerformanceTimingEnabled() || !IsInitialized()) {
     return mZeroTime;
   }
-  return TimeStampToDOMHighResOrFetchStart(mDomainLookupEnd);
+  // Bug 1155008 - nsHttpTransaction is racy. Return DomainLookupStart when null
+  return mDomainLookupEnd.IsNull() ? DomainLookupStartHighRes()
+                                   : TimeStampToDOMHighRes(mDomainLookupEnd);
 }
 
 DOMTimeMilliSec
@@ -264,7 +279,8 @@ nsPerformanceTiming::ConnectStartHighRes()
   if (!nsContentUtils::IsPerformanceTimingEnabled() || !IsInitialized()) {
     return mZeroTime;
   }
-  return TimeStampToDOMHighResOrFetchStart(mConnectStart);
+  return mConnectStart.IsNull() ? DomainLookupEndHighRes()
+                                : TimeStampToDOMHighRes(mConnectStart);
 }
 
 DOMTimeMilliSec
@@ -279,7 +295,9 @@ nsPerformanceTiming::ConnectEndHighRes()
   if (!nsContentUtils::IsPerformanceTimingEnabled() || !IsInitialized()) {
     return mZeroTime;
   }
-  return TimeStampToDOMHighResOrFetchStart(mConnectEnd);
+  // Bug 1155008 - nsHttpTransaction is racy. Return ConnectStart when null
+  return mConnectEnd.IsNull() ? ConnectStartHighRes()
+                              : TimeStampToDOMHighRes(mConnectEnd);
 }
 
 DOMTimeMilliSec
@@ -325,14 +343,16 @@ nsPerformanceTiming::ResponseStart()
 DOMHighResTimeStamp
 nsPerformanceTiming::ResponseEndHighRes()
 {
-  if (!nsContentUtils::IsPerformanceTimingEnabled() || !IsInitialized()) {
+  if (!IsInitialized()) {
     return mZeroTime;
   }
   if (mResponseEnd.IsNull() ||
      (!mCacheReadEnd.IsNull() && mCacheReadEnd < mResponseEnd)) {
     mResponseEnd = mCacheReadEnd;
   }
-  return TimeStampToDOMHighResOrFetchStart(mResponseEnd);
+  // Bug 1155008 - nsHttpTransaction is racy. Return ResponseStart when null
+  return mResponseEnd.IsNull() ? ResponseStartHighRes()
+                               : TimeStampToDOMHighRes(mResponseEnd);
 }
 
 DOMTimeMilliSec
@@ -348,9 +368,9 @@ nsPerformanceTiming::IsInitialized() const
 }
 
 JSObject*
-nsPerformanceTiming::WrapObject(JSContext *cx)
+nsPerformanceTiming::WrapObject(JSContext *cx, JS::Handle<JSObject*> aGivenProto)
 {
-  return dom::PerformanceTimingBinding::Wrap(cx, this);
+  return PerformanceTimingBinding::Wrap(cx, this, aGivenProto);
 }
 
 
@@ -370,16 +390,33 @@ nsPerformanceNavigation::~nsPerformanceNavigation()
 }
 
 JSObject*
-nsPerformanceNavigation::WrapObject(JSContext *cx)
+nsPerformanceNavigation::WrapObject(JSContext *cx, JS::Handle<JSObject*> aGivenProto)
 {
-  return dom::PerformanceNavigationBinding::Wrap(cx, this);
+  return PerformanceNavigationBinding::Wrap(cx, this, aGivenProto);
 }
 
 
-NS_IMPL_CYCLE_COLLECTION_INHERITED(nsPerformance, DOMEventTargetHelper,
-                                   mWindow, mTiming,
-                                   mNavigation, mEntries,
-                                   mParentPerformance)
+NS_IMPL_CYCLE_COLLECTION_CLASS(nsPerformance)
+
+NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN_INHERITED(nsPerformance, DOMEventTargetHelper)
+NS_IMPL_CYCLE_COLLECTION_UNLINK(mWindow, mTiming,
+                                mNavigation, mEntries,
+                                mParentPerformance)
+  tmp->mMozMemory = nullptr;
+  mozilla::DropJSObjects(this);
+NS_IMPL_CYCLE_COLLECTION_UNLINK_END
+
+NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN_INHERITED(nsPerformance, DOMEventTargetHelper)
+  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mWindow, mTiming,
+                                    mNavigation, mEntries,
+                                    mParentPerformance)
+  NS_IMPL_CYCLE_COLLECTION_TRAVERSE_SCRIPT_OBJECTS
+NS_IMPL_CYCLE_COLLECTION_TRAVERSE_END
+
+NS_IMPL_CYCLE_COLLECTION_TRACE_BEGIN_INHERITED(nsPerformance, DOMEventTargetHelper)
+  NS_IMPL_CYCLE_COLLECTION_TRACE_JS_MEMBER_CALLBACK(mMozMemory)
+NS_IMPL_CYCLE_COLLECTION_TRACE_END
+
 NS_IMPL_ADDREF_INHERITED(nsPerformance, DOMEventTargetHelper)
 NS_IMPL_RELEASE_INHERITED(nsPerformance, DOMEventTargetHelper)
 
@@ -399,6 +436,7 @@ nsPerformance::nsPerformance(nsPIDOMWindow* aWindow,
 
 nsPerformance::~nsPerformance()
 {
+  mozilla::DropJSObjects(this);
 }
 
 // QueryInterface implementation for nsPerformance
@@ -407,6 +445,18 @@ NS_INTERFACE_MAP_BEGIN_CYCLE_COLLECTION(nsPerformance)
   NS_INTERFACE_MAP_ENTRY(nsISupports)
 NS_INTERFACE_MAP_END_INHERITING(DOMEventTargetHelper)
 
+void
+nsPerformance::GetMozMemory(JSContext *aCx, JS::MutableHandle<JSObject*> aObj)
+{
+  if (!mMozMemory) {
+    mMozMemory = js::gc::NewMemoryInfoObject(aCx);
+    if (mMozMemory) {
+      mozilla::HoldJSObjects(this);
+    }
+  }
+
+  aObj.set(mMozMemory);
+}
 
 nsPerformanceTiming*
 nsPerformance::Timing()
@@ -449,13 +499,13 @@ nsPerformance::Navigation()
 DOMHighResTimeStamp
 nsPerformance::Now()
 {
-  return GetDOMTiming()->TimeStampToDOMHighRes(mozilla::TimeStamp::Now());
+  return GetDOMTiming()->TimeStampToDOMHighRes(TimeStamp::Now());
 }
 
 JSObject*
-nsPerformance::WrapObject(JSContext *cx)
+nsPerformance::WrapObject(JSContext *cx, JS::Handle<JSObject*> aGivenProto)
 {
-  return dom::PerformanceBinding::Wrap(cx, this);
+  return PerformanceBinding::Wrap(cx, this, aGivenProto);
 }
 
 void
@@ -483,7 +533,7 @@ nsPerformance::GetEntriesByType(const nsAString& entryType,
 
 void
 nsPerformance::GetEntriesByName(const nsAString& name,
-                                const mozilla::dom::Optional<nsAString>& entryType,
+                                const Optional<nsAString>& entryType,
                                 nsTArray<nsRefPtr<PerformanceEntry> >& retval)
 {
   MOZ_ASSERT(NS_IsMainThread());
@@ -500,10 +550,27 @@ nsPerformance::GetEntriesByName(const nsAString& name,
 }
 
 void
+nsPerformance::ClearEntries(const Optional<nsAString>& aEntryName,
+                            const nsAString& aEntryType)
+{
+  for (uint32_t i = 0; i < mEntries.Length();) {
+    if ((!aEntryName.WasPassed() ||
+         mEntries[i]->GetName().Equals(aEntryName.Value())) &&
+        (aEntryType.IsEmpty() ||
+         mEntries[i]->GetEntryType().Equals(aEntryType))) {
+      mEntries.RemoveElementAt(i);
+    } else {
+      ++i;
+    }
+  }
+}
+
+void
 nsPerformance::ClearResourceTimings()
 {
   MOZ_ASSERT(NS_IsMainThread());
-  mEntries.Clear();
+  ClearEntries(Optional<nsAString>(),
+               NS_LITERAL_STRING("resource"));
 }
 
 void
@@ -558,24 +625,16 @@ nsPerformance::AddEntry(nsIHttpChannel* channel,
 
     // The PerformanceResourceTiming object will use the nsPerformanceTiming
     // object to get all the required timings.
-    nsRefPtr<dom::PerformanceResourceTiming> performanceEntry =
-        new dom::PerformanceResourceTiming(performanceTiming, this);
+    nsRefPtr<PerformanceResourceTiming> performanceEntry =
+      new PerformanceResourceTiming(performanceTiming, this, entryName);
 
-    performanceEntry->SetName(entryName);
-    performanceEntry->SetEntryType(NS_LITERAL_STRING("resource"));
     // If the initiator type had no valid value, then set it to the default
     // ("other") value.
     if (initiatorType.IsEmpty()) {
       initiatorType = NS_LITERAL_STRING("other");
     }
     performanceEntry->SetInitiatorType(initiatorType);
-
-    mEntries.InsertElementSorted(performanceEntry,
-        PerformanceEntryComparator());
-    if (mEntries.Length() >= mPrimaryBufferSize) {
-      // call onresourcetimingbufferfull
-      DispatchBufferFullEvent();
-    }
+    InsertPerformanceEntry(performanceEntry, false);
   }
 }
 
@@ -584,8 +643,8 @@ nsPerformance::PerformanceEntryComparator::Equals(
     const PerformanceEntry* aElem1,
     const PerformanceEntry* aElem2) const
 {
-  NS_ABORT_IF_FALSE(aElem1 && aElem2,
-      "Trying to compare null performance entries");
+  MOZ_ASSERT(aElem1 && aElem2,
+             "Trying to compare null performance entries");
   return aElem1->StartTime() == aElem2->StartTime();
 }
 
@@ -594,7 +653,246 @@ nsPerformance::PerformanceEntryComparator::LessThan(
     const PerformanceEntry* aElem1,
     const PerformanceEntry* aElem2) const
 {
-  NS_ABORT_IF_FALSE(aElem1 && aElem2,
-      "Trying to compare null performance entries");
+  MOZ_ASSERT(aElem1 && aElem2,
+             "Trying to compare null performance entries");
   return aElem1->StartTime() < aElem2->StartTime();
 }
+
+void
+nsPerformance::InsertPerformanceEntry(PerformanceEntry* aEntry,
+                                      bool aShouldPrint)
+{
+  MOZ_ASSERT(aEntry);
+  MOZ_ASSERT(mEntries.Length() < mPrimaryBufferSize);
+  if (mEntries.Length() == mPrimaryBufferSize) {
+    NS_WARNING("Performance Entry buffer size maximum reached!");
+    return;
+  }
+  if (aShouldPrint && nsContentUtils::IsUserTimingLoggingEnabled()) {
+    nsAutoCString uri;
+    nsresult rv = mWindow->GetDocumentURI()->GetHost(uri);
+    if(NS_FAILED(rv)) {
+      // If we have no URI, just put in "none".
+      uri.AssignLiteral("none");
+    }
+    PERFLOG("Performance Entry: %s|%s|%s|%f|%f|%" PRIu64 "\n",
+            uri.get(),
+            NS_ConvertUTF16toUTF8(aEntry->GetEntryType()).get(),
+            NS_ConvertUTF16toUTF8(aEntry->GetName()).get(),
+            aEntry->StartTime(),
+            aEntry->Duration(),
+            static_cast<uint64_t>(PR_Now() / PR_USEC_PER_MSEC));
+  }
+  mEntries.InsertElementSorted(aEntry,
+                               PerformanceEntryComparator());
+  if (mEntries.Length() == mPrimaryBufferSize) {
+    // call onresourcetimingbufferfull
+    DispatchBufferFullEvent();
+  }
+}
+
+void
+nsPerformance::Mark(const nsAString& aName, ErrorResult& aRv)
+{
+  MOZ_ASSERT(NS_IsMainThread());
+  // Don't add the entry if the buffer is full
+  if (mEntries.Length() >= mPrimaryBufferSize) {
+    NS_WARNING("Performance Entry buffer size maximum reached!");
+    return;
+  }
+  if (IsPerformanceTimingAttribute(aName)) {
+    aRv.Throw(NS_ERROR_DOM_SYNTAX_ERR);
+    return;
+  }
+  nsRefPtr<PerformanceMark> performanceMark =
+    new PerformanceMark(this, aName);
+  InsertPerformanceEntry(performanceMark, true);
+}
+
+void
+nsPerformance::ClearMarks(const Optional<nsAString>& aName)
+{
+  MOZ_ASSERT(NS_IsMainThread());
+  ClearEntries(aName, NS_LITERAL_STRING("mark"));
+}
+
+DOMHighResTimeStamp
+nsPerformance::ResolveTimestampFromName(const nsAString& aName,
+                                        ErrorResult& aRv)
+{
+  nsAutoTArray<nsRefPtr<PerformanceEntry>, 1> arr;
+  DOMHighResTimeStamp ts;
+  Optional<nsAString> typeParam;
+  nsAutoString str;
+  str.AssignLiteral("mark");
+  typeParam = &str;
+  GetEntriesByName(aName, typeParam, arr);
+  if (!arr.IsEmpty()) {
+    return arr.LastElement()->StartTime();
+  }
+  if (!IsPerformanceTimingAttribute(aName)) {
+    aRv.Throw(NS_ERROR_DOM_SYNTAX_ERR);
+    return 0;
+  }
+  ts = GetPerformanceTimingFromString(aName);
+  if (!ts) {
+    aRv.Throw(NS_ERROR_DOM_INVALID_ACCESS_ERR);
+    return 0;
+  }
+  return ConvertDOMMilliSecToHighRes(ts);
+}
+
+void
+nsPerformance::Measure(const nsAString& aName,
+                       const Optional<nsAString>& aStartMark,
+                       const Optional<nsAString>& aEndMark,
+                       ErrorResult& aRv)
+{
+  MOZ_ASSERT(NS_IsMainThread());
+  // Don't add the entry if the buffer is full
+  if (mEntries.Length() >= mPrimaryBufferSize) {
+    NS_WARNING("Performance Entry buffer size maximum reached!");
+    return;
+  }
+  DOMHighResTimeStamp startTime;
+  DOMHighResTimeStamp endTime;
+
+  if (IsPerformanceTimingAttribute(aName)) {
+    aRv.Throw(NS_ERROR_DOM_SYNTAX_ERR);
+    return;
+  }
+
+  if (aStartMark.WasPassed()) {
+    startTime = ResolveTimestampFromName(aStartMark.Value(), aRv);
+    if (NS_WARN_IF(aRv.Failed())) {
+      return;
+    }
+  } else {
+    // Navigation start is used in this case, but since DOMHighResTimeStamp is
+    // in relation to navigation start, this will be zero if a name is not
+    // passed.
+    startTime = 0;
+  }
+  if (aEndMark.WasPassed()) {
+    endTime = ResolveTimestampFromName(aEndMark.Value(), aRv);
+    if (NS_WARN_IF(aRv.Failed())) {
+      return;
+    }
+  } else {
+    endTime = Now();
+  }
+  nsRefPtr<PerformanceMeasure> performanceMeasure =
+    new PerformanceMeasure(this, aName, startTime, endTime);
+  InsertPerformanceEntry(performanceMeasure, true);
+}
+
+void
+nsPerformance::ClearMeasures(const Optional<nsAString>& aName)
+{
+  MOZ_ASSERT(NS_IsMainThread());
+  ClearEntries(aName, NS_LITERAL_STRING("measure"));
+}
+
+DOMHighResTimeStamp
+nsPerformance::ConvertDOMMilliSecToHighRes(DOMTimeMilliSec aTime) {
+  // If the time we're trying to convert is equal to zero, it hasn't been set
+  // yet so just return 0.
+  if (aTime == 0) {
+    return 0;
+  }
+  return aTime - GetDOMTiming()->GetNavigationStart();
+}
+
+// To be removed once bug 1124165 lands
+bool
+nsPerformance::IsPerformanceTimingAttribute(const nsAString& aName)
+{
+  // Note that toJSON is added to this list due to bug 1047848
+  static const char* attributes[] =
+    {"navigationStart", "unloadEventStart", "unloadEventEnd", "redirectStart",
+     "redirectEnd", "fetchStart", "domainLookupStart", "domainLookupEnd",
+     "connectStart", "connectEnd", "requestStart", "responseStart",
+     "responseEnd", "domLoading", "domInteractive", "domContentLoadedEventStart",
+     "domContentLoadedEventEnd", "domComplete", "loadEventStart",
+     "loadEventEnd", nullptr};
+
+  for (uint32_t i = 0; attributes[i]; ++i) {
+    if (aName.EqualsASCII(attributes[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+DOMTimeMilliSec
+nsPerformance::GetPerformanceTimingFromString(const nsAString& aProperty)
+{
+  if (!IsPerformanceTimingAttribute(aProperty)) {
+    return 0;
+  }
+  if (aProperty.EqualsLiteral("navigationStart")) {
+    // DOMHighResTimeStamp is in relation to navigationStart, so this will be
+    // zero.
+    return GetDOMTiming()->GetNavigationStart();
+  }
+  if (aProperty.EqualsLiteral("unloadEventStart")) {
+    return GetDOMTiming()->GetUnloadEventStart();
+  }
+  if (aProperty.EqualsLiteral("unloadEventEnd")) {
+    return GetDOMTiming()->GetUnloadEventEnd();
+  }
+  if (aProperty.EqualsLiteral("redirectStart")) {
+    return Timing()->RedirectStart();
+  }
+  if (aProperty.EqualsLiteral("redirectEnd")) {
+    return Timing()->RedirectEnd();
+  }
+  if (aProperty.EqualsLiteral("fetchStart")) {
+    return Timing()->FetchStart();
+  }
+  if (aProperty.EqualsLiteral("domainLookupStart")) {
+    return Timing()->DomainLookupStart();
+  }
+  if (aProperty.EqualsLiteral("domainLookupEnd")) {
+    return Timing()->DomainLookupEnd();
+  }
+  if (aProperty.EqualsLiteral("connectStart")) {
+    return Timing()->ConnectStart();
+  }
+  if (aProperty.EqualsLiteral("connectEnd")) {
+    return Timing()->ConnectEnd();
+  }
+  if (aProperty.EqualsLiteral("requestStart")) {
+    return Timing()->RequestStart();
+  }
+  if (aProperty.EqualsLiteral("responseStart")) {
+    return Timing()->ResponseStart();
+  }
+  if (aProperty.EqualsLiteral("responseEnd")) {
+    return Timing()->ResponseEnd();
+  }
+  if (aProperty.EqualsLiteral("domLoading")) {
+    return GetDOMTiming()->GetDomLoading();
+  }
+  if (aProperty.EqualsLiteral("domInteractive")) {
+    return GetDOMTiming()->GetDomInteractive();
+  }
+  if (aProperty.EqualsLiteral("domContentLoadedEventStart")) {
+    return GetDOMTiming()->GetDomContentLoadedEventStart();
+  }
+  if (aProperty.EqualsLiteral("domContentLoadedEventEnd")) {
+    return GetDOMTiming()->GetDomContentLoadedEventEnd();
+  }
+  if (aProperty.EqualsLiteral("domComplete")) {
+    return GetDOMTiming()->GetDomComplete();
+  }
+  if (aProperty.EqualsLiteral("loadEventStart")) {
+    return GetDOMTiming()->GetLoadEventStart();
+  }
+  if (aProperty.EqualsLiteral("loadEventEnd"))  {
+    return GetDOMTiming()->GetLoadEventEnd();
+  }
+  MOZ_CRASH("IsPerformanceTimingAttribute and GetPerformanceTimingFromString are out of sync");
+  return 0;
+}
+

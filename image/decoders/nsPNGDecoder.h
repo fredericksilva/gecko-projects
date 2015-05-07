@@ -4,8 +4,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#ifndef nsPNGDecoder_h
-#define nsPNGDecoder_h
+#ifndef mozilla_image_decoders_nsPNGDecoder_h
+#define mozilla_image_decoders_nsPNGDecoder_h
 
 #include "Decoder.h"
 
@@ -24,13 +24,12 @@ class RasterImage;
 class nsPNGDecoder : public Decoder
 {
 public:
-  explicit nsPNGDecoder(RasterImage& aImage);
+  explicit nsPNGDecoder(RasterImage* aImage);
   virtual ~nsPNGDecoder();
 
-  virtual void InitInternal();
-  virtual void WriteInternal(const char* aBuffer, uint32_t aCount,
-                             DecodeStrategy aStrategy) MOZ_OVERRIDE;
-  virtual Telemetry::ID SpeedHistogram();
+  virtual void InitInternal() override;
+  virtual void WriteInternal(const char* aBuffer, uint32_t aCount) override;
+  virtual Telemetry::ID SpeedHistogram() override;
 
   void CreateFrame(png_uint_32 x_offset, png_uint_32 y_offset,
                    int32_t width, int32_t height,
@@ -87,7 +86,6 @@ public:
   uint32_t mCMSMode;
 
   uint8_t mChannels;
-  bool mFrameHasNoAlpha;
   bool mFrameIsHidden;
   bool mDisablePremultipliedAlpha;
 
@@ -98,8 +96,8 @@ public:
     AnimFrameInfo(png_structp aPNG, png_infop aInfo);
 #endif
 
-    FrameBlender::FrameDisposalMethod mDispose;
-    FrameBlender::FrameBlendMethod mBlend;
+    DisposalMethod mDispose;
+    BlendMethod mBlend;
     int32_t mTimeout;
   };
 
@@ -131,4 +129,4 @@ public:
 } // namespace image
 } // namespace mozilla
 
-#endif // nsPNGDecoder_h
+#endif // mozilla_image_decoders_nsPNGDecoder_h

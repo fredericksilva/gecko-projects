@@ -63,6 +63,8 @@ static nsITimer* gFlushTimer = nullptr;
 nsHtml5TreeOpExecutor::nsHtml5TreeOpExecutor()
   : nsHtml5DocumentBuilder(false)
   , mPreloadedURLs(23)  // Mean # of preloadable resources per page on dmoz
+  , mSpeculationReferrerPolicyWasSet(false)
+  , mSpeculationReferrerPolicy(mozilla::net::RP_Default)
 {
   // zeroing operator new for everything else
 }
@@ -857,24 +859,31 @@ nsHtml5TreeOpExecutor::IsExternalViewSource()
 
 // Speculative loading
 
+nsIURI*
+nsHtml5TreeOpExecutor::BaseURIForPreload()
+{
+  // The URL of the document without <base>
+  nsIURI* documentURI = mDocument->GetDocumentURI();
+  // The URL of the document with non-speculative <base>
+  nsIURI* documentBaseURI = mDocument->GetDocBaseURI();
+
+  // If the two above are different, use documentBaseURI. If they are the same,
+  // the document object isn't aware of a <base>, so attempt to use the
+  // mSpeculationBaseURI or, failing, that, documentURI.
+  return (documentURI == documentBaseURI) ?
+          (mSpeculationBaseURI ?
+           mSpeculationBaseURI.get() : documentURI)
+         : documentBaseURI;
+}
+
 already_AddRefed<nsIURI>
 nsHtml5TreeOpExecutor::ConvertIfNotPreloadedYet(const nsAString& aURL)
 {
   if (aURL.IsEmpty()) {
     return nullptr;
   }
-  // The URL of the document without <base>
-  nsIURI* documentURI = mDocument->GetDocumentURI();
-  // The URL of the document with non-speculative <base>
-  nsIURI* documentBaseURI = mDocument->GetDocBaseURI();
 
-  // If the two above are different, use documentBaseURI. If they are the
-  // same, the document object isn't aware of a <base>, so attempt to use the
-  // mSpeculationBaseURI or, failing, that, documentURI.
-  nsIURI* base = (documentURI == documentBaseURI) ?
-                  (mSpeculationBaseURI ?
-                   mSpeculationBaseURI.get() : documentURI)
-                 : documentBaseURI;
+  nsIURI* base = BaseURIForPreload();
   const nsCString& charset = mDocument->GetDocumentCharacterSet();
   nsCOMPtr<nsIURI> uri;
   nsresult rv = NS_NewURI(getter_AddRefs(uri), aURL, charset.get(), base);
@@ -882,13 +891,24 @@ nsHtml5TreeOpExecutor::ConvertIfNotPreloadedYet(const nsAString& aURL)
     NS_WARNING("Failed to create a URI");
     return nullptr;
   }
+
+  if (ShouldPreloadURI(uri)) {
+    return uri.forget();
+  }
+
+  return nullptr;
+}
+
+bool
+nsHtml5TreeOpExecutor::ShouldPreloadURI(nsIURI *aURI)
+{
   nsAutoCString spec;
-  uri->GetSpec(spec);
+  aURI->GetSpec(spec);
   if (mPreloadedURLs.Contains(spec)) {
-    return nullptr;
+    return false;
   }
   mPreloadedURLs.PutEntry(spec);
-  return uri.forget();
+  return true;
 }
 
 void
@@ -903,7 +923,8 @@ nsHtml5TreeOpExecutor::PreloadScript(const nsAString& aURL,
     return;
   }
   mDocument->ScriptLoader()->PreloadURI(uri, aCharset, aType, aCrossOrigin,
-                                        aScriptFromHead);
+                                        aScriptFromHead,
+                                        mSpeculationReferrerPolicy);
 }
 
 void
@@ -915,18 +936,45 @@ nsHtml5TreeOpExecutor::PreloadStyle(const nsAString& aURL,
   if (!uri) {
     return;
   }
-  mDocument->PreloadStyle(uri, aCharset, aCrossOrigin);
+  mDocument->PreloadStyle(uri, aCharset, aCrossOrigin,
+                          mSpeculationReferrerPolicy);
 }
 
 void
 nsHtml5TreeOpExecutor::PreloadImage(const nsAString& aURL,
-                                    const nsAString& aCrossOrigin)
+                                    const nsAString& aCrossOrigin,
+                                    const nsAString& aSrcset,
+                                    const nsAString& aSizes)
 {
-  nsCOMPtr<nsIURI> uri = ConvertIfNotPreloadedYet(aURL);
-  if (!uri) {
-    return;
+  nsCOMPtr<nsIURI> baseURI = BaseURIForPreload();
+  nsCOMPtr<nsIURI> uri = mDocument->ResolvePreloadImage(baseURI, aURL, aSrcset,
+                                                        aSizes);
+  if (uri && ShouldPreloadURI(uri)) {
+    mDocument->MaybePreLoadImage(uri, aCrossOrigin, mSpeculationReferrerPolicy);
   }
-  mDocument->MaybePreLoadImage(uri, aCrossOrigin);
+}
+
+// These calls inform the document of picture state and seen sources, such that
+// it can use them to inform ResolvePreLoadImage as necessary
+void
+nsHtml5TreeOpExecutor::PreloadPictureSource(const nsAString& aSrcset,
+                                            const nsAString& aSizes,
+                                            const nsAString& aType,
+                                            const nsAString& aMedia)
+{
+  mDocument->PreloadPictureImageSource(aSrcset, aSizes, aType, aMedia);
+}
+
+void
+nsHtml5TreeOpExecutor::PreloadOpenPicture()
+{
+  mDocument->PreloadPictureOpened();
+}
+
+void
+nsHtml5TreeOpExecutor::PreloadEndPicture()
+{
+  mDocument->PreloadPictureClosed();
 }
 
 void
@@ -950,6 +998,32 @@ nsHtml5TreeOpExecutor::SetSpeculationBase(const nsAString& aURL)
   DebugOnly<nsresult> rv = NS_NewURI(getter_AddRefs(mSpeculationBaseURI), aURL,
                                      charset.get(), mDocument->GetDocumentURI());
   NS_WARN_IF_FALSE(NS_SUCCEEDED(rv), "Failed to create a URI");
+}
+
+void
+nsHtml5TreeOpExecutor::SetSpeculationReferrerPolicy(const nsAString& aReferrerPolicy)
+{
+  ReferrerPolicy policy = mozilla::net::ReferrerPolicyFromString(aReferrerPolicy);
+  return SetSpeculationReferrerPolicy(policy);
+}
+
+void
+nsHtml5TreeOpExecutor::SetSpeculationReferrerPolicy(ReferrerPolicy aReferrerPolicy)
+{
+  if (mSpeculationReferrerPolicyWasSet &&
+      aReferrerPolicy != mSpeculationReferrerPolicy) {
+    // According to the Referrer Policy spec, if there's already been a policy
+    // set and another attempt is made to set a _different_ policy, the result
+    // is a "No Referrer" policy.
+    mSpeculationReferrerPolicy = mozilla::net::RP_No_Referrer;
+  }
+  else {
+    // Record "speculated" referrer policy locally and thread through the
+    // speculation phase.  The actual referrer policy will be set by
+    // HTMLMetaElement::BindToTree().
+    mSpeculationReferrerPolicyWasSet = true;
+    mSpeculationReferrerPolicy = aReferrerPolicy;
+  }
 }
 
 #ifdef DEBUG_NS_HTML5_TREE_OP_EXECUTOR_FLUSH

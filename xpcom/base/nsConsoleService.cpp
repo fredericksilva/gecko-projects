@@ -31,6 +31,11 @@
 #include <windows.h>
 #endif
 
+#ifdef MOZ_TASK_TRACER
+#include "GeckoTaskTracer.h"
+using namespace mozilla::tasktracer;
+#endif
+
 using namespace mozilla;
 
 NS_IMPL_ADDREF(nsConsoleService)
@@ -66,7 +71,7 @@ nsConsoleService::~nsConsoleService()
   }
 
   if (mMessages) {
-    nsMemory::Free(mMessages);
+    free(mMessages);
   }
 }
 
@@ -95,7 +100,7 @@ nsresult
 nsConsoleService::Init()
 {
   mMessages = (nsIConsoleMessage**)
-    nsMemory::Alloc(mBufferSize * sizeof(nsIConsoleMessage*));
+    moz_xmalloc(mBufferSize * sizeof(nsIConsoleMessage*));
   if (!mMessages) {
     return NS_ERROR_OUT_OF_MEMORY;
   }
@@ -201,7 +206,7 @@ nsConsoleService::LogMessageWithMode(nsIConsoleMessage* aMessage,
   {
     MutexAutoLock lock(mLock);
 
-#if defined(ANDROID)
+#if defined(ANDROID) && !defined(RELEASE_BUILD)
     if (aOutputMode == OutputToLog) {
       nsCString msg;
       aMessage->ToString(msg);
@@ -244,6 +249,17 @@ nsConsoleService::LogMessageWithMode(nsIConsoleMessage* aMessage,
       aMessage->GetMessageMoz(getter_Copies(msg));
       msg.Append('\n');
       OutputDebugStringW(msg.get());
+    }
+#endif
+#ifdef MOZ_TASK_TRACER
+    {
+      nsCString msg;
+      aMessage->ToString(msg);
+      int prefixPos = msg.Find(GetJSLabelPrefix());
+      if (prefixPos >= 0) {
+        nsDependentCSubstring submsg(msg, prefixPos);
+        AddLabel("%s", submsg.BeginReading());
+      }
     }
 #endif
 
@@ -316,7 +332,7 @@ nsConsoleService::GetMessageArray(uint32_t* aCount,
      * array object when called from script.
      */
     messageArray = (nsIConsoleMessage**)
-      nsMemory::Alloc(sizeof(nsIConsoleMessage*));
+      moz_xmalloc(sizeof(nsIConsoleMessage*));
     *messageArray = nullptr;
     *aMessages = messageArray;
     *aCount = 0;
@@ -326,7 +342,7 @@ nsConsoleService::GetMessageArray(uint32_t* aCount,
 
   uint32_t resultSize = mFull ? mBufferSize : mCurrent;
   messageArray =
-    (nsIConsoleMessage**)nsMemory::Alloc((sizeof(nsIConsoleMessage*))
+    (nsIConsoleMessage**)moz_xmalloc((sizeof(nsIConsoleMessage*))
                                          * resultSize);
 
   if (!messageArray) {

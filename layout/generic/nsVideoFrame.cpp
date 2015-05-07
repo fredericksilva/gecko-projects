@@ -159,12 +159,12 @@ nsVideoFrame::BuildLayer(nsDisplayListBuilder* aBuilder,
                          nsDisplayItem* aItem,
                          const ContainerLayerParameters& aContainerParameters)
 {
-  nsSize contentBoxSize = GetContentRectRelativeToSelf().Size();
+  nsRect area = GetContentRectRelativeToSelf() + aItem->ToReferenceFrame();
   HTMLVideoElement* element = static_cast<HTMLVideoElement*>(GetContent());
 
   nsIntSize videoSizeInPx;
   if (NS_FAILED(element->GetVideoSize(&videoSizeInPx)) ||
-      contentBoxSize.IsEmpty()) {
+      area.IsEmpty()) {
     return nullptr;
   }
 
@@ -189,11 +189,7 @@ nsVideoFrame::BuildLayer(nsDisplayListBuilder* aBuilder,
   intrinsicSize.width.SetCoordValue(aspectRatio.width);
   intrinsicSize.height.SetCoordValue(aspectRatio.height);
 
-  nsRect contentBoxRect(
-    GetContentRectRelativeToSelf().TopLeft() + aItem->ToReferenceFrame(),
-    contentBoxSize);
-
-  nsRect dest = nsLayoutUtils::ComputeObjectDestRect(contentBoxRect,
+  nsRect dest = nsLayoutUtils::ComputeObjectDestRect(area,
                                                      intrinsicSize,
                                                      aspectRatio,
                                                      StylePosition());
@@ -231,7 +227,7 @@ class DispatchResizeToControls : public nsRunnable
 public:
   explicit DispatchResizeToControls(nsIContent* aContent)
     : mContent(aContent) {}
-  NS_IMETHOD Run() MOZ_OVERRIDE {
+  NS_IMETHOD Run() override {
     nsContentUtils::DispatchTrustedEvent(mContent->OwnerDoc(), mContent,
                                          NS_LITERAL_STRING("resizevideocontrols"),
                                          false, false);
@@ -246,6 +242,7 @@ nsVideoFrame::Reflow(nsPresContext*           aPresContext,
                      const nsHTMLReflowState& aReflowState,
                      nsReflowStatus&          aStatus)
 {
+  MarkInReflow();
   DO_GLOBAL_REFLOW_COUNT("nsVideoFrame");
   DISPLAY_REFLOW(aPresContext, this, aReflowState, aMetrics, aStatus);
   NS_FRAME_TRACE(NS_FRAME_TRACE_CALLS,
@@ -369,7 +366,7 @@ public:
   // away completely (e.g. because of a decoder error). The problem would
   // be especially acute if we have off-main-thread rendering.
 
-  virtual nsRect GetBounds(nsDisplayListBuilder* aBuilder, bool* aSnap) MOZ_OVERRIDE
+  virtual nsRect GetBounds(nsDisplayListBuilder* aBuilder, bool* aSnap) override
   {
     *aSnap = true;
     nsIFrame* f = Frame();
@@ -378,14 +375,14 @@ public:
 
   virtual already_AddRefed<Layer> BuildLayer(nsDisplayListBuilder* aBuilder,
                                              LayerManager* aManager,
-                                             const ContainerLayerParameters& aContainerParameters) MOZ_OVERRIDE
+                                             const ContainerLayerParameters& aContainerParameters) override
   {
     return static_cast<nsVideoFrame*>(mFrame)->BuildLayer(aBuilder, aManager, this, aContainerParameters);
   }
 
   virtual LayerState GetLayerState(nsDisplayListBuilder* aBuilder,
                                    LayerManager* aManager,
-                                   const ContainerLayerParameters& aParameters) MOZ_OVERRIDE
+                                   const ContainerLayerParameters& aParameters) override
   {
     if (aManager->IsCompositingCheap()) {
       // Since ImageLayers don't require additional memory of the
@@ -507,14 +504,16 @@ nsVideoFrame::ComputeSize(nsRenderingContext *aRenderingContext,
 
 nscoord nsVideoFrame::GetMinISize(nsRenderingContext *aRenderingContext)
 {
-  nscoord result = GetVideoIntrinsicSize(aRenderingContext).width;
+  nsSize size = GetVideoIntrinsicSize(aRenderingContext);
+  nscoord result = GetWritingMode().IsVertical() ? size.height : size.width;
   DISPLAY_MIN_WIDTH(this, result);
   return result;
 }
 
 nscoord nsVideoFrame::GetPrefISize(nsRenderingContext *aRenderingContext)
 {
-  nscoord result = GetVideoIntrinsicSize(aRenderingContext).width;
+  nsSize size = GetVideoIntrinsicSize(aRenderingContext);
+  nscoord result = GetWritingMode().IsVertical() ? size.height : size.width;
   DISPLAY_PREF_WIDTH(this, result);
   return result;
 }

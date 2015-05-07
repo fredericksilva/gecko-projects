@@ -3,6 +3,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include "CreateElementTxn.h"
+
 #include <algorithm>
 #include <stdio.h>
 
@@ -11,7 +13,6 @@
 
 #include "mozilla/Casting.h"
 
-#include "CreateElementTxn.h"
 #include "nsAlgorithm.h"
 #include "nsAString.h"
 #include "nsDebug.h"
@@ -72,7 +73,7 @@ CreateElementTxn::DoTransaction()
   ErrorResult rv;
   if (mOffsetInParent == -1) {
     mParent->AppendChild(*mNewNode, rv);
-    return rv.ErrorCode();
+    return rv.StealNSResult();
   }
 
   mOffsetInParent = std::min(mOffsetInParent,
@@ -82,7 +83,7 @@ CreateElementTxn::DoTransaction()
   mRefNode = mParent->GetChildAt(mOffsetInParent);
 
   mParent->InsertBefore(*mNewNode, mRefNode, rv);
-  NS_ENSURE_SUCCESS(rv.ErrorCode(), rv.ErrorCode());
+  NS_ENSURE_TRUE(!rv.Failed(), rv.StealNSResult());
 
   // Only set selection to insertion point if editor gives permission
   if (!mEditor->GetShouldTxnSetSelection()) {
@@ -107,7 +108,7 @@ CreateElementTxn::UndoTransaction()
   ErrorResult rv;
   mParent->RemoveChild(*mNewNode, rv);
 
-  return rv.ErrorCode();
+  return rv.StealNSResult();
 }
 
 NS_IMETHODIMP
@@ -122,7 +123,7 @@ CreateElementTxn::RedoTransaction()
   // Now, reinsert mNewNode
   ErrorResult rv;
   mParent->InsertBefore(*mNewNode, mRefNode, rv);
-  return rv.ErrorCode();
+  return rv.StealNSResult();
 }
 
 NS_IMETHODIMP

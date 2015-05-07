@@ -1,4 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -6,6 +7,7 @@
 #ifndef mozilla_dom_Request_h
 #define mozilla_dom_Request_h
 
+#include "nsIContentPolicy.h"
 #include "nsISupportsImpl.h"
 #include "nsWrapperCache.h"
 
@@ -15,19 +17,16 @@
 // files.
 #include "mozilla/dom/RequestBinding.h"
 
-class nsPIDOMWindow;
-
 namespace mozilla {
 namespace dom {
 
 class Headers;
 class InternalHeaders;
-class Promise;
-class RequestOrScalarValueString;
+class RequestOrUSVString;
 
-class Request MOZ_FINAL : public nsISupports
-                        , public nsWrapperCache
-                        , public FetchBody<Request>
+class Request final : public nsISupports
+                    , public FetchBody<Request>
+                    , public nsWrapperCache
 {
   NS_DECL_CYCLE_COLLECTING_ISUPPORTS
   NS_DECL_CYCLE_COLLECTION_SCRIPT_HOLDER_CLASS(Request)
@@ -36,15 +35,15 @@ public:
   Request(nsIGlobalObject* aOwner, InternalRequest* aRequest);
 
   JSObject*
-  WrapObject(JSContext* aCx)
+  WrapObject(JSContext* aCx, JS::Handle<JSObject*> aGivenProto) override
   {
-    return RequestBinding::Wrap(aCx, this);
+    return RequestBinding::Wrap(aCx, this, aGivenProto);
   }
 
   void
-  GetUrl(DOMString& aUrl) const
+  GetUrl(nsAString& aUrl) const
   {
-    aUrl.AsAString() = NS_ConvertUTF8toUTF16(mRequest->mURL);
+    CopyUTF8toUTF16(mRequest->mURL, aUrl);
   }
 
   void
@@ -56,6 +55,9 @@ public:
   RequestMode
   Mode() const
   {
+    if (mRequest->mMode == RequestMode::Cors_with_forced_preflight) {
+      return RequestMode::Cors;
+    }
     return mRequest->mMode;
   }
 
@@ -65,16 +67,35 @@ public:
     return mRequest->mCredentialsMode;
   }
 
-  void
-  GetReferrer(DOMString& aReferrer) const
+  RequestCache
+  Cache() const
   {
-    if (mRequest->ReferrerIsNone()) {
-      aReferrer.AsAString() = EmptyString();
-      return;
-    }
+    return mRequest->GetCacheMode();
+  }
 
-    // FIXME(nsm): Spec doesn't say what to do if referrer is client.
-    aReferrer.AsAString() = NS_ConvertUTF8toUTF16(mRequest->mReferrerURL);
+  RequestContext
+  Context() const
+  {
+    return mRequest->Context();
+  }
+
+  // [ChromeOnly]
+  void
+  SetContext(RequestContext aContext)
+  {
+    mRequest->SetContext(aContext);
+  }
+
+  void
+  SetContentPolicyType(nsContentPolicyType aContentPolicyType)
+  {
+    mRequest->SetContentPolicyType(aContentPolicyType);
+  }
+
+  void
+  GetReferrer(nsAString& aReferrer) const
+  {
+    mRequest->GetReferrer(aReferrer);
   }
 
   InternalHeaders*
@@ -89,7 +110,7 @@ public:
   GetBody(nsIInputStream** aStream) { return mRequest->GetBody(aStream); }
 
   static already_AddRefed<Request>
-  Constructor(const GlobalObject& aGlobal, const RequestOrScalarValueString& aInput,
+  Constructor(const GlobalObject& aGlobal, const RequestOrUSVString& aInput,
               const RequestInit& aInit, ErrorResult& rv);
 
   nsIGlobalObject* GetParentObject() const
@@ -98,7 +119,7 @@ public:
   }
 
   already_AddRefed<Request>
-  Clone() const;
+  Clone(ErrorResult& aRv) const;
 
   already_AddRefed<InternalRequest>
   GetInternalRequest();

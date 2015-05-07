@@ -5,19 +5,22 @@
 
 package org.mozilla.gecko;
 
-import org.mozilla.gecko.db.BrowserDB;
-import org.mozilla.gecko.gfx.LayerView;
-import org.mozilla.gecko.mozglue.GeckoLoader;
-import org.mozilla.gecko.util.Clipboard;
-import org.mozilla.gecko.util.HardwareUtils;
-import org.mozilla.gecko.util.GeckoEventListener;
-import org.mozilla.gecko.util.ThreadUtils;
-import org.mozilla.gecko.util.EventCallback;
-import org.mozilla.gecko.util.NativeEventListener;
-import org.mozilla.gecko.util.NativeJSObject;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Set;
 
 import org.json.JSONException;
 import org.json.JSONObject;
+import org.mozilla.gecko.gfx.LayerView;
+import org.mozilla.gecko.mozglue.GeckoLoader;
+import org.mozilla.gecko.util.Clipboard;
+import org.mozilla.gecko.util.EventCallback;
+import org.mozilla.gecko.util.GeckoEventListener;
+import org.mozilla.gecko.util.HardwareUtils;
+import org.mozilla.gecko.util.NativeEventListener;
+import org.mozilla.gecko.util.NativeJSObject;
+import org.mozilla.gecko.util.ThreadUtils;
 
 import android.app.Activity;
 import android.content.Context;
@@ -25,15 +28,9 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.res.TypedArray;
 import android.os.Bundle;
-import android.os.Handler;
 import android.util.AttributeSet;
 import android.util.Log;
 import android.view.View;
-
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.Set;
 
 public class GeckoView extends LayerView
     implements ContextGetter {
@@ -122,6 +119,13 @@ public class GeckoView extends LayerView
     }
 
     private void init(Context context, String url, boolean doInit) {
+        // Perform common initialization for Fennec/GeckoView.
+        GeckoAppShell.setLayerView(this);
+
+        initializeView(EventDispatcher.getInstance());
+        GeckoAppShell.sendEventToGecko(GeckoEvent.createObjectEvent(
+                GeckoEvent.ACTION_OBJECT_LAYER_CLIENT, getLayerClientObject()));
+
         // TODO: Fennec currently takes care of its own initialization, so this
         // flag is a hack used in Fennec to prevent GeckoView initialization.
         // This should go away once Fennec also uses GeckoView for
@@ -149,14 +153,17 @@ public class GeckoView extends LayerView
             // If you want to use GeckoNetworkManager, start it.
 
             GeckoLoader.loadMozGlue(context);
-            BrowserDB.setEnableContentProviders(false);
+
+            final GeckoProfile profile = GeckoProfile.get(context);
          }
 
         if (url != null) {
-            GeckoThread.setUri(url);
-            GeckoThread.setAction(Intent.ACTION_VIEW);
+            GeckoThread.ensureInit(null, Intent.ACTION_VIEW, url);
             GeckoAppShell.sendEventToGecko(GeckoEvent.createURILoadEvent(url));
+        } else {
+            GeckoThread.ensureInit(null, null, null);
         }
+
         GeckoAppShell.setContextGetter(this);
         if (context instanceof Activity) {
             Tabs tabs = Tabs.getInstance();
@@ -178,18 +185,11 @@ public class GeckoView extends LayerView
             "Accessibility:Ready",
             "GeckoView:Message");
 
-        initializeView(EventDispatcher.getInstance());
-
-        if (GeckoThread.checkAndSetLaunchState(GeckoThread.LaunchState.Launching, GeckoThread.LaunchState.Launched)) {
+        if (GeckoThread.launch()) {
             // This is the first launch, so finish initialization and go.
             GeckoProfile profile = GeckoProfile.get(context).forceCreate();
-            BrowserDB.initialize(profile.getName());
 
-            GeckoAppShell.setLayerView(this);
-            GeckoAppShell.sendEventToGecko(GeckoEvent.createObjectEvent(
-                GeckoEvent.ACTION_OBJECT_LAYER_CLIENT, getLayerClientObject()));
-            GeckoThread.createAndStart();
-        } else if(GeckoThread.checkLaunchState(GeckoThread.LaunchState.GeckoRunning)) {
+        } else if (GeckoThread.checkLaunchState(GeckoThread.LaunchState.GeckoRunning)) {
             // If Gecko is already running, that means the Activity was
             // destroyed, so we need to re-attach Gecko to this GeckoView.
             connectToGecko();
@@ -265,12 +265,14 @@ public class GeckoView extends LayerView
     }
 
     private void connectToGecko() {
-        GeckoThread.setLaunchState(GeckoThread.LaunchState.GeckoRunning);
         Tab selectedTab = Tabs.getInstance().getSelectedTab();
-        if (selectedTab != null)
+        if (selectedTab != null) {
             Tabs.getInstance().notifyListeners(selectedTab, Tabs.TabEvents.SELECTED);
+        }
+
         geckoConnected();
-        GeckoAppShell.sendEventToGecko(GeckoEvent.createBroadcastEvent("Viewport:Flush", null));
+        GeckoAppShell.sendEventToGecko(
+                GeckoEvent.createBroadcastEvent("Viewport:Flush", null));
     }
 
     private void handleReady(final JSONObject message) {

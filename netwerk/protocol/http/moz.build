@@ -24,6 +24,7 @@ EXPORTS += [
     'nsHttp.h',
     'nsHttpAtomList.h',
     'nsHttpHeaderArray.h',
+    'nsHttpRequestHead.h',
     'nsHttpResponseHead.h',
 ]
 
@@ -32,6 +33,7 @@ EXPORTS.mozilla.net += [
     'HttpChannelChild.h',
     'HttpChannelParent.h',
     'HttpInfo.h',
+    'NullHttpChannel.h',
     'PHttpChannelParams.h',
     'PSpdyPush.h',
     'TimingStruct.h',
@@ -74,12 +76,10 @@ UNIFIED_SOURCES += [
     'nsHttpRequestHead.cpp',
     'nsHttpResponseHead.cpp',
     'nsHttpTransaction.cpp',
+    'NullHttpChannel.cpp',
     'NullHttpTransaction.cpp',
-    'SpdyPush3.cpp',
     'SpdyPush31.cpp',
-    'SpdySession3.cpp',
     'SpdySession31.cpp',
-    'SpdyStream3.cpp',
     'SpdyStream31.cpp',
     'SpdyZlibReporter.cpp',
     'TunnelUtils.cpp',
@@ -101,13 +101,11 @@ EXTRA_JS_MODULES += [
 
 FAIL_ON_WARNINGS = True
 
-MSVC_ENABLE_PGO = True
-
 include('/ipc/chromium/chromium-config.mozbuild')
 
 FINAL_LIBRARY = 'xul'
 
 LOCAL_INCLUDES += [
-    '../../base/src',
     '/dom/base',
+    '/netwerk/base',
 ]

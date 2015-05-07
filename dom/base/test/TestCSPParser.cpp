@@ -1,3 +1,5 @@
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -278,9 +280,9 @@ nsresult TestIgnoreUpperLowerCasePolicies() {
   return runTestSuite(policies, policyCount, 1);
 }
 
-// ============================= TestIgnorePaths ========================
+// ============================= TestPaths ========================
 
-nsresult TestIgnorePaths() {
+nsresult TestPaths() {
 
   static const PolicyTest policies[] =
   {
@@ -360,6 +362,16 @@ nsresult TestIgnorePaths() {
       "report-uri http://www.example.com:8888/path_1/path_2/report.sjs&301" },
     { "report-uri /examplepath",
       "report-uri http://www.selfuri.com/examplepath" },
+    { "connect-src http://www.example.com/foo%3Bsessionid=12%2C34",
+      "connect-src http://www.example.com/foo;sessionid=12,34" },
+    { "connect-src http://www.example.com/foo%3bsessionid=12%2c34",
+      "connect-src http://www.example.com/foo;sessionid=12,34" },
+    { "connect-src http://test.com/pathIncludingAz19-._~!$&'()*+=:@",
+      "connect-src http://test.com/pathIncludingAz19-._~!$&'()*+=:@" },
+    { "script-src http://www.example.com:88/.js",
+      "script-src http://www.example.com:88/.js" },
+    { "script-src https://foo.com/_abc/abc_/_/_a_b_c_",
+      "script-src https://foo.com/_abc/abc_/_/_a_b_c_" }
   };
 
   uint32_t policyCount = sizeof(policies) / sizeof(PolicyTest);
@@ -484,13 +496,15 @@ nsresult TestPoliciesWithInvalidSrc() {
       "script-src 'none'" },
     { "script-src http://www.example.com:88//path-1",
       "script-src 'none'" },
-    { "script-src http://www.example.com:88/.js",
-      "script-src 'none'" },
     { "script-src http://www.example.com:88.js",
       "script-src 'none'" },
     { "script-src http://www.example.com:*.js",
       "script-src 'none'" },
     { "script-src http://www.example.com:*.",
+      "script-src 'none'" },
+    { "connect-src http://www.example.com/foo%zz;",
+      "connect-src 'none'" },
+    { "script-src https://foo.com/%$",
       "script-src 'none'" },
   };
 
@@ -1083,7 +1097,7 @@ int main(int argc, char** argv) {
   if (NS_FAILED(TestDirectives()))                           { return 1; }
   if (NS_FAILED(TestKeywords()))                             { return 1; }
   if (NS_FAILED(TestIgnoreUpperLowerCasePolicies()))         { return 1; }
-  if (NS_FAILED(TestIgnorePaths()))                          { return 1; }
+  if (NS_FAILED(TestPaths()))                                { return 1; }
   if (NS_FAILED(TestSimplePolicies()))                       { return 1; }
   if (NS_FAILED(TestPoliciesWithInvalidSrc()))               { return 1; }
   if (NS_FAILED(TestBadPolicies()))                          { return 1; }

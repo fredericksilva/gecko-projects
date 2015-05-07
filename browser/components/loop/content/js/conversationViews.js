@@ -11,14 +11,23 @@ loop.conversationViews = (function(mozL10n) {
 
   var CALL_STATES = loop.store.CALL_STATES;
   var CALL_TYPES = loop.shared.utils.CALL_TYPES;
+  var FAILURE_DETAILS = loop.shared.utils.FAILURE_DETAILS;
+  var REST_ERRNOS = loop.shared.utils.REST_ERRNOS;
+  var WEBSOCKET_REASONS = loop.shared.utils.WEBSOCKET_REASONS;
   var sharedActions = loop.shared.actions;
   var sharedUtils = loop.shared.utils;
   var sharedViews = loop.shared.views;
   var sharedMixins = loop.shared.mixins;
+  var sharedModels = loop.shared.models;
 
   // This duplicates a similar function in contacts.jsx that isn't used in the
   // conversation window. If we get too many of these, we might want to consider
   // finding a logical place for them to be shared.
+
+  // XXXdmose this code is already out of sync with the code in contacts.jsx
+  // which, unlike this code, now has unit tests.  We should totally do the
+  // above.
+
   function _getPreferredEmail(contact) {
     // A contact may not contain email addresses, but only a phone number.
     if (!contact.email || contact.email.length === 0) {
@@ -27,11 +36,18 @@ loop.conversationViews = (function(mozL10n) {
     return contact.email.find(e => e.pref) || contact.email[0];
   }
 
+  function _getContactDisplayName(contact) {
+    if (contact.name && contact.name[0]) {
+      return contact.name[0];
+    }
+    return _getPreferredEmail(contact).value;
+  }
+
   /**
    * Displays information about the call
    * Caller avatar, name & conversation creation date
    */
-  var CallIdentifierView = React.createClass({displayName: 'CallIdentifierView',
+  var CallIdentifierView = React.createClass({displayName: "CallIdentifierView",
     propTypes: {
       peerIdentifier: React.PropTypes.string,
       showIcons: React.PropTypes.bool.isRequired,
@@ -75,16 +91,16 @@ loop.conversationViews = (function(mozL10n) {
       });
 
       return (
-        React.DOM.div({className: "fx-embedded-call-identifier"}, 
-          React.DOM.div({className: "fx-embedded-call-identifier-avatar fx-embedded-call-identifier-item"}), 
-          React.DOM.div({className: "fx-embedded-call-identifier-info fx-embedded-call-identifier-item"}, 
-            React.DOM.div({className: "fx-embedded-call-identifier-text overflow-text-ellipsis"}, 
+        React.createElement("div", {className: "fx-embedded-call-identifier"}, 
+          React.createElement("div", {className: "fx-embedded-call-identifier-avatar fx-embedded-call-identifier-item"}), 
+          React.createElement("div", {className: "fx-embedded-call-identifier-info fx-embedded-call-identifier-item"}, 
+            React.createElement("div", {className: "fx-embedded-call-identifier-text overflow-text-ellipsis"}, 
               this.props.peerIdentifier
             ), 
-            React.DOM.div({className: callDetailClasses}, 
-              React.DOM.span({className: "fx-embedded-tiny-audio-icon"}), 
-              React.DOM.span({className: iconVideoClasses}), 
-              React.DOM.span({className: "fx-embedded-conversation-timestamp"}, 
+            React.createElement("div", {className: callDetailClasses}, 
+              React.createElement("span", {className: "fx-embedded-tiny-audio-icon"}), 
+              React.createElement("span", {className: iconVideoClasses}), 
+              React.createElement("span", {className: "fx-embedded-conversation-timestamp"}, 
                 this.formatCreationDate()
               )
             )
@@ -101,29 +117,240 @@ loop.conversationViews = (function(mozL10n) {
    * Allows the view to be extended with different buttons and progress
    * via children properties.
    */
-  var ConversationDetailView = React.createClass({displayName: 'ConversationDetailView',
+  var ConversationDetailView = React.createClass({displayName: "ConversationDetailView",
     propTypes: {
       contact: React.PropTypes.object
     },
 
     render: function() {
-      var contactName;
-
-      if (this.props.contact.name &&
-          this.props.contact.name[0]) {
-        contactName = this.props.contact.name[0];
-      } else {
-        contactName = _getPreferredEmail(this.props.contact).value;
-      }
-
-      document.title = contactName;
+      var contactName = _getContactDisplayName(this.props.contact);
 
       return (
-        React.DOM.div({className: "call-window"}, 
-          CallIdentifierView({
+        React.createElement("div", {className: "call-window"}, 
+          React.createElement(CallIdentifierView, {
             peerIdentifier: contactName, 
             showIcons: false}), 
-          React.DOM.div(null, this.props.children)
+          React.createElement("div", null, this.props.children)
+        )
+      );
+    }
+  });
+
+  // Matches strings of the form "<nonspaces>@<nonspaces>" or "+<digits>"
+  var EMAIL_OR_PHONE_RE = /^(:?\S+@\S+|\+\d+)$/;
+
+  var AcceptCallView = React.createClass({displayName: "AcceptCallView",
+    mixins: [sharedMixins.DropdownMenuMixin],
+
+    propTypes: {
+      callType: React.PropTypes.string.isRequired,
+      callerId: React.PropTypes.string.isRequired,
+      dispatcher: React.PropTypes.instanceOf(loop.Dispatcher).isRequired,
+      mozLoop: React.PropTypes.object.isRequired,
+      // Only for use by the ui-showcase
+      showMenu: React.PropTypes.bool
+    },
+
+    getDefaultProps: function() {
+      return {
+        showMenu: false
+      };
+    },
+
+    componentDidMount: function() {
+      this.props.mozLoop.startAlerting();
+    },
+
+    componentWillUnmount: function() {
+      this.props.mozLoop.stopAlerting();
+    },
+
+    clickHandler: function(e) {
+      var target = e.target;
+      if (!target.classList.contains('btn-chevron')) {
+        this._hideDeclineMenu();
+      }
+    },
+
+    _handleAccept: function(callType) {
+      return function() {
+        this.props.dispatcher.dispatch(new sharedActions.AcceptCall({
+          callType: callType
+        }));
+      }.bind(this);
+    },
+
+    _handleDecline: function() {
+      this.props.dispatcher.dispatch(new sharedActions.DeclineCall({
+        blockCaller: false
+      }));
+    },
+
+    _handleDeclineBlock: function(e) {
+      this.props.dispatcher.dispatch(new sharedActions.DeclineCall({
+        blockCaller: true
+      }));
+
+      /* Prevent event propagation
+       * stop the click from reaching parent element */
+      return false;
+    },
+
+    /*
+     * Generate props for <AcceptCallButton> component based on
+     * incoming call type. An incoming video call will render a video
+     * answer button primarily, an audio call will flip them.
+     **/
+    _answerModeProps: function() {
+      var videoButton = {
+        handler: this._handleAccept(CALL_TYPES.AUDIO_VIDEO),
+        className: "fx-embedded-btn-icon-video",
+        tooltip: "incoming_call_accept_audio_video_tooltip"
+      };
+      var audioButton = {
+        handler: this._handleAccept(CALL_TYPES.AUDIO_ONLY),
+        className: "fx-embedded-btn-audio-small",
+        tooltip: "incoming_call_accept_audio_only_tooltip"
+      };
+      var props = {};
+      props.primary = videoButton;
+      props.secondary = audioButton;
+
+      // When video is not enabled on this call, we swap the buttons around.
+      if (this.props.callType === CALL_TYPES.AUDIO_ONLY) {
+        audioButton.className = "fx-embedded-btn-icon-audio";
+        videoButton.className = "fx-embedded-btn-video-small";
+        props.primary = audioButton;
+        props.secondary = videoButton;
+      }
+
+      return props;
+    },
+
+    render: function() {
+      var dropdownMenuClassesDecline = React.addons.classSet({
+        "native-dropdown-menu": true,
+        "conversation-window-dropdown": true,
+        "visually-hidden": !this.state.showMenu
+      });
+
+      return (
+        React.createElement("div", {className: "call-window"}, 
+          React.createElement(CallIdentifierView, {video: this.props.callType === CALL_TYPES.AUDIO_VIDEO, 
+            peerIdentifier: this.props.callerId, 
+            showIcons: true}), 
+
+          React.createElement("div", {className: "btn-group call-action-group"}, 
+
+            React.createElement("div", {className: "fx-embedded-call-button-spacer"}), 
+
+            React.createElement("div", {className: "btn-chevron-menu-group"}, 
+              React.createElement("div", {className: "btn-group-chevron"}, 
+                React.createElement("div", {className: "btn-group"}, 
+
+                  React.createElement("button", {className: "btn btn-decline", 
+                          onClick: this._handleDecline}, 
+                    mozL10n.get("incoming_call_cancel_button")
+                  ), 
+                  React.createElement("div", {className: "btn-chevron", 
+                       onClick: this.toggleDropdownMenu, 
+                       ref: "menu-button"})
+                ), 
+
+                React.createElement("ul", {className: dropdownMenuClassesDecline}, 
+                  React.createElement("li", {className: "btn-block", onClick: this._handleDeclineBlock}, 
+                    mozL10n.get("incoming_call_cancel_and_block_button")
+                  )
+                )
+
+              )
+            ), 
+
+            React.createElement("div", {className: "fx-embedded-call-button-spacer"}), 
+
+            React.createElement(AcceptCallButton, {mode: this._answerModeProps()}), 
+
+            React.createElement("div", {className: "fx-embedded-call-button-spacer"})
+
+          )
+        )
+      );
+    }
+  });
+
+  /**
+   * Incoming call view accept button, renders different primary actions
+   * (answer with video / with audio only) based on the props received
+   **/
+  var AcceptCallButton = React.createClass({displayName: "AcceptCallButton",
+
+    propTypes: {
+      mode: React.PropTypes.object.isRequired
+    },
+
+    render: function() {
+      var mode = this.props.mode;
+      return (
+        React.createElement("div", {className: "btn-chevron-menu-group"}, 
+          React.createElement("div", {className: "btn-group"}, 
+            React.createElement("button", {className: "btn btn-accept", 
+                    onClick: mode.primary.handler, 
+                    title: mozL10n.get(mode.primary.tooltip)}, 
+              React.createElement("span", {className: "fx-embedded-answer-btn-text"}, 
+                mozL10n.get("incoming_call_accept_button")
+              ), 
+              React.createElement("span", {className: mode.primary.className})
+            ), 
+            React.createElement("div", {className: mode.secondary.className, 
+                 onClick: mode.secondary.handler, 
+                 title: mozL10n.get(mode.secondary.tooltip)}
+            )
+          )
+        )
+      );
+    }
+  });
+
+  /**
+   * Something went wrong view. Displayed when there's a big problem.
+   */
+  var GenericFailureView = React.createClass({displayName: "GenericFailureView",
+    mixins: [
+      sharedMixins.AudioMixin,
+      sharedMixins.DocumentTitleMixin
+    ],
+
+    propTypes: {
+      cancelCall: React.PropTypes.func.isRequired,
+      failureReason: React.PropTypes.string
+    },
+
+    componentDidMount: function() {
+      this.play("failure");
+    },
+
+    render: function() {
+      this.setTitle(mozL10n.get("generic_failure_title"));
+
+      var errorString;
+      switch (this.props.failureReason) {
+        case FAILURE_DETAILS.UNABLE_TO_PUBLISH_MEDIA:
+          errorString = mozL10n.get("no_media_failure_message");
+          break;
+        default:
+          errorString = mozL10n.get("generic_failure_title");
+      }
+
+      return (
+        React.createElement("div", {className: "call-window"}, 
+          React.createElement("h2", null, errorString), 
+
+          React.createElement("div", {className: "btn-group call-action-group"}, 
+            React.createElement("button", {className: "btn btn-cancel", 
+                    onClick: this.props.cancelCall}, 
+              mozL10n.get("cancel_button")
+            )
+          )
         )
       );
     }
@@ -133,7 +360,7 @@ loop.conversationViews = (function(mozL10n) {
    * View for pending conversations. Displays a cancel button and appropriate
    * pending/ringing strings.
    */
-  var PendingConversationView = React.createClass({displayName: 'PendingConversationView',
+  var PendingConversationView = React.createClass({displayName: "PendingConversationView",
     mixins: [sharedMixins.AudioMixin],
 
     propTypes: {
@@ -173,12 +400,12 @@ loop.conversationViews = (function(mozL10n) {
       });
 
       return (
-        ConversationDetailView({contact: this.props.contact}, 
+        React.createElement(ConversationDetailView, {contact: this.props.contact}, 
 
-          React.DOM.p({className: "btn-label"}, pendingStateString), 
+          React.createElement("p", {className: "btn-label"}, pendingStateString), 
 
-          React.DOM.div({className: "btn-group call-action-group"}, 
-            React.DOM.button({className: btnCancelStyles, 
+          React.createElement("div", {className: "btn-group call-action-group"}, 
+            React.createElement("button", {className: btnCancelStyles, 
                     onClick: this.cancelCall}, 
               mozL10n.get("initiate_call_cancel_button")
             )
@@ -192,16 +419,20 @@ loop.conversationViews = (function(mozL10n) {
   /**
    * Call failed view. Displayed when a call fails.
    */
-  var CallFailedView = React.createClass({displayName: 'CallFailedView',
-    mixins: [Backbone.Events, sharedMixins.AudioMixin],
+  var CallFailedView = React.createClass({displayName: "CallFailedView",
+    mixins: [
+      Backbone.Events,
+      loop.store.StoreMixin("conversationStore"),
+      sharedMixins.AudioMixin,
+      sharedMixins.WindowCloseMixin
+    ],
 
     propTypes: {
       dispatcher: React.PropTypes.instanceOf(loop.Dispatcher).isRequired,
-      store: React.PropTypes.instanceOf(
-        loop.store.ConversationStore).isRequired,
       contact: React.PropTypes.object.isRequired,
       // This is used by the UI showcase.
       emailLinkError: React.PropTypes.bool,
+      outgoing: React.PropTypes.bool.isRequired
     },
 
     getInitialState: function() {
@@ -213,21 +444,21 @@ loop.conversationViews = (function(mozL10n) {
 
     componentDidMount: function() {
       this.play("failure");
-      this.listenTo(this.props.store, "change:emailLink",
+      this.listenTo(this.getStore(), "change:emailLink",
                     this._onEmailLinkReceived);
-      this.listenTo(this.props.store, "error:emailLink",
+      this.listenTo(this.getStore(), "error:emailLink",
                     this._onEmailLinkError);
     },
 
     componentWillUnmount: function() {
-      this.stopListening(this.props.store);
+      this.stopListening(this.getStore());
     },
 
     _onEmailLinkReceived: function() {
-      var emailLink = this.props.store.get("emailLink");
+      var emailLink = this.getStoreState().emailLink;
       var contactEmail = _getPreferredEmail(this.props.contact).value;
       sharedUtils.composeCallUrlEmail(emailLink, contactEmail);
-      window.close();
+      this.closeWindow();
     },
 
     _onEmailLinkError: function() {
@@ -241,7 +472,27 @@ loop.conversationViews = (function(mozL10n) {
       if (!this.state.emailLinkError) {
         return;
       }
-      return React.DOM.p({className: "error"}, mozL10n.get("unable_retrieve_url"));
+      return React.createElement("p", {className: "error"}, mozL10n.get("unable_retrieve_url"));
+    },
+
+    _getTitleMessage: function() {
+      switch (this.getStoreState().callStateReason) {
+        case WEBSOCKET_REASONS.REJECT:
+        case WEBSOCKET_REASONS.BUSY:
+        case REST_ERRNOS.USER_UNAVAILABLE:
+          var contactDisplayName = _getContactDisplayName(this.props.contact);
+          if (contactDisplayName.length) {
+            return mozL10n.get(
+              "contact_unavailable_title",
+              {"contactName": contactDisplayName});
+          }
+
+          return mozL10n.get("generic_contact_unavailable_title");
+        case FAILURE_DETAILS.UNABLE_TO_PUBLISH_MEDIA:
+          return mozL10n.get("no_media_failure_message");
+        default:
+          return mozL10n.get("generic_failure_title");
+      }
     },
 
     retryCall: function() {
@@ -258,31 +509,56 @@ loop.conversationViews = (function(mozL10n) {
         emailLinkButtonDisabled: true
       });
 
-      this.props.dispatcher.dispatch(new sharedActions.FetchEmailLink());
+      this.props.dispatcher.dispatch(new sharedActions.FetchRoomEmailLink({
+        roomOwner: navigator.mozLoop.userProfile.email,
+        roomName: _getContactDisplayName(this.props.contact)
+      }));
+    },
+
+    _renderMessage: function() {
+      if (this.props.outgoing) {
+        return  (React.createElement("p", {className: "btn-label"}, mozL10n.get("generic_failure_with_reason2")));
+      }
+
+      return null;
     },
 
     render: function() {
+      var cx = React.addons.classSet;
+
+      var retryClasses = cx({
+        btn: true,
+        "btn-info": true,
+        "btn-retry": true,
+        hide: !this.props.outgoing
+      });
+      var emailClasses = cx({
+        btn: true,
+        "btn-info": true,
+        "btn-email": true,
+        hide: !this.props.outgoing
+      });
+
       return (
-        React.DOM.div({className: "call-window"}, 
-          React.DOM.h2(null, mozL10n.get("generic_failure_title")), 
+        React.createElement("div", {className: "call-window"}, 
+          React.createElement("h2", null,  this._getTitleMessage() ), 
 
-          React.DOM.p({className: "btn-label"}, mozL10n.get("generic_failure_with_reason2")), 
-
+          this._renderMessage(), 
           this._renderError(), 
 
-          React.DOM.div({className: "btn-group call-action-group"}, 
-            React.DOM.button({className: "btn btn-cancel", 
+          React.createElement("div", {className: "btn-group call-action-group"}, 
+            React.createElement("button", {className: "btn btn-cancel", 
                     onClick: this.cancelCall}, 
               mozL10n.get("cancel_button")
             ), 
-            React.DOM.button({className: "btn btn-info btn-retry", 
+            React.createElement("button", {className: retryClasses, 
                     onClick: this.retryCall}, 
               mozL10n.get("retry_call_button")
             ), 
-            React.DOM.button({className: "btn btn-info btn-email", 
+            React.createElement("button", {className: emailClasses, 
                     onClick: this.emailLink, 
                     disabled: this.state.emailLinkButtonDisabled}, 
-              mozL10n.get("share_button2")
+              mozL10n.get("share_button3")
             )
           )
         )
@@ -290,7 +566,11 @@ loop.conversationViews = (function(mozL10n) {
     }
   });
 
-  var OngoingConversationView = React.createClass({displayName: 'OngoingConversationView',
+  var OngoingConversationView = React.createClass({displayName: "OngoingConversationView",
+    mixins: [
+      sharedMixins.MediaSetupMixin
+    ],
+
     propTypes: {
       dispatcher: React.PropTypes.instanceOf(loop.Dispatcher).isRequired,
       video: React.PropTypes.object,
@@ -305,73 +585,16 @@ loop.conversationViews = (function(mozL10n) {
     },
 
     componentDidMount: function() {
-      /**
-       * OT inserts inline styles into the markup. Using a listener for
-       * resize events helps us trigger a full width/height on the element
-       * so that they update to the correct dimensions.
-       * XXX: this should be factored as a mixin.
-       */
-      window.addEventListener('orientationchange', this.updateVideoContainer);
-      window.addEventListener('resize', this.updateVideoContainer);
-
       // The SDK needs to know about the configuration and the elements to use
       // for display. So the best way seems to pass the information here - ideally
       // the sdk wouldn't need to know this, but we can't change that.
       this.props.dispatcher.dispatch(new sharedActions.SetupStreamElements({
-        publisherConfig: this._getPublisherConfig(),
+        publisherConfig: this.getDefaultPublisherConfig({
+          publishVideo: this.props.video.enabled
+        }),
         getLocalElementFunc: this._getElement.bind(this, ".local"),
         getRemoteElementFunc: this._getElement.bind(this, ".remote")
       }));
-    },
-
-    componentWillUnmount: function() {
-      window.removeEventListener('orientationchange', this.updateVideoContainer);
-      window.removeEventListener('resize', this.updateVideoContainer);
-    },
-
-    /**
-     * Returns either the required DOMNode
-     *
-     * @param {String} className The name of the class to get the element for.
-     */
-    _getElement: function(className) {
-      return this.getDOMNode().querySelector(className);
-    },
-
-    /**
-     * Returns the required configuration for publishing video on the sdk.
-     */
-    _getPublisherConfig: function() {
-      // height set to 100%" to fix video layout on Google Chrome
-      // @see https://bugzilla.mozilla.org/show_bug.cgi?id=1020445
-      return {
-        insertMode: "append",
-        width: "100%",
-        height: "100%",
-        publishVideo: this.props.video.enabled,
-        style: {
-          audioLevelDisplayMode: "off",
-          bugDisplayMode: "off",
-          buttonDisplayMode: "off",
-          nameDisplayMode: "off",
-          videoDisabledDisplayMode: "off"
-        }
-      }
-    },
-
-    /**
-     * Used to update the video container whenever the orientation or size of the
-     * display area changes.
-     */
-    updateVideoContainer: function() {
-      var localStreamParent = this._getElement('.local .OT_publisher');
-      var remoteStreamParent = this._getElement('.remote .OT_subscriber');
-      if (localStreamParent) {
-        localStreamParent.style.width = "100%";
-      }
-      if (remoteStreamParent) {
-        remoteStreamParent.style.height = "100%";
-      }
     },
 
     /**
@@ -404,15 +627,15 @@ loop.conversationViews = (function(mozL10n) {
       });
 
       return (
-        React.DOM.div({className: "video-layout-wrapper"}, 
-          React.DOM.div({className: "conversation"}, 
-            React.DOM.div({className: "media nested"}, 
-              React.DOM.div({className: "video_wrapper remote_wrapper"}, 
-                React.DOM.div({className: "video_inner remote"})
+        React.createElement("div", {className: "video-layout-wrapper"}, 
+          React.createElement("div", {className: "conversation"}, 
+            React.createElement("div", {className: "media nested"}, 
+              React.createElement("div", {className: "video_wrapper remote_wrapper"}, 
+                React.createElement("div", {className: "video_inner remote focus-stream"})
               ), 
-              React.DOM.div({className: localStreamClasses})
+              React.createElement("div", {className: localStreamClasses})
             ), 
-            loop.shared.views.ConversationToolbar({
+            React.createElement(loop.shared.views.ConversationToolbar, {
               video: this.props.video, 
               audio: this.props.audio, 
               publishStream: this.publishStream, 
@@ -427,21 +650,21 @@ loop.conversationViews = (function(mozL10n) {
    * Master View Controller for outgoing calls. This manages
    * the different views that need displaying.
    */
-  var OutgoingConversationView = React.createClass({displayName: 'OutgoingConversationView',
+  var CallControllerView = React.createClass({displayName: "CallControllerView",
+    mixins: [
+      sharedMixins.AudioMixin,
+      sharedMixins.DocumentTitleMixin,
+      loop.store.StoreMixin("conversationStore"),
+      Backbone.Events
+    ],
+
     propTypes: {
       dispatcher: React.PropTypes.instanceOf(loop.Dispatcher).isRequired,
-      store: React.PropTypes.instanceOf(
-        loop.store.ConversationStore).isRequired
+      mozLoop: React.PropTypes.object.isRequired
     },
 
     getInitialState: function() {
-      return this.props.store.attributes;
-    },
-
-    componentWillMount: function() {
-      this.props.store.on("change", function() {
-        this.setState(this.props.store.attributes);
-      }, this);
+      return this.getStoreState();
     },
 
     _closeWindow: function() {
@@ -460,44 +683,66 @@ loop.conversationViews = (function(mozL10n) {
      * Used to setup and render the feedback view.
      */
     _renderFeedbackView: function() {
-      document.title = mozL10n.get("conversation_has_ended");
-
-      // XXX Bug 1076754 Feedback view should be redone in the Flux style.
-      var feebackAPIBaseUrl = navigator.mozLoop.getLoopCharPref(
-        "feedback.baseUrl");
-
-      var appVersionInfo = navigator.mozLoop.appVersionInfo;
-
-      var feedbackClient = new loop.FeedbackAPIClient(feebackAPIBaseUrl, {
-        product: navigator.mozLoop.getLoopCharPref("feedback.product"),
-        platform: appVersionInfo.OS,
-        channel: appVersionInfo.channel,
-        version: appVersionInfo.version
-      });
+      this.setTitle(mozL10n.get("conversation_has_ended"));
 
       return (
-        sharedViews.FeedbackView({
-          feedbackApiClient: feedbackClient, 
+        React.createElement(sharedViews.FeedbackView, {
           onAfterFeedbackReceived: this._closeWindow.bind(this)}
         )
       );
     },
 
+    _renderViewFromCallType: function() {
+      // For outgoing calls we can display the pending conversation view
+      // for any state that render() doesn't manage.
+      if (this.state.outgoing) {
+        return (React.createElement(PendingConversationView, {
+          dispatcher: this.props.dispatcher, 
+          callState: this.state.callState, 
+          contact: this.state.contact, 
+          enableCancelButton: this._isCancellable()}
+        ));
+      }
+
+      // For incoming calls that are in accepting state, display the
+      // accept call view.
+      if (this.state.callState === CALL_STATES.ALERTING) {
+        return (React.createElement(AcceptCallView, {
+          callType: this.state.callType, 
+          callerId: this.state.callerId, 
+          dispatcher: this.props.dispatcher, 
+          mozLoop: this.props.mozLoop}
+        ));
+      }
+
+      // Otherwise we're still gathering or connecting, so
+      // don't display anything.
+      return null;
+    },
+
     render: function() {
+      // Set the default title to the contact name or the callerId, note
+      // that views may override this, e.g. the feedback view.
+      if (this.state.contact) {
+        this.setTitle(_getContactDisplayName(this.state.contact));
+      } else {
+        this.setTitle(this.state.callerId || "");
+      }
+
       switch (this.state.callState) {
         case CALL_STATES.CLOSE: {
           this._closeWindow();
           return null;
         }
         case CALL_STATES.TERMINATED: {
-          return (CallFailedView({
+          return (React.createElement(CallFailedView, {
             dispatcher: this.props.dispatcher, 
-            store: this.props.store, 
-            contact: this.state.contact}
+            contact: this.state.contact, 
+            outgoing: this.state.outgoing}
           ));
         }
         case CALL_STATES.ONGOING: {
-          return (OngoingConversationView({
+          return (React.createElement(OngoingConversationView, {
             dispatcher: this.props.dispatcher, 
             video: {enabled: !this.state.videoMuted}, 
             audio: {enabled: !this.state.audioMuted}}
@@ -505,6 +750,7 @@ loop.conversationViews = (function(mozL10n) {
           );
         }
         case CALL_STATES.FINISHED: {
+          this.play("terminated");
           return this._renderFeedbackView();
         }
         case CALL_STATES.INIT: {
@@ -512,15 +758,10 @@ loop.conversationViews = (function(mozL10n) {
           return null;
         }
         default: {
-          return (PendingConversationView({
-            dispatcher: this.props.dispatcher, 
-            callState: this.state.callState, 
-            contact: this.state.contact, 
-            enableCancelButton: this._isCancellable()}
-          ));
+          return this._renderViewFromCallType();
         }
       }
-    },
+    }
   });
 
   return {
@@ -528,8 +769,11 @@ loop.conversationViews = (function(mozL10n) {
     CallIdentifierView: CallIdentifierView,
     ConversationDetailView: ConversationDetailView,
     CallFailedView: CallFailedView,
+    _getContactDisplayName: _getContactDisplayName,
+    GenericFailureView: GenericFailureView,
+    AcceptCallView: AcceptCallView,
     OngoingConversationView: OngoingConversationView,
-    OutgoingConversationView: OutgoingConversationView
+    CallControllerView: CallControllerView
   };
 
 })(document.mozL10n || navigator.mozL10n);

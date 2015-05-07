@@ -18,12 +18,14 @@
 #include "jerror.h"
 
 #include "gfxPlatform.h"
+#include "mozilla/Endian.h"
+#include "mozilla/Telemetry.h"
 
 extern "C" {
 #include "iccjpeg.h"
 }
 
-#if defined(IS_BIG_ENDIAN)
+#if MOZ_BIG_ENDIAN
 #define MOZ_JCS_EXT_NATIVE_ENDIAN_XRGB JCS_EXT_XRGB
 #else
 #define MOZ_JCS_EXT_NATIVE_ENDIAN_XRGB JCS_EXT_BGRX
@@ -83,8 +85,7 @@ METHODDEF(void) my_error_exit (j_common_ptr cinfo);
 // Normal JFIF markers can't have more bytes than this.
 #define MAX_JPEG_MARKER_LENGTH  (((uint32_t)1 << 16) - 1)
 
-
-nsJPEGDecoder::nsJPEGDecoder(RasterImage& aImage,
+nsJPEGDecoder::nsJPEGDecoder(RasterImage* aImage,
                              Decoder::DecodeStyle aDecodeStyle)
  : Decoder(aImage)
  , mDecodeStyle(aDecodeStyle)
@@ -139,11 +140,25 @@ nsJPEGDecoder::SpeedHistogram()
   return Telemetry::IMAGE_DECODE_SPEED_JPEG;
 }
 
+nsresult
+nsJPEGDecoder::SetTargetSize(const nsIntSize& aSize)
+{
+  // Make sure the size is reasonable.
+  if (MOZ_UNLIKELY(aSize.width <= 0 || aSize.height <= 0)) {
+    return NS_ERROR_FAILURE;
+  }
+
+  // Create a downscaler that we'll filter our output through.
+  mDownscaler.emplace(aSize);
+
+  return NS_OK;
+}
+
 void
 nsJPEGDecoder::InitInternal()
 {
   mCMSMode = gfxPlatform::GetCMSMode();
-  if ((mDecodeFlags & DECODER_NO_COLORSPACE_CONVERSION) != 0) {
+  if (GetDecodeFlags() & imgIContainer::FLAG_DECODE_NO_COLORSPACE_CONVERSION) {
     mCMSMode = eCMSMode_Off;
   }
 
@@ -174,38 +189,29 @@ nsJPEGDecoder::InitInternal()
   mSourceMgr.term_source = term_source;
 
   // Record app markers for ICC data
-  for (uint32_t m = 0; m < 16; m++)
+  for (uint32_t m = 0; m < 16; m++) {
     jpeg_save_markers(&mInfo, JPEG_APP0 + m, 0xFFFF);
+  }
 }
 
 void
 nsJPEGDecoder::FinishInternal()
 {
-  // If we're not in any sort of error case, flush the decoder.
-  //
-  // XXXbholley - It seems wrong that this should be necessary, but at the
-  // moment I'm just folding the contents of Flush() into Close() so that
-  // we can get rid of it.
-  //
-  // XXX(seth): It'd be great to get rid of this. For now, we treat this as a
-  // write to a synchronous decoder, which means that this must be called only
-  // on the main thread. (That's asserted in Decoder::Finish and
-  // Decoder::FinishSharedDecoder.)
+  // If we're not in any sort of error case, force our state to JPEG_DONE.
   if ((mState != JPEG_DONE && mState != JPEG_SINK_NON_JPEG_TRAILER) &&
       (mState != JPEG_ERROR) &&
       !IsSizeDecode()) {
-    this->Write(nullptr, 0, DECODE_SYNC);
+    mState = JPEG_DONE;
   }
 }
 
 void
-nsJPEGDecoder::WriteInternal(const char* aBuffer, uint32_t aCount,
-                             DecodeStrategy)
+nsJPEGDecoder::WriteInternal(const char* aBuffer, uint32_t aCount)
 {
   mSegment = (const JOCTET*)aBuffer;
   mSegmentLen = aCount;
 
-  NS_ABORT_IF_FALSE(!HasError(), "Shouldn't call WriteInternal after error!");
+  MOZ_ASSERT(!HasError(), "Shouldn't call WriteInternal after error!");
 
   // Return here if there is a fatal error within libjpeg.
   nsresult error_code;
@@ -247,7 +253,7 @@ nsJPEGDecoder::WriteInternal(const char* aBuffer, uint32_t aCount,
         return; // I/O suspension
       }
 
-      int sampleSize = mImage.GetRequestedSampleSize();
+      int sampleSize = mImage->GetRequestedSampleSize();
       if (sampleSize > 0) {
         mInfo.scale_num = 1;
         mInfo.scale_denom = sampleSize;
@@ -387,7 +393,6 @@ nsJPEGDecoder::WriteInternal(const char* aBuffer, uint32_t aCount,
           PR_LOG(GetJPEGDecoderAccountingLog(), PR_LOG_DEBUG,
                  ("} (unknown colorpsace (3))"));
           return;
-          break;
       }
     }
 
@@ -402,6 +407,16 @@ nsJPEGDecoder::WriteInternal(const char* aBuffer, uint32_t aCount,
       PR_LOG(GetJPEGDecoderAccountingLog(), PR_LOG_DEBUG,
              ("} (could not initialize image frame)"));
       return;
+    }
+
+    if (mDownscaler) {
+      nsresult rv = mDownscaler->BeginFrame(GetSize(),
+                                            mImageData,
+                                            /* aHasAlpha = */ false);
+      if (NS_FAILED(rv)) {
+        mState = JPEG_ERROR;
+        return;
+      }
     }
 
     PR_LOG(GetJPEGDecoderAccountingLog(), PR_LOG_DEBUG,
@@ -432,7 +447,6 @@ nsJPEGDecoder::WriteInternal(const char* aBuffer, uint32_t aCount,
              ("} (I/O suspension after jpeg_start_decompress())"));
       return; // I/O suspension
     }
-
 
     // If this is a progressive JPEG ...
     mState = mInfo.buffered_image ?
@@ -522,6 +536,9 @@ nsJPEGDecoder::WriteInternal(const char* aBuffer, uint32_t aCount,
             break;
 
           mInfo.output_scanline = 0;
+          if (mDownscaler) {
+            mDownscaler->ResetForNextProgressivePass();
+          }
         }
       }
 
@@ -554,8 +571,9 @@ nsJPEGDecoder::WriteInternal(const char* aBuffer, uint32_t aCount,
     break;
 
   case JPEG_ERROR:
-    NS_ABORT_IF_FALSE(0, "Should always return immediately after error and"
-                         " not re-enter decoder");
+    MOZ_ASSERT(false,
+               "Should always return immediately after error and not re-enter "
+               "decoder");
   }
 
   PR_LOG(GetJPEGDecoderAccountingLog(), PR_LOG_DEBUG,
@@ -589,7 +607,7 @@ nsJPEGDecoder::ReadOrientationFromEXIF()
 void
 nsJPEGDecoder::NotifyDone()
 {
-  PostFrameStop(FrameBlender::kFrameOpaque);
+  PostFrameStop(Opacity::OPAQUE);
   PostDecodeDone();
 }
 
@@ -601,15 +619,24 @@ nsJPEGDecoder::OutputScanlines(bool* suspend)
   const uint32_t top = mInfo.output_scanline;
 
   while ((mInfo.output_scanline < mInfo.output_height)) {
-      // Use the Cairo image buffer as scanline buffer
-      uint32_t* imageRow = ((uint32_t*)mImageData) +
-                           (mInfo.output_scanline * mInfo.output_width);
+      uint32_t* imageRow = nullptr;
+      if (mDownscaler) {
+        imageRow = reinterpret_cast<uint32_t*>(mDownscaler->RowBuffer());
+      } else {
+        imageRow = reinterpret_cast<uint32_t*>(mImageData) +
+                   (mInfo.output_scanline * mInfo.output_width);
+      }
+
+      MOZ_ASSERT(imageRow, "Should have a row buffer here");
 
       if (mInfo.out_color_space == MOZ_JCS_EXT_NATIVE_ENDIAN_XRGB) {
         // Special case: scanline will be directly converted into packed ARGB
         if (jpeg_read_scanlines(&mInfo, (JSAMPARRAY)&imageRow, 1) != 1) {
           *suspend = true; // suspend
           break;
+        }
+        if (mDownscaler) {
+          mDownscaler->CommitRow();
         }
         continue; // all done for this row!
       }
@@ -686,15 +713,23 @@ nsJPEGDecoder::OutputScanlines(bool* suspend)
                                      sampleRow[2]);
         sampleRow += 3;
       }
+
+      if (mDownscaler) {
+        mDownscaler->CommitRow();
+      }
   }
 
-  if (top != mInfo.output_scanline) {
-      nsIntRect r(0, top, mInfo.output_width, mInfo.output_scanline-top);
-      PostInvalidation(r);
+  if (mDownscaler && mDownscaler->HasInvalidation()) {
+    DownscalerInvalidRect invalidRect = mDownscaler->TakeInvalidRect();
+    PostInvalidation(invalidRect.mOriginalSizeRect,
+                     Some(invalidRect.mTargetSizeRect));
+    MOZ_ASSERT(!mDownscaler->HasInvalidation());
+  } else if (!mDownscaler && top != mInfo.output_scanline) {
+    PostInvalidation(nsIntRect(0, top,
+                               mInfo.output_width,
+                               mInfo.output_scanline - top));
   }
-
 }
-
 
 // Override the standard error method in the IJG JPEG decoder code.
 METHODDEF(void)
@@ -798,7 +833,6 @@ skip_input_data (j_decompress_ptr jd, long num_bytes)
     src->next_input_byte += num_bytes;
   }
 }
-
 
 /******************************************************************************/
 /* data source manager method
@@ -909,8 +943,8 @@ term_source (j_decompress_ptr jd)
 
   // This function shouldn't be called if we ran into an error we didn't
   // recover from.
-  NS_ABORT_IF_FALSE(decoder->mState != JPEG_ERROR,
-                    "Calling term_source on a JPEG with mState == JPEG_ERROR!");
+  MOZ_ASSERT(decoder->mState != JPEG_ERROR,
+             "Calling term_source on a JPEG with mState == JPEG_ERROR!");
 
   // Notify using a helper method to get around protectedness issues.
   decoder->NotifyDone();
@@ -918,7 +952,6 @@ term_source (j_decompress_ptr jd)
 
 } // namespace image
 } // namespace mozilla
-
 
 ///*************** Inverted CMYK -> RGB conversion *************************
 /// Input is (Inverted) CMYK stored as 4 bytes per pixel.

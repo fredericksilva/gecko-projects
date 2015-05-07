@@ -27,9 +27,9 @@ function test() {
         ok(false, "The source editor text shouldn't have changed.");
       });
 
-      is(gSources.selectedValue, TAB_URL,
+      is(getSelectedSourceURL(gSources), TAB_URL,
         "The correct source is currently selected.");
-      ok(gEditor.getText().contains("myFunction"),
+      ok(gEditor.getText().includes("myFunction"),
         "The source shouldn't be pretty printed yet.");
 
       clickPrettyPrintButton();
@@ -45,11 +45,11 @@ function test() {
 
       let text;
       [source, text] = yield gControllerSources.getText(source);
-      is(gSources.selectedValue, TAB_URL,
+      is(getSelectedSourceURL(gSources), TAB_URL,
         "The correct source is still selected.");
-      ok(gEditor.getText().contains("myFunction"),
+      ok(gEditor.getText().includes("myFunction"),
         "The displayed source hasn't changed.");
-      ok(text.contains("myFunction"),
+      ok(text.includes("myFunction"),
         "The cached source text wasn't altered in any way.");
 
       yield closeDebuggerAndFinish(gPanel);
@@ -62,7 +62,10 @@ function clickPrettyPrintButton() {
 }
 
 function prepareDebugger(aPanel) {
-  aPanel._view.Sources.preferredSource = TAB_URL;
+  aPanel._view.Sources.preferredSource = getSourceActor(
+    aPanel.panelWin.DebuggerView.Sources,
+    TAB_URL
+  );
 }
 
 registerCleanupFunction(function() {

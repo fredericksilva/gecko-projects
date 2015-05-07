@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
-/* vim: set sw=4 ts=8 et tw=80 : */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -26,15 +26,17 @@ namespace {
 void
 Error(JSContext* aCx, uint32_t aErrorId)
 {
-  MOZ_ASSERT(NS_IsMainThread());
-  NS_DOMStructuredCloneError(aCx, aErrorId);
+  if (NS_IsMainThread()) {
+    NS_DOMStructuredCloneError(aCx, aErrorId);
+  } else {
+    Throw(aCx, NS_ERROR_DOM_DATA_CLONE_ERR);
+  }
 }
 
 JSObject*
 Read(JSContext* aCx, JSStructuredCloneReader* aReader, uint32_t aTag,
      uint32_t aData, void* aClosure)
 {
-  MOZ_ASSERT(NS_IsMainThread());
   MOZ_ASSERT(aClosure);
 
   StructuredCloneClosure* closure =
@@ -65,7 +67,7 @@ Read(JSContext* aCx, JSStructuredCloneReader* aReader, uint32_t aTag,
       MOZ_ASSERT(global);
 
       nsRefPtr<File> newBlob = new File(global, blob->Impl());
-      if (!WrapNewBindingObject(aCx, newBlob, &val)) {
+      if (!GetOrCreateDOMReflector(aCx, newBlob, &val)) {
         return nullptr;
       }
     }
@@ -80,7 +82,6 @@ bool
 Write(JSContext* aCx, JSStructuredCloneWriter* aWriter,
       JS::Handle<JSObject*> aObj, void* aClosure)
 {
-  MOZ_ASSERT(NS_IsMainThread());
   MOZ_ASSERT(aClosure);
 
   StructuredCloneClosure* closure =
@@ -101,7 +102,7 @@ Write(JSContext* aCx, JSStructuredCloneWriter* aWriter,
   return NS_DOMWriteStructuredClone(aCx, aWriter, aObj, nullptr);
 }
 
-JSStructuredCloneCallbacks gCallbacks = {
+const JSStructuredCloneCallbacks gCallbacks = {
   Read,
   Write,
   Error,

@@ -12,17 +12,17 @@ const LINE_NOS = [5, 8];
 
 waitForExplicitFinish();
 
-let test = asyncTest(function*() {
+add_task(function*() {
   Services.prefs.setBoolPref(MAP_PREF, true);
 
-  let {UI} = yield addTabAndOpenStyleEditors(2, null, TESTCASE_URI);
+  let { ui } = yield openStyleEditorForURL(TESTCASE_URI);
 
-  yield listenForMediaChange(UI);
+  yield listenForMediaChange(ui);
 
-  is(UI.editors.length, 1, "correct number of editors");
+  is(ui.editors.length, 1, "correct number of editors");
 
   // Test editor with @media rules
-  let mediaEditor = UI.editors[0];
+  let mediaEditor = ui.editors[0];
   yield openEditor(mediaEditor);
   testMediaEditor(mediaEditor);
 

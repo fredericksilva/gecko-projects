@@ -63,27 +63,33 @@
 #include <strings.h>    // index
 #include <errno.h>
 #include <stdarg.h>
+#include "prenv.h"
 #include "platform.h"
 #include "GeckoProfiler.h"
 #include "mozilla/Mutex.h"
 #include "mozilla/Atomics.h"
 #include "mozilla/LinuxSignal.h"
+#include "mozilla/TimeStamp.h"
+#include "mozilla/DebugOnly.h"
 #include "ProfileEntry.h"
 #include "nsThreadUtils.h"
 #include "TableTicker.h"
 #include "ThreadResponsiveness.h"
-#include "UnwinderThread2.h"
+
 #if defined(__ARM_EABI__) && defined(MOZ_WIDGET_GONK)
  // Should also work on other Android and ARM Linux, but not tested there yet.
-#define USE_EHABI_STACKWALK
-#include "EHABIStackWalk.h"
+# define USE_EHABI_STACKWALK
+# include "EHABIStackWalk.h"
+#elif defined(SPS_PLAT_amd64_linux) || defined(SPS_PLAT_x86_linux)
+# define USE_LUL_STACKWALK
+# include "LulMain.h"
+# include "platform-linux-lul.h"
 #endif
 
 // Memory profile
 #include "nsMemoryReporterManager.h"
 
 #include <string.h>
-#include <stdio.h>
 #include <list>
 
 #ifdef MOZ_NUWA_PROCESS
@@ -92,12 +98,23 @@
 
 #define SIGNAL_SAVE_PROFILE SIGUSR2
 
-#if defined(__GLIBC__)
-// glibc doesn't implement gettid(2).
-#include <sys/syscall.h>
-pid_t gettid()
+using namespace mozilla;
+
+#if defined(USE_LUL_STACKWALK)
+// A singleton instance of the library.  It is initialised at first
+// use.  Currently only the main thread can call Sampler::Start, so
+// there is no need for a mechanism to ensure that it is only
+// created once in a multi-thread-use situation.
+lul::LUL* sLUL = nullptr;
+
+// This is the sLUL initialization routine.
+static void sLUL_initialization_routine(void)
 {
-  return (pid_t) syscall(SYS_gettid);
+  MOZ_ASSERT(!sLUL);
+  MOZ_ASSERT(gettid() == getpid()); /* "this is the main thread" */
+  sLUL = new lul::LUL(logging_sink_for_LUL);
+  // Read all the unwind info currently available.
+  read_procmaps(sLUL);
 }
 #endif
 
@@ -252,15 +269,9 @@ static void ProfilerSignalThread(ThreadProfile *profile,
   }
 }
 
-// If the Nuwa process is enabled, we need to use the wrapper of tgkill() to
-// perform the mapping of thread ID.
-#ifdef MOZ_NUWA_PROCESS
-extern "C" MFBT_API int tgkill(pid_t tgid, pid_t tid, int signalno);
-#else
 int tgkill(pid_t tgid, pid_t tid, int signalno) {
   return syscall(SYS_tgkill, tgid, tid, signalno);
 }
-#endif
 
 class PlatformData : public Malloced {
  public:
@@ -297,9 +308,16 @@ static void* SignalSender(void* arg) {
 #endif
 
   int vm_tgid_ = getpid();
+  DebugOnly<int> my_tid = gettid();
 
+  unsigned int nSignalsSent = 0;
+
+  TimeDuration lastSleepOverhead = 0;
+  TimeStamp sampleStart = TimeStamp::Now();
   while (SamplerRegistry::sampler->IsActive()) {
+
     SamplerRegistry::sampler->HandleSaveRequest();
+    SamplerRegistry::sampler->DeleteExpiredMarkers();
 
     if (!SamplerRegistry::sampler->IsPaused()) {
       mozilla::MutexAutoLock lock(*Sampler::sRegisteredThreadsMutex);
@@ -317,8 +335,6 @@ static void* SignalSender(void* arg) {
         PseudoStack::SleepState sleeping = info->Stack()->observeSleeping();
         if (sleeping == PseudoStack::SLEEPING_AGAIN) {
           info->Profile()->DuplicateLastSample();
-          //XXX: This causes flushes regardless of jank-only mode
-          info->Profile()->flush();
           continue;
         }
 
@@ -329,6 +345,7 @@ static void* SignalSender(void* arg) {
         sCurrentThreadProfile = info->Profile();
 
         int threadId = info->ThreadId();
+        MOZ_ASSERT(threadId != my_tid);
 
         // Profile from the signal sender for information which is not signal
         // safe, and will have low variation between the emission of the signal
@@ -349,17 +366,27 @@ static void* SignalSender(void* arg) {
         // Wait for the signal handler to run before moving on to the next one
         sem_wait(&sSignalHandlingDone);
         isFirstProfiledThread = false;
+
+        // The LUL unwind object accumulates frame statistics.
+        // Periodically we should poke it to give it a chance to print
+        // those statistics.  This involves doing I/O (fprintf,
+        // __android_log_print, etc) and so can't safely be done from
+        // the unwinder threads, which is why it is done here.
+        if ((++nSignalsSent & 0xF) == 0) {
+#          if defined(USE_LUL_STACKWALK)
+           sLUL->MaybeShowStats();
+#          endif
+        }
       }
     }
 
-    // Convert ms to us and subtract 100 us to compensate delays
-    // occuring during signal delivery.
-    // TODO measure and confirm this.
-    int interval = floor(SamplerRegistry::sampler->interval() * 1000 + 0.5) - 100;
-    if (interval <= 0) {
-      interval = 1;
-    }
-    OS::SleepMicro(interval);
+    TimeStamp targetSleepEndTime = sampleStart + TimeDuration::FromMicroseconds(SamplerRegistry::sampler->interval() * 1000);
+    TimeStamp beforeSleep = TimeStamp::Now();
+    TimeDuration targetSleepDuration = targetSleepEndTime - beforeSleep;
+    double sleepTime = std::max(0.0, (targetSleepDuration - lastSleepOverhead).ToMicroseconds());
+    OS::SleepMicro(sleepTime);
+    sampleStart = TimeStamp::Now();
+    lastSleepOverhead = sampleStart - (beforeSleep + TimeDuration::FromMicroseconds(sleepTime));
   }
   return 0;
 }
@@ -380,9 +407,16 @@ Sampler::~Sampler() {
 void Sampler::Start() {
   LOG("Sampler started");
 
-#ifdef USE_EHABI_STACKWALK
+#if defined(USE_EHABI_STACKWALK)
   mozilla::EHABIStackWalkInit();
+#elif defined(USE_LUL_STACKWALK)
+  // NOTE: this isn't thread-safe.  But we expect Sampler::Start to be
+  // called only from the main thread, so this is OK in general.
+  if (!sLUL) {
+     sLUL_initialization_routine();
+  }
 #endif
+
   SamplerRegistry::AddActiveSampler(this);
 
   // Initialize signal handler communication
@@ -414,6 +448,19 @@ void Sampler::Start() {
   }
   LOG("Signal installed");
   signal_handler_installed_ = true;
+
+#if defined(USE_LUL_STACKWALK)
+  // Switch into unwind mode.  After this point, we can't add or
+  // remove any unwind info to/from this LUL instance.  The only thing
+  // we can do with it is Unwind() calls.
+  sLUL->EnableUnwinding();
+
+  // Has a test been requested?
+  if (PR_GetEnv("MOZ_PROFILER_LUL_TEST")) {
+     int nTests = 0, nTestsPassed = 0;
+     RunLulUnitTests(&nTests, &nTestsPassed, sLUL);
+  }
+#endif
 
   // Start a thread that sends SIGPROF signal to VM thread.
   // Sending the signal ourselves instead of relying on itimer provides
@@ -447,6 +494,18 @@ void Sampler::Stop() {
   }
 }
 
+#ifdef MOZ_NUWA_PROCESS
+static void
+UpdateThreadId(void* aThreadInfo) {
+  ThreadInfo* info = static_cast<ThreadInfo*>(aThreadInfo);
+  // Note that this function is called during thread recreation. Only the thread
+  // calling this method is running. We can't try to acquire
+  // Sampler::sRegisteredThreadsMutex because it could be held by another
+  // thread.
+  info->SetThreadId(gettid());
+}
+#endif
+
 bool Sampler::RegisterCurrentThread(const char* aName,
                                     PseudoStack* aPseudoStack,
                                     bool aIsMainThread, void* stackTop)
@@ -469,7 +528,7 @@ bool Sampler::RegisterCurrentThread(const char* aName,
 
   set_tls_stack_top(stackTop);
 
-  ThreadInfo* info = new ThreadInfo(aName, id,
+  ThreadInfo* info = new StackOwningThreadInfo(aName, id,
     aIsMainThread, aPseudoStack, stackTop);
 
   if (sActiveSampler) {
@@ -478,7 +537,20 @@ bool Sampler::RegisterCurrentThread(const char* aName,
 
   sRegisteredThreads->push_back(info);
 
-  uwt__register_thread_for_profiling(stackTop);
+#ifdef MOZ_NUWA_PROCESS
+  if (IsNuwaProcess()) {
+    if (info->IsMainThread()) {
+      // Main thread isn't a marked thread. Register UpdateThreadId() to
+      // NuwaAddConstructor(), which runs before all other threads are
+      // recreated.
+      NuwaAddConstructor(UpdateThreadId, info);
+    } else {
+      // Register UpdateThreadInfo() to be run when the thread is recreated.
+      NuwaAddThreadConstructor(UpdateThreadId, info);
+    }
+  }
+#endif
+
   return true;
 }
 
@@ -509,8 +581,6 @@ void Sampler::UnregisterCurrentThread()
       }
     }
   }
-
-  uwt__unregister_thread_for_profiling();
 }
 
 #ifdef ANDROID
@@ -559,9 +629,7 @@ static void ReadProfilerVars(const char* fileName, const char** features,
       feature = strtok_r(line, "=", &savePtr);
       value = strtok_r(NULL, "", &savePtr);
 
-      if (strncmp(feature, PROFILER_MODE, bufferSize) == 0) {
-        set_profiler_mode(value);
-      } else if (strncmp(feature, PROFILER_INTERVAL, bufferSize) == 0) {
+      if (strncmp(feature, PROFILER_INTERVAL, bufferSize) == 0) {
         set_profiler_interval(value);
       } else if (strncmp(feature, PROFILER_ENTRIES, bufferSize) == 0) {
         set_profiler_entries(value);

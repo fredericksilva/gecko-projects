@@ -1,4 +1,5 @@
-/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -11,6 +12,7 @@
 #define nsSyncLoadService_h__
 
 #include "nscore.h"
+#include "mozilla/net/ReferrerPolicy.h"
 
 class nsIInputStream;
 class nsILoadGroup;
@@ -33,10 +35,12 @@ public:
      * @param aLoadGroup The loadgroup to use for loading the document.
      * @param aForceToXML Whether to parse the document as XML, regardless of
      *                    content type.
+     * @param referrerPolicy Referrer policy.
      * @param aResult [out] The document loaded from the URI.
      */
     static nsresult LoadDocument(nsIURI *aURI, nsIPrincipal *aLoaderPrincipal,
                                  nsILoadGroup *aLoadGroup, bool aForceToXML,
+                                 mozilla::net::ReferrerPolicy aReferrerPolicy,
                                  nsIDOMDocument** aResult);
 
     /**

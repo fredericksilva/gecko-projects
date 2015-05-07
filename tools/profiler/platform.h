@@ -203,8 +203,7 @@ class Thread {
 // backtraces are available only on selected platforms.  Breakpad is
 // the only supported native unwinder.  HAVE_NATIVE_UNWIND is set at
 // build time to indicate whether native unwinding is possible on this
-// platform.  The actual unwind mode currently in use is stored in
-// sUnwindMode.
+// platform.
 
 #undef HAVE_NATIVE_UNWIND
 #if defined(MOZ_PROFILING) \
@@ -217,7 +216,6 @@ class Thread {
 
 /* Some values extracted at startup from environment variables, that
    control the behaviour of the breakpad unwinder. */
-extern const char* PROFILER_MODE;
 extern const char* PROFILER_INTERVAL;
 extern const char* PROFILER_ENTRIES;
 extern const char* PROFILER_STACK;
@@ -227,18 +225,10 @@ void read_profiler_env_vars();
 void profiler_usage();
 
 // Helper methods to expose modifying profiler behavior
-bool set_profiler_mode(const char*);
 bool set_profiler_interval(const char*);
 bool set_profiler_entries(const char*);
 bool set_profiler_scan(const char*);
 bool is_native_unwinding_avail();
-
-typedef  enum { UnwINVALID, UnwNATIVE, UnwPSEUDO, UnwCOMBINED }  UnwMode;
-extern UnwMode sUnwindMode;       /* what mode? */
-extern int     sUnwindInterval;   /* in milliseconds */
-extern int     sUnwindStackScan;  /* max # of dubious frames allowed */
-
-extern int     sProfileEntries;   /* how many entries do we store? */
 
 void set_tls_stack_top(void* stackTop);
 
@@ -309,6 +299,8 @@ class Sampler {
   virtual void RequestSave() = 0;
   // Process any outstanding request outside a signal handler.
   virtual void HandleSaveRequest() = 0;
+  // Delete markers which are no longer part of the profile due to buffer wraparound.
+  virtual void DeleteExpiredMarkers() = 0;
 
   // Start and stop sampler.
   void Start();
@@ -362,7 +354,10 @@ class Sampler {
   static mozilla::Mutex* sRegisteredThreadsMutex;
 
   static bool CanNotifyObservers() {
-#if defined(SPS_OS_android) && !defined(MOZ_WIDGET_GONK)
+#ifdef MOZ_WIDGET_GONK
+    // We use profile.sh on b2g to manually select threads and options per process.
+    return false;
+#elif defined(SPS_OS_android) && !defined(MOZ_WIDGET_GONK)
     // Android ANR reporter uses the profiler off the main thread
     return NS_IsMainThread();
 #else
@@ -392,6 +387,10 @@ class Sampler {
   bool signal_sender_launched_;
   pthread_t signal_sender_thread_;
 #endif
+#if defined(SPS_OS_darwin)
+  bool signal_handler_installed_;
+  struct sigaction old_sigprof_signal_handler_;
+#endif
 };
 
 class ThreadInfo {
@@ -405,11 +404,6 @@ class ThreadInfo {
 
   bool IsMainThread() const { return mIsMainThread; }
   PseudoStack* Stack() const { return mPseudoStack; }
-  PseudoStack* ForgetStack() {
-    PseudoStack* stack = mPseudoStack;
-    mPseudoStack = nullptr;
-    return stack;
-  }
 
   void SetProfile(ThreadProfile* aProfile) { mProfile = aProfile; }
   ThreadProfile* Profile() const { return mProfile; }
@@ -417,9 +411,12 @@ class ThreadInfo {
   PlatformData* GetPlatformData() const { return mPlatformData; }
   void* StackTop() const { return mStackTop; }
 
-  void SetPendingDelete();
+  virtual void SetPendingDelete();
   bool IsPendingDelete() const { return mPendingDelete; }
 
+#ifdef MOZ_NUWA_PROCESS
+  void SetThreadId(int aThreadId) { mThreadId = aThreadId; }
+#endif
 
   /**
    * May be null for the main thread if the profiler was started during startup
@@ -435,6 +432,15 @@ class ThreadInfo {
   void* const mStackTop;
   nsCOMPtr<nsIThread> mThread;
   bool mPendingDelete;
+};
+
+// Just like ThreadInfo, but owns a reference to the PseudoStack.
+class StackOwningThreadInfo : public ThreadInfo {
+ public:
+  StackOwningThreadInfo(const char* aName, int aThreadId, bool aIsMainThread, PseudoStack* aPseudoStack, void* aStackTop);
+  virtual ~StackOwningThreadInfo();
+
+  virtual void SetPendingDelete();
 };
 
 #endif /* ndef TOOLS_PLATFORM_H_ */

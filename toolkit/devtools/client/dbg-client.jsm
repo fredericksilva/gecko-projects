@@ -21,7 +21,6 @@ this.CC = CC;
 this.EXPORTED_SYMBOLS = ["DebuggerTransport",
                          "DebuggerClient",
                          "RootClient",
-                         "debuggerSocketConnect",
                          "LongStringClient",
                          "EnvironmentClient",
                          "ObjectClient"];
@@ -32,10 +31,6 @@ Cu.import("resource://gre/modules/Services.jsm");
 
 let promise = Cu.import("resource://gre/modules/devtools/deprecated-sync-thenables.js").Promise;
 const { defer, resolve, reject } = promise;
-
-XPCOMUtils.defineLazyServiceGetter(this, "socketTransportService",
-                                   "@mozilla.org/network/socket-transport-service;1",
-                                   "nsISocketTransportService");
 
 XPCOMUtils.defineLazyModuleGetter(this, "console",
                                   "resource://gre/modules/devtools/Console.jsm");
@@ -57,6 +52,7 @@ Object.defineProperty(this, "WebConsoleClient", {
 
 Components.utils.import("resource://gre/modules/devtools/DevToolsUtils.jsm");
 this.makeInfallible = DevToolsUtils.makeInfallible;
+this.values = DevToolsUtils.values;
 
 let LOG_PREF = "devtools.debugger.log";
 let VERBOSE_PREF = "devtools.debugger.log.verbose";
@@ -82,6 +78,14 @@ function dumpv(msg) {
 let loader = Cc["@mozilla.org/moz/jssubscript-loader;1"]
   .getService(Ci.mozIJSSubScriptLoader);
 loader.loadSubScript("resource://gre/modules/devtools/transport/transport.js", this);
+
+DevToolsUtils.defineLazyGetter(this, "DebuggerSocket", () => {
+  let { DebuggerSocket } = devtools.require("devtools/toolkit/security/socket");
+  return DebuggerSocket;
+});
+DevToolsUtils.defineLazyGetter(this, "Authentication", () => {
+  return devtools.require("devtools/toolkit/security/auth");
+});
 
 /**
  * TODO: Get rid of this API in favor of EventTarget (bug 1042642)
@@ -233,7 +237,8 @@ const UnsolicitedNotifications = {
   "appOpen": "appOpen",
   "appClose": "appClose",
   "appInstall": "appInstall",
-  "appUninstall": "appUninstall"
+  "appUninstall": "appUninstall",
+  "evaluationResult": "evaluationResult",
 };
 
 /**
@@ -260,10 +265,10 @@ this.DebuggerClient = function (aTransport)
   this._transport.hooks = this;
 
   // Map actor ID to client instance for each actor type.
-  this._clients = new Map;
+  this._clients = new Map();
 
-  this._pendingRequests = [];
-  this._activeRequests = new Map;
+  this._pendingRequests = new Map();
+  this._activeRequests = new Map();
   this._eventsEnabled = true;
 
   this.traits = {};
@@ -370,6 +375,18 @@ DebuggerClient.Argument.prototype.getArgument = function (aParams) {
   return aParams[this.position];
 };
 
+// Expose these to save callers the trouble of importing DebuggerSocket
+DebuggerClient.socketConnect = function(options) {
+  // Defined here instead of just copying the function to allow lazy-load
+  return DebuggerSocket.connect(options);
+};
+DevToolsUtils.defineLazyGetter(DebuggerClient, "Authenticators", () => {
+  return Authentication.Authenticators;
+});
+DevToolsUtils.defineLazyGetter(DebuggerClient, "AuthenticationResult", () => {
+  return Authentication.AuthenticationResult;
+});
+
 DebuggerClient.prototype = {
   /**
    * Connect to the server and start exchanging protocol messages.
@@ -379,6 +396,12 @@ DebuggerClient.prototype = {
    *        received from the debugging server.
    */
   connect: function (aOnConnected) {
+    this.emit("connect");
+
+    // Also emit the event on the |DebuggerServer| object (not on
+    // the instance), so it's possible to track all instances.
+    events.emit(DebuggerClient, "connect", this);
+
     this.addOneTimeListener("connected", (aName, aApplicationType, aTraits) => {
       this.traits = aTraits;
       if (aOnConnected) {
@@ -418,6 +441,10 @@ DebuggerClient.prototype = {
         // All clients detached.
         this._transport.close();
         this._transport = null;
+        this._activeRequests.clear();
+        this._activeRequests = null;
+        this._pendingRequests.clear();
+        this._pendingRequests = null;
         return;
       }
       if (client.detach) {
@@ -440,6 +467,8 @@ DebuggerClient.prototype = {
    * new code should say 'client.mainRoot.listAddons()'.
    */
   listAddons: function (aOnResponse) { return this.mainRoot.listAddons(aOnResponse); },
+
+  getTab: function (aFilter) { return this.mainRoot.getTab(aFilter); },
 
   /**
    * Attach to a tab actor.
@@ -595,16 +624,20 @@ DebuggerClient.prototype = {
   },
 
   /**
-   * Attach to a process in order to get the form of a ChildProcessActor.
+   * Fetch the ChromeActor for the main process or ChildProcessActor for a
+   * a given child process ID.
    *
-   * @param string aId
+   * @param number aId
    *        The ID for the process to attach (returned by `listProcesses`).
+   *        Connected to the main process if omitted, or is 0.
    */
-  attachProcess: function (aId) {
+  getProcess: function (aId) {
     let packet = {
-      to: 'root',
-      type: 'attachProcess',
-      id: aId
+      to: "root",
+      type: "getProcess"
+    }
+    if (typeof(aId) == "number") {
+      packet.id = aId;
     }
     return this.request(packet);
   },
@@ -687,8 +720,7 @@ DebuggerClient.prototype = {
       request.on("json-reply", aOnResponse);
     }
 
-    this._pendingRequests.push(request);
-    this._sendRequests();
+    this._sendOrQueueRequest(request);
 
     // Implement a Promise like API on the returned object
     // that resolves/rejects on request response
@@ -807,37 +839,69 @@ DebuggerClient.prototype = {
     request = new Request(request);
     request.format = "bulk";
 
-    this._pendingRequests.push(request);
-    this._sendRequests();
+    this._sendOrQueueRequest(request);
 
     return request;
   },
 
   /**
-   * Send pending requests to any actors that don't already have an
-   * active request.
+   * If a new request can be sent immediately, do so.  Otherwise, queue it.
    */
-  _sendRequests: function () {
-    this._pendingRequests = this._pendingRequests.filter((request) => {
-      let dest = request.actor;
+  _sendOrQueueRequest(request) {
+    let actor = request.actor;
+    if (!this._activeRequests.has(actor)) {
+      this._sendRequest(request);
+    } else {
+      this._queueRequest(request);
+    }
+  },
 
-      if (this._activeRequests.has(dest)) {
-        return true;
-      }
+  /**
+   * Send a request.
+   * @throws Error if there is already an active request in flight for the same
+   *         actor.
+   */
+  _sendRequest(request) {
+    let actor = request.actor;
+    this.expectReply(actor, request);
 
-      this.expectReply(dest, request);
-
-      if (request.format === "json") {
-        this._transport.send(request.request);
-        return false;
-      }
-
-      this._transport.startBulkSend(request.request).then((...args) => {
-        request.emit("bulk-send-ready", ...args);
-      });
-
+    if (request.format === "json") {
+      this._transport.send(request.request);
       return false;
+    }
+
+    this._transport.startBulkSend(request.request).then((...args) => {
+      request.emit("bulk-send-ready", ...args);
     });
+  },
+
+  /**
+   * Queue a request to be sent later.  Queues are only drained when an in
+   * flight request to a given actor completes.
+   */
+  _queueRequest(request) {
+    let actor = request.actor;
+    let queue = this._pendingRequests.get(actor) || [];
+    queue.push(request);
+    this._pendingRequests.set(actor, queue);
+  },
+
+  /**
+   * Attempt the next request to a given actor (if any).
+   */
+  _attemptNextRequest(actor) {
+    if (this._activeRequests.has(actor)) {
+      return;
+    }
+    let queue = this._pendingRequests.get(actor);
+    if (!queue) {
+      return;
+    }
+    let request = queue.shift();
+    if (queue.length === 0) {
+      this._pendingRequests.delete(actor);
+    }
+    this._sendRequest(request);
   },
 
   /**
@@ -912,22 +976,32 @@ DebuggerClient.prototype = {
       this._activeRequests.delete(aPacket.from);
     }
 
+    // If there is a subsequent request for the same actor, hand it off to the
+    // transport.  Delivery of packets on the other end is always async, even
+    // in the local transport case.
+    this._attemptNextRequest(aPacket.from);
+
     // Packets that indicate thread state changes get special treatment.
     if (aPacket.type in ThreadStateTypes &&
         this._clients.has(aPacket.from) &&
         typeof this._clients.get(aPacket.from)._onThreadState == "function") {
       this._clients.get(aPacket.from)._onThreadState(aPacket);
     }
-    // On navigation the server resumes, so the client must resume as well.
-    // We achieve that by generating a fake resumption packet that triggers
-    // the client's thread state change listeners.
-    if (aPacket.type == UnsolicitedNotifications.tabNavigated &&
-        this._clients.has(aPacket.from) &&
-        this._clients.get(aPacket.from).thread) {
-      let thread = this._clients.get(aPacket.from).thread;
-      let resumption = { from: thread._actor, type: "resumed" };
-      thread._onThreadState(resumption);
+
+    // TODO: Bug 1151156 - Remove once Gecko 40 is on b2g-stable.
+    if (!this.traits.noNeedToFakeResumptionOnNavigation) {
+      // On navigation the server resumes, so the client must resume as well.
+      // We achieve that by generating a fake resumption packet that triggers
+      // the client's thread state change listeners.
+      if (aPacket.type == UnsolicitedNotifications.tabNavigated &&
+          this._clients.has(aPacket.from) &&
+          this._clients.get(aPacket.from).thread) {
+        let thread = this._clients.get(aPacket.from).thread;
+        let resumption = { from: thread._actor, type: "resumed" };
+        thread._onThreadState(resumption);
+      }
     }
+
     // Only try to notify listeners on events, not responses to requests
     // that lack a packet type.
     if (aPacket.type) {
@@ -937,8 +1011,6 @@ DebuggerClient.prototype = {
     if (activeRequest) {
       activeRequest.emit("json-reply", aPacket);
     }
-
-    this._sendRequests();
   },
 
   /**
@@ -990,9 +1062,13 @@ DebuggerClient.prototype = {
 
     let activeRequest = this._activeRequests.get(actor);
     this._activeRequests.delete(actor);
-    activeRequest.emit("bulk-reply", packet);
 
-    this._sendRequests();
+    // If there is a subsequent request for the same actor, hand it off to the
+    // transport.  Delivery of packets on the other end is always async, even
+    // in the local transport case.
+    this._attemptNextRequest(actor);
+
+    activeRequest.emit("bulk-reply", packet);
   },
 
   /**
@@ -1004,6 +1080,27 @@ DebuggerClient.prototype = {
    */
   onClosed: function (aStatus) {
     this.emit("closed");
+
+    // The |_pools| array on the client-side currently is used only by
+    // protocol.js to store active fronts, mirroring the actor pools found in
+    // the server.  So, read all usages of "pool" as "protocol.js front".
+    //
+    // In the normal case where we shutdown cleanly, the toolbox tells each tool
+    // to close, and they each call |destroy| on any fronts they were using.
+    // When |destroy| or |cleanup| is called on a protocol.js front, it also
+    // removes itself from the |_pools| array.  Once the toolbox has shutdown,
+    // the connection is closed, and we reach here.  All fronts (should have
+    // been) |destroy|ed, so |_pools| should empty.
+    //
+    // If the connection instead aborts unexpectedly, we may end up here with
+    // all fronts used during the life of the connection.  So, we call |cleanup|
+    // on them clear their state, reject pending requests, and remove themselves
+    // from |_pools|.  This saves the toolbox from hanging indefinitely, in case
+    // it waits for some server response before shutdown that will now never
+    // arrive.
+    for (let pool of this._pools) {
+      pool.cleanup();
+    }
   },
 
   registerClient: function (client) {
@@ -1317,6 +1414,51 @@ RootClient.prototype = {
                                        { telemetry: "LISTPROCESSES" }),
 
   /**
+   * Fetch the TabActor for the currently selected tab, or for a specific
+   * tab given as first parameter.
+   *
+   * @param [optional] object aFilter
+   *        A dictionary object with following optional attributes:
+   *         - outerWindowID: used to match tabs in parent process
+   *         - tabId: used to match tabs in child processes
+   *         - tab: a reference to xul:tab element
+   *        If nothing is specified, returns the actor for the currently
+   *        selected tab.
+   */
+  getTab: function (aFilter) {
+    let packet = {
+      to: this.actor,
+      type: "getTab"
+    };
+
+    if (aFilter) {
+      if (typeof(aFilter.outerWindowID) == "number") {
+        packet.outerWindowID = aFilter.outerWindowID;
+      } else if (typeof(aFilter.tabId) == "number") {
+        packet.tabId = aFilter.tabId;
+      } else if ("tab" in aFilter) {
+        let browser = aFilter.tab.linkedBrowser;
+        if (browser.frameLoader.tabParent) {
+          // Tabs in child process
+          packet.tabId = browser.frameLoader.tabParent.tabId;
+        } else {
+          // Tabs in parent process
+          let windowUtils = browser.contentWindow
+            .QueryInterface(Ci.nsIInterfaceRequestor)
+            .getInterface(Ci.nsIDOMWindowUtils);
+          packet.outerWindowID = windowUtils.outerWindowID;
+        }
+      } else {
+        // Throw if a filter object have been passed but without
+        // any clearly idenfified filter.
+        throw new Error("Unsupported argument given to getTab request");
+      }
+    }
+
+    return this.request(packet);
+  },
+
+  /**
    * Description of protocol's actors and methods.
    *
    * @param function aOnResponse
@@ -1610,72 +1752,6 @@ ThreadClient.prototype = {
   }),
 
   /**
-   * Request to set a breakpoint in the specified location.
-   *
-   * @param object aLocation
-   *        The source location object where the breakpoint will be set.
-   * @param function aOnResponse
-   *        Called with the thread's response.
-   */
-  setBreakpoint: function ({ url, line, column, condition },
-                           aOnResponse = noop) {
-    // A helper function that sets the breakpoint.
-    let doSetBreakpoint = (aCallback) => {
-      const location = {
-        url: url,
-        line: line,
-        column: column
-      };
-
-      let packet = {
-        to: this._actor,
-        type: "setBreakpoint",
-        location: location,
-        condition: condition
-      };
-      this.client.request(packet, (aResponse) => {
-        // Ignoring errors, since the user may be setting a breakpoint in a
-        // dead script that will reappear on a page reload.
-        let bpClient;
-        if (aResponse.actor) {
-          let root = this.client.mainRoot;
-          bpClient = new BreakpointClient(
-            this.client,
-            aResponse.actor,
-            location,
-            root.traits.conditionalBreakpoints ? condition : undefined
-          );
-        }
-        aOnResponse(aResponse, bpClient);
-        if (aCallback) {
-          aCallback();
-        }
-      });
-    };
-
-    // If the debuggee is paused, just set the breakpoint.
-    if (this.paused) {
-      doSetBreakpoint();
-      return;
-    }
-    // Otherwise, force a pause in order to set the breakpoint.
-    this.interrupt((aResponse) => {
-      if (aResponse.error) {
-        // Can't set the breakpoint if pausing failed.
-        aOnResponse(aResponse);
-        return;
-      }
-
-      const { type, why } = aResponse;
-      const cleanUp = type == "paused" && why.type == "interrupted"
-        ? () => this.resume()
-        : noop;
-
-      doSetBreakpoint(cleanUp);
-    });
-  },
-
-  /**
    * Release multiple thread-lifetime object actors. If any pause-lifetime
    * actors are included in the request, a |notReleasable| error will return,
    * but all the thread-lifetime ones will have been released.
@@ -1798,7 +1874,20 @@ ThreadClient.prototype = {
         return;
       }
 
-      for each (let frame in aResponse.frames) {
+      let threadGrips = values(this._threadGrips);
+
+      for (let i in aResponse.frames) {
+        let frame = aResponse.frames[i];
+        if (!frame.where.source) {
+          // Older servers use urls instead, so we need to resolve
+          // them to source actors
+          for (let grip of threadGrips) {
+            if (grip instanceof SourceClient && grip.url === frame.url) {
+              frame.where.source = grip._form;
+            }
+          }
+        }
+
         this._frameCache[frame.depth] = frame;
       }
 
@@ -2389,6 +2478,80 @@ SourceClient.prototype = {
         contentType: contentType
       });
     });
+  },
+
+  /**
+   * Request to set a breakpoint in the specified location.
+   *
+   * @param object aLocation
+   *        The location and condition of the breakpoint in
+   *        the form of { line[, column, condition] }.
+   * @param function aOnResponse
+   *        Called with the thread's response.
+   */
+  setBreakpoint: function ({ line, column, condition }, aOnResponse = noop) {
+    // A helper function that sets the breakpoint.
+    let doSetBreakpoint = aCallback => {
+      let root = this._client.mainRoot;
+      let location = {
+        line: line,
+        column: column
+      };
+
+      let packet = {
+        to: this.actor,
+        type: "setBreakpoint",
+        location: location,
+        condition: condition
+      };
+
+      // Backwards compatibility: send the breakpoint request to the
+      // thread if the server doesn't support Debugger.Source actors.
+      if (!root.traits.debuggerSourceActors) {
+        packet.to = this._activeThread.actor;
+        packet.location.url = this.url;
+      }
+
+      this._client.request(packet, aResponse => {
+        // Ignoring errors, since the user may be setting a breakpoint in a
+        // dead script that will reappear on a page reload.
+        let bpClient;
+        if (aResponse.actor) {
+          bpClient = new BreakpointClient(
+            this._client,
+            this,
+            aResponse.actor,
+            location,
+            root.traits.conditionalBreakpoints ? condition : undefined
+          );
+        }
+        aOnResponse(aResponse, bpClient);
+        if (aCallback) {
+          aCallback();
+        }
+      });
+    };
+
+    // If the debuggee is paused, just set the breakpoint.
+    if (this._activeThread.paused) {
+      doSetBreakpoint();
+      return;
+    }
+    // Otherwise, force a pause in order to set the breakpoint.
+    this._activeThread.interrupt(aResponse => {
+      if (aResponse.error) {
+        // Can't set the breakpoint if pausing failed.
+        aOnResponse(aResponse);
+        return;
+      }
+
+      const { type, why } = aResponse;
+      const cleanUp = type == "paused" && why.type == "interrupted"
+            ? () => this._activeThread.resume()
+            : noop;
+
+      doSetBreakpoint(cleanUp);
+    })
   }
 };
 
@@ -2397,6 +2560,8 @@ SourceClient.prototype = {
  *
  * @param aClient DebuggerClient
  *        The debugger client parent.
+ * @param aSourceClient SourceClient
+ *        The source where this breakpoint exists
  * @param aActor string
  *        The actor ID for this breakpoint.
  * @param aLocation object
@@ -2405,10 +2570,13 @@ SourceClient.prototype = {
  * @param aCondition string
  *        The conditional expression of the breakpoint
  */
-function BreakpointClient(aClient, aActor, aLocation, aCondition) {
+function BreakpointClient(aClient, aSourceClient, aActor, aLocation, aCondition) {
   this._client = aClient;
   this._actor = aActor;
   this.location = aLocation;
+  this.location.actor = aSourceClient.actor;
+  this.location.url = aSourceClient.url;
+  this.source = aSourceClient;
   this.request = this._client.request;
 
   // The condition property should only exist if it's a truthy value
@@ -2471,7 +2639,6 @@ BreakpointClient.prototype = {
 
     if (root.traits.conditionalBreakpoints) {
       let info = {
-        url: this.location.url,
         line: this.location.line,
         column: this.location.column,
         condition: aCondition
@@ -2485,7 +2652,7 @@ BreakpointClient.prototype = {
           return;
         }
 
-        gThreadClient.setBreakpoint(info, (aResponse, aNewBreakpoint) => {
+        this.source.setBreakpoint(info, (aResponse, aNewBreakpoint) => {
           if (aResponse && aResponse.error) {
             deferred.reject(aResponse);
           } else {
@@ -2495,7 +2662,7 @@ BreakpointClient.prototype = {
       });
     } else {
       // The property shouldn't even exist if the condition is blank
-      if(aCondition === "") {
+      if (aCondition === "") {
         delete this.conditionalExpression;
       }
       else {
@@ -2552,33 +2719,3 @@ EnvironmentClient.prototype = {
 };
 
 eventSource(EnvironmentClient.prototype);
-
-/**
- * Connects to a debugger server socket and returns a DebuggerTransport.
- *
- * @param aHost string
- *        The host name or IP address of the debugger server.
- * @param aPort number
- *        The port number of the debugger server.
- */
-this.debuggerSocketConnect = function (aHost, aPort)
-{
-  let s = socketTransportService.createTransport(null, 0, aHost, aPort, null);
-  // By default the CONNECT socket timeout is very long, 65535 seconds,
-  // so that if we race to be in CONNECT state while the server socket is still
-  // initializing, the connection is stuck in connecting state for 18.20 hours!
-  s.setTimeout(Ci.nsISocketTransport.TIMEOUT_CONNECT, 2);
-
-  // openOutputStream may throw NS_ERROR_NOT_INITIALIZED if we hit some race
-  // where the nsISocketTransport gets shutdown in between its instantiation and
-  // the call to this method.
-  let transport;
-  try {
-    transport = new DebuggerTransport(s.openInputStream(0, 0, 0),
-                                      s.openOutputStream(0, 0, 0));
-  } catch(e) {
-    DevToolsUtils.reportException("debuggerSocketConnect", e);
-    throw e;
-  }
-  return transport;
-}

@@ -10,6 +10,7 @@
 #include "nsILoadGroup.h"
 #include "nsIInterfaceRequestor.h"
 #include "nsAutoPtr.h"
+#include "nsProxyRelease.h"
 #include "nsStandardURL.h"
 
 #if defined(PR_LOGGING)
@@ -181,6 +182,19 @@ BaseWebSocketChannel::SetPingTimeout(uint32_t aSeconds)
   return NS_OK;
 }
 
+NS_IMETHODIMP
+BaseWebSocketChannel::InitLoadInfo(nsIDOMNode* aLoadingNode,
+                                   nsIPrincipal* aLoadingPrincipal,
+                                   nsIPrincipal* aTriggeringPrincipal,
+                                   uint32_t aSecurityFlags,
+                                   uint32_t aContentPolicyType)
+{
+  nsCOMPtr<nsINode> node = do_QueryInterface(aLoadingNode);
+  mLoadInfo = new LoadInfo(aLoadingPrincipal, aTriggeringPrincipal,
+                           node, aSecurityFlags, aContentPolicyType);
+  return NS_OK;
+}
+
 //-----------------------------------------------------------------------------
 // BaseWebSocketChannel::nsIProtocolHandler
 //-----------------------------------------------------------------------------
@@ -236,7 +250,7 @@ BaseWebSocketChannel::NewURI(const nsACString & aSpec, const char *aOriginCharse
                 aOriginCharset, aBaseURI);
   if (NS_FAILED(rv))
     return rv;
-  NS_ADDREF(*_retval = url);
+  url.forget(_retval);
   return NS_OK;
 }
 
@@ -282,6 +296,27 @@ BaseWebSocketChannel::RetargetDeliveryTo(nsIEventTarget* aTargetThread)
   mTargetThread = do_QueryInterface(aTargetThread);
   MOZ_ASSERT(mTargetThread);
   return NS_OK;
+}
+
+BaseWebSocketChannel::ListenerAndContextContainer::ListenerAndContextContainer(
+                                               nsIWebSocketListener* aListener,
+                                               nsISupports* aContext)
+  : mListener(aListener)
+  , mContext(aContext)
+{
+  MOZ_ASSERT(NS_IsMainThread());
+  MOZ_ASSERT(mListener);
+}
+
+BaseWebSocketChannel::ListenerAndContextContainer::~ListenerAndContextContainer()
+{
+  MOZ_ASSERT(mListener);
+
+  nsCOMPtr<nsIThread> mainThread;
+  NS_GetMainThread(getter_AddRefs(mainThread));
+
+  NS_ProxyRelease(mainThread, mListener, false);
+  NS_ProxyRelease(mainThread, mContext, false);
 }
 
 } // namespace net

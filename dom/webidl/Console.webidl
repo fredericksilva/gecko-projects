@@ -16,6 +16,7 @@ interface Console {
   void table(any... data);
   void trace();
   void dir(any... data);
+  void dirxml(any... data);
   void group(any... data);
   void groupCollapsed(any... data);
   void groupEnd(any... data);
@@ -28,13 +29,23 @@ interface Console {
   void assert(boolean condition, any... data);
   void count(any... data);
 
-  void ___noSuchMethod__();
+  // No-op methods for compatibility with other browsers.
+  [BinaryName="noopMethod"]
+  void clear();
+  [BinaryName="noopMethod"]
+  void markTimeline();
+  [BinaryName="noopMethod"]
+  void timeline();
+  [BinaryName="noopMethod"]
+  void timelineEnd();
+  [BinaryName="noopMethod"]
+  void timeStamp();
 };
 
 // This is used to propagate console events to the observers.
 dictionary ConsoleEvent {
-  (unsigned long or DOMString) ID;
-  (unsigned long or DOMString) innerID;
+  (unsigned long long or DOMString) ID;
+  (unsigned long long or DOMString) innerID;
   DOMString level = "";
   DOMString filename = "";
   unsigned long lineNumber = 0;

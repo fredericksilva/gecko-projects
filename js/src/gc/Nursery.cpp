@@ -5,29 +5,28 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#ifdef JSGC_GENERATIONAL
-
 #include "gc/Nursery-inl.h"
 
 #include "mozilla/IntegerPrintfMacros.h"
+#include "mozilla/Move.h"
 
 #include "jscompartment.h"
 #include "jsgc.h"
-#include "jsinfer.h"
 #include "jsutil.h"
 #include "prmjtime.h"
 
 #include "gc/GCInternals.h"
 #include "gc/Memory.h"
-#include "jit/IonFrames.h"
+#include "jit/JitFrames.h"
 #include "vm/ArrayObject.h"
 #include "vm/Debugger.h"
 #if defined(DEBUG)
 #include "vm/ScopeObject.h"
 #endif
 #include "vm/TypedArrayObject.h"
+#include "vm/TypeInference.h"
 
-#include "jsgcinlines.h"
+#include "jsobjinlines.h"
 
 #include "vm/NativeObject-inl.h"
 
@@ -38,14 +37,19 @@ using mozilla::ArrayLength;
 using mozilla::PodCopy;
 using mozilla::PodZero;
 
-//#define PROFILE_NURSERY
+struct js::Nursery::FreeMallocedBuffersTask : public GCParallelTask
+{
+    explicit FreeMallocedBuffersTask(FreeOp* fop) : fop_(fop) {}
+    bool init() { return buffers_.init(); }
+    void transferBuffersToFree(MallocedBuffersSet& buffersToFree);
+    ~FreeMallocedBuffersTask() override { join(); }
 
-#ifdef PROFILE_NURSERY
-/*
- * Print timing information for minor GCs that take longer than this time in microseconds.
- */
-static int64_t GCReportThreshold = INT64_MAX;
-#endif
+  private:
+    FreeOp* fop_;
+    MallocedBuffersSet buffers_;
+
+    virtual void run() override;
+};
 
 bool
 js::Nursery::init(uint32_t maxNurseryBytes)
@@ -57,11 +61,15 @@ js::Nursery::init(uint32_t maxNurseryBytes)
     if (numNurseryChunks_ == 0)
         return true;
 
-    if (!hugeSlots.init())
+    if (!mallocedBuffers.init())
         return false;
 
-    void *heap = MapAlignedPages(nurserySize(), Alignment);
+    void* heap = MapAlignedPages(nurserySize(), Alignment);
     if (!heap)
+        return false;
+
+    freeMallocedBuffersTask = js_new<FreeMallocedBuffersTask>(runtime()->defaultFreeOp());
+    if (!freeMallocedBuffersTask || !freeMallocedBuffersTask->init())
         return false;
 
     heapStart_ = uintptr_t(heap);
@@ -72,11 +80,16 @@ js::Nursery::init(uint32_t maxNurseryBytes)
     setCurrentChunk(0);
     updateDecommittedRegion();
 
-#ifdef PROFILE_NURSERY
-    char *env = getenv("JS_MINORGC_TIME");
-    if (env)
-        GCReportThreshold = atoi(env);
-#endif
+    char* env = getenv("JS_GC_PROFILE_NURSERY");
+    if (env) {
+        if (0 == strcmp(env, "help")) {
+            fprintf(stderr, "JS_GC_PROFILE_NURSERY=N\n\n"
+                    "\tReport minor GC's taking more than N microseconds.");
+            exit(0);
+        }
+        enableProfiling_ = true;
+        profileThreshold_ = atoi(env);
+    }
 
     MOZ_ASSERT(isEnabled());
     return true;
@@ -85,7 +98,9 @@ js::Nursery::init(uint32_t maxNurseryBytes)
 js::Nursery::~Nursery()
 {
     if (start())
-        UnmapPages((void *)start(), nurserySize());
+        UnmapPages((void*)start(), nurserySize());
+
+    js_delete(freeMallocedBuffersTask);
 }
 
 void
@@ -100,7 +115,7 @@ js::Nursery::updateDecommittedRegion()
         uintptr_t decommitSize = heapEnd() - decommitStart;
         MOZ_ASSERT(decommitStart == AlignBytes(decommitStart, Alignment));
         MOZ_ASSERT(decommitSize == AlignBytes(decommitStart, Alignment));
-        MarkPagesUnused((void *)decommitStart, decommitSize);
+        MarkPagesUnused((void*)decommitStart, decommitSize);
 # endif
     }
 #endif
@@ -160,43 +175,46 @@ js::Nursery::leaveZealMode() {
 }
 #endif // JS_GC_ZEAL
 
-JSObject *
-js::Nursery::allocateObject(JSContext *cx, size_t size, size_t numDynamic)
+JSObject*
+js::Nursery::allocateObject(JSContext* cx, size_t size, size_t numDynamic, const js::Class* clasp)
 {
     /* Ensure there's enough space to replace the contents with a RelocationOverlay. */
     MOZ_ASSERT(size >= sizeof(RelocationOverlay));
 
-    /* Attempt to allocate slots contiguously after object, if possible. */
-    if (numDynamic && numDynamic <= MaxNurserySlots) {
-        size_t totalSize = size + sizeof(HeapSlot) * numDynamic;
-        JSObject *obj = static_cast<JSObject *>(allocate(totalSize));
-        if (obj) {
-            obj->setInitialSlotsMaybeNonNative(reinterpret_cast<HeapSlot *>(size_t(obj) + size));
-            TraceNurseryAlloc(obj, size);
-            return obj;
-        }
-        /* If we failed to allocate as a block, retry with out-of-line slots. */
-    }
+    /*
+     * Classes with JSCLASS_SKIP_NURSERY_FINALIZE will not have their finalizer
+     * called if they are nursery allocated and not promoted to the tenured
+     * heap. The finalizers for these classes must do nothing except free data
+     * which was allocated via Nursery::allocateBuffer.
+     */
+    MOZ_ASSERT_IF(clasp->finalize, clasp->flags & JSCLASS_SKIP_NURSERY_FINALIZE);
 
-    HeapSlot *slots = nullptr;
+    /* Make the object allocation. */
+    JSObject* obj = static_cast<JSObject*>(allocate(size));
+    if (!obj)
+        return nullptr;
+
+    /* If we want external slots, add them. */
+    HeapSlot* slots = nullptr;
     if (numDynamic) {
-        slots = allocateHugeSlots(cx->zone(), numDynamic);
-        if (MOZ_UNLIKELY(!slots))
+        slots = static_cast<HeapSlot*>(allocateBuffer(cx->zone(), numDynamic * sizeof(HeapSlot)));
+        if (!slots) {
+            /*
+             * It is safe to leave the allocated object uninitialized, since we
+             * do not visit unallocated things in the nursery.
+             */
             return nullptr;
+        }
     }
 
-    JSObject *obj = static_cast<JSObject *>(allocate(size));
-
-    if (obj)
-        obj->setInitialSlotsMaybeNonNative(slots);
-    else
-        freeSlots(slots);
+    /* Always initialize the slots field to match the JIT behavior. */
+    obj->setInitialSlotsMaybeNonNative(slots);
 
     TraceNurseryAlloc(obj, size);
     return obj;
 }
 
-void *
+void*
 js::Nursery::allocate(size_t size)
 {
     MOZ_ASSERT(isEnabled());
@@ -209,552 +227,192 @@ js::Nursery::allocate(size_t size)
         setCurrentChunk(currentChunk_ + 1);
     }
 
-    void *thing = (void *)position();
+    void* thing = (void*)position();
     position_ = position() + size;
 
     JS_EXTRA_POISON(thing, JS_ALLOCATED_NURSERY_PATTERN, size);
     return thing;
 }
 
-/* Internally, this function is used to allocate elements as well as slots. */
-HeapSlot *
-js::Nursery::allocateSlots(JSObject *obj, uint32_t nslots)
+void*
+js::Nursery::allocateBuffer(Zone* zone, uint32_t nbytes)
+{
+    MOZ_ASSERT(nbytes > 0);
+
+    if (nbytes <= MaxNurseryBufferSize) {
+        void* buffer = allocate(nbytes);
+        if (buffer)
+            return buffer;
+    }
+
+    void* buffer = zone->pod_malloc<uint8_t>(nbytes);
+    if (buffer) {
+        /* If this put fails, we will only leak the slots. */
+        (void)mallocedBuffers.put(buffer);
+    }
+    return buffer;
+}
+
+void*
+js::Nursery::allocateBuffer(JSObject* obj, uint32_t nbytes)
 {
     MOZ_ASSERT(obj);
-    MOZ_ASSERT(nslots > 0);
+    MOZ_ASSERT(nbytes > 0);
 
     if (!IsInsideNursery(obj))
-        return obj->zone()->pod_malloc<HeapSlot>(nslots);
-
-    if (nslots > MaxNurserySlots)
-        return allocateHugeSlots(obj->zone(), nslots);
-
-    size_t size = sizeof(HeapSlot) * nslots;
-    HeapSlot *slots = static_cast<HeapSlot *>(allocate(size));
-    if (slots)
-        return slots;
-
-    return allocateHugeSlots(obj->zone(), nslots);
+        return obj->zone()->pod_malloc<uint8_t>(nbytes);
+    return allocateBuffer(obj->zone(), nbytes);
 }
 
-ObjectElements *
-js::Nursery::allocateElements(JSObject *obj, uint32_t nelems)
-{
-    MOZ_ASSERT(nelems >= ObjectElements::VALUES_PER_HEADER);
-    return reinterpret_cast<ObjectElements *>(allocateSlots(obj, nelems));
-}
-
-HeapSlot *
-js::Nursery::reallocateSlots(JSObject *obj, HeapSlot *oldSlots,
-                             uint32_t oldCount, uint32_t newCount)
+void*
+js::Nursery::reallocateBuffer(JSObject* obj, void* oldBuffer,
+                              uint32_t oldBytes, uint32_t newBytes)
 {
     if (!IsInsideNursery(obj))
-        return obj->zone()->pod_realloc<HeapSlot>(oldSlots, oldCount, newCount);
+        return obj->zone()->pod_realloc<uint8_t>((uint8_t*)oldBuffer, oldBytes, newBytes);
 
-    if (!isInside(oldSlots)) {
-        HeapSlot *newSlots = obj->zone()->pod_realloc<HeapSlot>(oldSlots, oldCount, newCount);
-        if (newSlots && oldSlots != newSlots) {
-            hugeSlots.remove(oldSlots);
+    if (!isInside(oldBuffer)) {
+        void* newBuffer = obj->zone()->pod_realloc<uint8_t>((uint8_t*)oldBuffer, oldBytes, newBytes);
+        if (newBuffer && oldBytes != newBytes) {
+            removeMallocedBuffer(oldBuffer);
             /* If this put fails, we will only leak the slots. */
-            (void)hugeSlots.put(newSlots);
+            (void)mallocedBuffers.put(newBuffer);
         }
-        return newSlots;
+        return newBuffer;
     }
 
     /* The nursery cannot make use of the returned slots data. */
-    if (newCount < oldCount)
-        return oldSlots;
+    if (newBytes < oldBytes)
+        return oldBuffer;
 
-    HeapSlot *newSlots = allocateSlots(obj, newCount);
-    if (newSlots)
-        PodCopy(newSlots, oldSlots, oldCount);
-    return newSlots;
-}
-
-ObjectElements *
-js::Nursery::reallocateElements(JSObject *obj, ObjectElements *oldHeader,
-                                uint32_t oldCount, uint32_t newCount)
-{
-    HeapSlot *slots = reallocateSlots(obj, reinterpret_cast<HeapSlot *>(oldHeader),
-                                      oldCount, newCount);
-    return reinterpret_cast<ObjectElements *>(slots);
+    void* newBuffer = allocateBuffer(obj->zone(), newBytes);
+    if (newBuffer)
+        PodCopy((uint8_t*)newBuffer, (uint8_t*)oldBuffer, oldBytes);
+    return newBuffer;
 }
 
 void
-js::Nursery::freeSlots(HeapSlot *slots)
+js::Nursery::freeBuffer(void* buffer)
 {
-    if (!isInside(slots)) {
-        hugeSlots.remove(slots);
-        js_free(slots);
+    if (!isInside(buffer)) {
+        removeMallocedBuffer(buffer);
+        js_free(buffer);
     }
-}
-
-HeapSlot *
-js::Nursery::allocateHugeSlots(JS::Zone *zone, size_t nslots)
-{
-    HeapSlot *slots = zone->pod_malloc<HeapSlot>(nslots);
-    /* If this put fails, we will only leak the slots. */
-    if (slots)
-        (void)hugeSlots.put(slots);
-    return slots;
-}
-
-namespace js {
-namespace gc {
-
-class MinorCollectionTracer : public JSTracer
-{
-  public:
-    Nursery *nursery;
-    AutoTraceSession session;
-
-    /* Amount of data moved to the tenured generation during collection. */
-    size_t tenuredSize;
-
-    /*
-     * This list is threaded through the Nursery using the space from already
-     * moved things. The list is used to fix up the moved things and to find
-     * things held live by intra-Nursery pointers.
-     */
-    RelocationOverlay *head;
-    RelocationOverlay **tail;
-
-    /* Save and restore all of the runtime state we use during MinorGC. */
-    bool savedRuntimeNeedBarrier;
-    AutoDisableProxyCheck disableStrictProxyChecking;
-    AutoEnterOOMUnsafeRegion oomUnsafeRegion;
-
-    /* Insert the given relocation entry into the list of things to visit. */
-    MOZ_ALWAYS_INLINE void insertIntoFixupList(RelocationOverlay *entry) {
-        *tail = entry;
-        tail = &entry->next_;
-        *tail = nullptr;
-    }
-
-    MinorCollectionTracer(JSRuntime *rt, Nursery *nursery)
-      : JSTracer(rt, Nursery::MinorGCCallback, TraceWeakMapKeysValues),
-        nursery(nursery),
-        session(rt, MinorCollecting),
-        tenuredSize(0),
-        head(nullptr),
-        tail(&head),
-        savedRuntimeNeedBarrier(rt->needsIncrementalBarrier()),
-        disableStrictProxyChecking(rt)
-    {
-        rt->gc.incGcNumber();
-
-        /*
-         * We disable the runtime needsIncrementalBarrier() check so that
-         * pre-barriers do not fire on objects that have been relocated. The
-         * pre-barrier's call to obj->zone() will try to look through shape_,
-         * which is now the relocation magic and will crash. However,
-         * zone->needsIncrementalBarrier() must still be set correctly so that
-         * allocations we make in minor GCs between incremental slices will
-         * allocate their objects marked.
-         */
-        rt->setNeedsIncrementalBarrier(false);
-    }
-
-    ~MinorCollectionTracer() {
-        runtime()->setNeedsIncrementalBarrier(savedRuntimeNeedBarrier);
-    }
-};
-
-} /* namespace gc */
-} /* namespace js */
-
-static AllocKind
-GetObjectAllocKindForCopy(const Nursery &nursery, JSObject *obj)
-{
-    if (obj->is<ArrayObject>()) {
-        ArrayObject *aobj = &obj->as<ArrayObject>();
-        MOZ_ASSERT(aobj->numFixedSlots() == 0);
-
-        /* Use minimal size object if we are just going to copy the pointer. */
-        if (!nursery.isInside(aobj->getElementsHeader()))
-            return FINALIZE_OBJECT0_BACKGROUND;
-
-        size_t nelements = aobj->getDenseCapacity();
-        return GetBackgroundAllocKind(GetGCArrayKind(nelements));
-    }
-
-    if (obj->is<JSFunction>())
-        return obj->as<JSFunction>().getAllocKind();
-
-    /*
-     * Typed arrays in the nursery may have a lazily allocated buffer, make
-     * sure there is room for the array's fixed data when moving the array.
-     */
-    if (obj->is<TypedArrayObject>() && !obj->as<TypedArrayObject>().buffer()) {
-        size_t nbytes = obj->as<TypedArrayObject>().byteLength();
-        return GetBackgroundAllocKind(TypedArrayObject::AllocKindForLazyBuffer(nbytes));
-    }
-
-    // Proxies have finalizers and are not nursery allocated.
-    MOZ_ASSERT(!IsProxy(obj));
-
-    // Inlined opaque typed objects are followed by their data, so make sure we
-    // copy it all over to the new object.
-    if (obj->is<InlineTypedObject>()) {
-        // Figure out the size of this object, from the prototype's TypeDescr.
-        // The objects we are traversing here are all tenured, so we don't need
-        // to check forwarding pointers.
-        TypeDescr *descr = &obj->as<InlineTypedObject>().typeDescr();
-        MOZ_ASSERT(!IsInsideNursery(descr));
-        return InlineTypedObject::allocKindForTypeDescriptor(descr);
-    }
-
-    // Outline typed objects use the minimum allocation kind.
-    if (obj->is<OutlineTypedObject>())
-        return FINALIZE_OBJECT0;
-
-    // The only non-native objects in existence are proxies and typed objects.
-    MOZ_ASSERT(obj->isNative());
-
-    AllocKind kind = GetGCObjectFixedSlotsKind(obj->as<NativeObject>().numFixedSlots());
-    MOZ_ASSERT(!IsBackgroundFinalized(kind));
-    MOZ_ASSERT(CanBeFinalizedInBackground(kind, obj->getClass()));
-    return GetBackgroundAllocKind(kind);
-}
-
-MOZ_ALWAYS_INLINE TenuredCell *
-js::Nursery::allocateFromTenured(Zone *zone, AllocKind thingKind)
-{
-    TenuredCell *t =
-        zone->allocator.arenas.allocateFromFreeList(thingKind, Arena::thingSize(thingKind));
-    if (t)
-        return t;
-    zone->allocator.arenas.checkEmptyFreeList(thingKind);
-    return zone->allocator.arenas.allocateFromArena(zone, thingKind);
 }
 
 void
-js::Nursery::setSlotsForwardingPointer(HeapSlot *oldSlots, HeapSlot *newSlots, uint32_t nslots)
+Nursery::setForwardingPointer(void* oldData, void* newData, bool direct)
 {
+    MOZ_ASSERT(isInside(oldData));
+    MOZ_ASSERT(!isInside(newData));
+
+    if (direct) {
+        *reinterpret_cast<void**>(oldData) = newData;
+    } else {
+        if (!forwardedBuffers.initialized() && !forwardedBuffers.init())
+            CrashAtUnhandlableOOM("Nursery::setForwardingPointer");
+#ifdef DEBUG
+        if (ForwardedBufferMap::Ptr p = forwardedBuffers.lookup(oldData))
+            MOZ_ASSERT(p->value() == newData);
+#endif
+        if (!forwardedBuffers.put(oldData, newData))
+            CrashAtUnhandlableOOM("Nursery::setForwardingPointer");
+    }
+}
+
+void
+Nursery::setSlotsForwardingPointer(HeapSlot* oldSlots, HeapSlot* newSlots, uint32_t nslots)
+{
+    // Slot arrays always have enough space for a forwarding pointer, since the
+    // number of slots is never zero.
     MOZ_ASSERT(nslots > 0);
-    MOZ_ASSERT(isInside(oldSlots));
-    MOZ_ASSERT(!isInside(newSlots));
-    *reinterpret_cast<HeapSlot **>(oldSlots) = newSlots;
+    setForwardingPointer(oldSlots, newSlots, /* direct = */ true);
 }
 
 void
-js::Nursery::setElementsForwardingPointer(ObjectElements *oldHeader, ObjectElements *newHeader,
-                                          uint32_t nelems)
+Nursery::setElementsForwardingPointer(ObjectElements* oldHeader, ObjectElements* newHeader,
+                                      uint32_t nelems)
 {
-    /*
-     * If the JIT has hoisted a zero length pointer, then we do not need to
-     * relocate it because reads and writes to/from this pointer are invalid.
-     */
-    if (nelems - ObjectElements::VALUES_PER_HEADER < 1)
-        return;
-    MOZ_ASSERT(isInside(oldHeader));
-    MOZ_ASSERT(!isInside(newHeader));
-    *reinterpret_cast<HeapSlot **>(oldHeader->elements()) = newHeader->elements();
+    // Only use a direct forwarding pointer if there is enough space for one.
+    setForwardingPointer(oldHeader->elements(), newHeader->elements(),
+                         nelems > ObjectElements::VALUES_PER_HEADER);
 }
 
 #ifdef DEBUG
-static bool IsWriteableAddress(void *ptr)
+static bool IsWriteableAddress(void* ptr)
 {
-    volatile uint64_t *vPtr = reinterpret_cast<volatile uint64_t *>(ptr);
+    volatile uint64_t* vPtr = reinterpret_cast<volatile uint64_t*>(ptr);
     *vPtr = *vPtr;
     return true;
 }
 #endif
 
 void
-js::Nursery::forwardBufferPointer(HeapSlot **pSlotsElems)
+js::Nursery::forwardBufferPointer(HeapSlot** pSlotsElems)
 {
-    HeapSlot *old = *pSlotsElems;
+    HeapSlot* old = *pSlotsElems;
 
     if (!isInside(old))
         return;
 
-    /*
-     * If the elements buffer is zero length, the "first" item could be inside
-     * of the next object or past the end of the allocable area.  However,
-     * since we always store the runtime as the last word in the nursery,
-     * isInside will still be true, even if this zero-size allocation abuts the
-     * end of the allocable area. Thus, it is always safe to read the first
-     * word of |old| here.
-     */
-    *pSlotsElems = *reinterpret_cast<HeapSlot **>(old);
+    // The new location for this buffer is either stored inline with it or in
+    // the forwardedBuffers table.
+    do {
+        if (forwardedBuffers.initialized()) {
+            if (ForwardedBufferMap::Ptr p = forwardedBuffers.lookup(old)) {
+                *pSlotsElems = reinterpret_cast<HeapSlot*>(p->value());
+                break;
+            }
+        }
+
+        *pSlotsElems = *reinterpret_cast<HeapSlot**>(old);
+    } while (false);
+
     MOZ_ASSERT(!isInside(*pSlotsElems));
     MOZ_ASSERT(IsWriteableAddress(*pSlotsElems));
 }
 
-// Structure for counting how many times objects of a particular type have been
-// tenured during a minor collection.
-struct TenureCount
-{
-    types::TypeObject *type;
-    int count;
-};
-
-// Keep rough track of how many times we tenure objects of particular types
-// during minor collections, using a fixed size hash for efficiency at the cost
-// of potential collisions.
-struct Nursery::TenureCountCache
-{
-    TenureCount entries[16];
-
-    TenureCountCache() { PodZero(this); }
-
-    TenureCount &findEntry(types::TypeObject *type) {
-        return entries[PointerHasher<types::TypeObject *, 3>::hash(type) % ArrayLength(entries)];
-    }
-};
-
-void
-js::Nursery::collectToFixedPoint(MinorCollectionTracer *trc, TenureCountCache &tenureCounts)
-{
-    for (RelocationOverlay *p = trc->head; p; p = p->next()) {
-        JSObject *obj = static_cast<JSObject*>(p->forwardingAddress());
-        traceObject(trc, obj);
-
-        TenureCount &entry = tenureCounts.findEntry(obj->type());
-        if (entry.type == obj->type()) {
-            entry.count++;
-        } else if (!entry.type) {
-            entry.type = obj->type();
-            entry.count = 1;
-        }
-    }
-}
-
-MOZ_ALWAYS_INLINE void
-js::Nursery::traceObject(MinorCollectionTracer *trc, JSObject *obj)
-{
-    const Class *clasp = obj->getClass();
-    if (clasp->trace)
-        clasp->trace(trc, obj);
-
-    MOZ_ASSERT(obj->isNative() == clasp->isNative());
-    if (!clasp->isNative())
-        return;
-    NativeObject *nobj = &obj->as<NativeObject>();
-
-    // Note: the contents of copy on write elements pointers are filled in
-    // during parsing and cannot contain nursery pointers.
-    if (!nobj->hasEmptyElements() && !nobj->denseElementsAreCopyOnWrite())
-        markSlots(trc, nobj->getDenseElements(), nobj->getDenseInitializedLength());
-
-    HeapSlot *fixedStart, *fixedEnd, *dynStart, *dynEnd;
-    nobj->getSlotRange(0, nobj->slotSpan(), &fixedStart, &fixedEnd, &dynStart, &dynEnd);
-    markSlots(trc, fixedStart, fixedEnd);
-    markSlots(trc, dynStart, dynEnd);
-}
-
-MOZ_ALWAYS_INLINE void
-js::Nursery::markSlots(MinorCollectionTracer *trc, HeapSlot *vp, uint32_t nslots)
-{
-    markSlots(trc, vp, vp + nslots);
-}
-
-MOZ_ALWAYS_INLINE void
-js::Nursery::markSlots(MinorCollectionTracer *trc, HeapSlot *vp, HeapSlot *end)
-{
-    for (; vp != end; ++vp)
-        markSlot(trc, vp);
-}
-
-MOZ_ALWAYS_INLINE void
-js::Nursery::markSlot(MinorCollectionTracer *trc, HeapSlot *slotp)
-{
-    if (!slotp->isObject())
-        return;
-
-    JSObject *obj = &slotp->toObject();
-    if (!IsInsideNursery(obj))
-        return;
-
-    if (getForwardedPointer(&obj)) {
-        slotp->unsafeGet()->setObject(*obj);
-        return;
-    }
-
-    JSObject *tenured = static_cast<JSObject*>(moveToTenured(trc, obj));
-    slotp->unsafeGet()->setObject(*tenured);
-}
-
-void *
-js::Nursery::moveToTenured(MinorCollectionTracer *trc, JSObject *src)
-{
-    AllocKind dstKind = GetObjectAllocKindForCopy(*this, src);
-    Zone *zone = src->zone();
-    JSObject *dst = reinterpret_cast<JSObject *>(allocateFromTenured(zone, dstKind));
-    if (!dst)
-        CrashAtUnhandlableOOM("Failed to allocate object while tenuring.");
-
-    trc->tenuredSize += moveObjectToTenured(dst, src, dstKind);
-
-    RelocationOverlay *overlay = RelocationOverlay::fromCell(src);
-    overlay->forwardTo(dst);
-    trc->insertIntoFixupList(overlay);
-
-    TracePromoteToTenured(src, dst);
-    return static_cast<void *>(dst);
-}
-
-MOZ_ALWAYS_INLINE size_t
-js::Nursery::moveObjectToTenured(JSObject *dst, JSObject *src, AllocKind dstKind)
-{
-    size_t srcSize = Arena::thingSize(dstKind);
-    size_t tenuredSize = srcSize;
-
-    /*
-     * Arrays do not necessarily have the same AllocKind between src and dst.
-     * We deal with this by copying elements manually, possibly re-inlining
-     * them if there is adequate room inline in dst.
-     *
-     * For Arrays we're reducing tenuredSize to the smaller srcSize
-     * because moveElementsToTenured() accounts for all Array elements,
-     * even if they are inlined.
-     */
-    if (src->is<ArrayObject>())
-        tenuredSize = srcSize = sizeof(NativeObject);
-
-    js_memcpy(dst, src, srcSize);
-    if (src->isNative()) {
-        NativeObject *ndst = &dst->as<NativeObject>(), *nsrc = &src->as<NativeObject>();
-        tenuredSize += moveSlotsToTenured(ndst, nsrc, dstKind);
-        tenuredSize += moveElementsToTenured(ndst, nsrc, dstKind);
-    }
-
-    if (src->is<TypedArrayObject>())
-        forwardTypedArrayPointers(&dst->as<TypedArrayObject>(), &src->as<TypedArrayObject>());
-
-    /* The shape's list head may point into the old object. */
-    if (&src->shape_ == dst->shape_->listp)
-        dst->shape_->listp = &dst->shape_;
-
-    return tenuredSize;
-}
-
-void
-js::Nursery::forwardTypedArrayPointers(TypedArrayObject *dst, TypedArrayObject *src)
-{
-    /*
-     * Typed array data may be stored inline inside the object's fixed slots. If
-     * so, we need update the private pointer and leave a forwarding pointer at
-     * the start of the data.
-     */
-    if (src->buffer()) {
-        MOZ_ASSERT(!isInside(src->getPrivate()));
-        return;
-    }
-
-    void *srcData = src->fixedData(TypedArrayObject::FIXED_DATA_START);
-    void *dstData = dst->fixedData(TypedArrayObject::FIXED_DATA_START);
-    MOZ_ASSERT(src->getPrivate() == srcData);
-    dst->setPrivate(dstData);
-
-    /*
-     * We don't know the number of slots here, but
-     * TypedArrayObject::AllocKindForLazyBuffer ensures that it's always at
-     * least one.
-     */
-    size_t nslots = 1;
-    setSlotsForwardingPointer(reinterpret_cast<HeapSlot*>(srcData),
-                              reinterpret_cast<HeapSlot*>(dstData),
-                              nslots);
-}
-
-MOZ_ALWAYS_INLINE size_t
-js::Nursery::moveSlotsToTenured(NativeObject *dst, NativeObject *src, AllocKind dstKind)
-{
-    /* Fixed slots have already been copied over. */
-    if (!src->hasDynamicSlots())
-        return 0;
-
-    if (!isInside(src->slots_)) {
-        hugeSlots.remove(src->slots_);
-        return 0;
-    }
-
-    Zone *zone = src->zone();
-    size_t count = src->numDynamicSlots();
-    dst->slots_ = zone->pod_malloc<HeapSlot>(count);
-    if (!dst->slots_)
-        CrashAtUnhandlableOOM("Failed to allocate slots while tenuring.");
-    PodCopy(dst->slots_, src->slots_, count);
-    setSlotsForwardingPointer(src->slots_, dst->slots_, count);
-    return count * sizeof(HeapSlot);
-}
-
-MOZ_ALWAYS_INLINE size_t
-js::Nursery::moveElementsToTenured(NativeObject *dst, NativeObject *src, AllocKind dstKind)
-{
-    if (src->hasEmptyElements() || src->denseElementsAreCopyOnWrite())
-        return 0;
-
-    Zone *zone = src->zone();
-    ObjectElements *srcHeader = src->getElementsHeader();
-    ObjectElements *dstHeader;
-
-    /* TODO Bug 874151: Prefer to put element data inline if we have space. */
-    if (!isInside(srcHeader)) {
-        MOZ_ASSERT(src->elements_ == dst->elements_);
-        hugeSlots.remove(reinterpret_cast<HeapSlot*>(srcHeader));
-        return 0;
-    }
-
-    size_t nslots = ObjectElements::VALUES_PER_HEADER + srcHeader->capacity;
-
-    /* Unlike other objects, Arrays can have fixed elements. */
-    if (src->is<ArrayObject>() && nslots <= GetGCKindSlots(dstKind)) {
-        dst->as<ArrayObject>().setFixedElements();
-        dstHeader = dst->as<ArrayObject>().getElementsHeader();
-        js_memcpy(dstHeader, srcHeader, nslots * sizeof(HeapSlot));
-        setElementsForwardingPointer(srcHeader, dstHeader, nslots);
-        return nslots * sizeof(HeapSlot);
-    }
-
-    MOZ_ASSERT(nslots >= 2);
-    dstHeader = reinterpret_cast<ObjectElements *>(zone->pod_malloc<HeapSlot>(nslots));
-    if (!dstHeader)
-        CrashAtUnhandlableOOM("Failed to allocate elements while tenuring.");
-    js_memcpy(dstHeader, srcHeader, nslots * sizeof(HeapSlot));
-    setElementsForwardingPointer(srcHeader, dstHeader, nslots);
-    dst->elements_ = dstHeader->elements();
-    return nslots * sizeof(HeapSlot);
-}
-
-static bool
-ShouldMoveToTenured(MinorCollectionTracer *trc, void **thingp)
-{
-    Cell *cell = static_cast<Cell *>(*thingp);
-    Nursery &nursery = *trc->nursery;
-    return !nursery.isInside(thingp) && IsInsideNursery(cell) &&
-           !nursery.getForwardedPointer(thingp);
-}
-
-/* static */ void
-js::Nursery::MinorGCCallback(JSTracer *jstrc, void **thingp, JSGCTraceKind kind)
-{
-    MinorCollectionTracer *trc = static_cast<MinorCollectionTracer *>(jstrc);
-    if (ShouldMoveToTenured(trc, thingp))
-        *thingp = trc->nursery->moveToTenured(trc, static_cast<JSObject *>(*thingp));
-}
-
-#ifdef PROFILE_NURSERY
-#define TIME_START(name) int64_t timstampStart_##name = PRMJ_Now()
-#define TIME_END(name) int64_t timstampEnd_##name = PRMJ_Now()
-#define TIME_TOTAL(name) (timstampEnd_##name - timstampStart_##name)
-#else
-#define TIME_START(name)
-#define TIME_END(name)
-#define TIME_TOTAL(name)
+js::TenuringTracer::TenuringTracer(JSRuntime* rt, Nursery* nursery)
+  : JSTracer(rt, JSTracer::TracerKindTag::Tenuring, TraceWeakMapKeysValues)
+  , nursery_(*nursery)
+  , tenuredSize(0)
+  , head(nullptr)
+  , tail(&head)
+  , savedRuntimeNeedBarrier(rt->needsIncrementalBarrier())
+#ifdef JS_GC_ZEAL
+  , verifyingPostBarriers(nullptr)
 #endif
+{
+    rt->gc.incGcNumber();
+
+    // We disable the runtime needsIncrementalBarrier() check so that
+    // pre-barriers do not fire on objects that have been relocated. The
+    // pre-barrier's call to obj->zone() will try to look through shape_,
+    // which is now the relocation magic and will crash. However,
+    // zone->needsIncrementalBarrier() must still be set correctly so that
+    // allocations we make in minor GCs between incremental slices will
+    // allocate their objects marked.
+    rt->setNeedsIncrementalBarrier(false);
+}
+
+js::TenuringTracer::~TenuringTracer()
+{
+    runtime()->setNeedsIncrementalBarrier(savedRuntimeNeedBarrier);
+}
+
+#define TIME_START(name) int64_t timstampStart_##name = enableProfiling_ ? PRMJ_Now() : 0
+#define TIME_END(name) int64_t timstampEnd_##name = enableProfiling_ ? PRMJ_Now() : 0
+#define TIME_TOTAL(name) (timstampEnd_##name - timstampStart_##name)
 
 void
-js::Nursery::collect(JSRuntime *rt, JS::gcreason::Reason reason, TypeObjectList *pretenureTypes)
+js::Nursery::collect(JSRuntime* rt, JS::gcreason::Reason reason, ObjectGroupList* pretenureGroups)
 {
     if (rt->mainThread.suppressGC)
         return;
 
     JS_AbortIfWrongThread(rt);
 
-    StoreBuffer &sb = rt->gc.storeBuffer;
+    StoreBuffer& sb = rt->gc.storeBuffer;
     if (!isEnabled() || isEmpty()) {
         /*
          * Our barriers are not always exact, and there may be entries in the
@@ -766,59 +424,60 @@ js::Nursery::collect(JSRuntime *rt, JS::gcreason::Reason reason, TypeObjectList 
         return;
     }
 
+    rt->gc.incMinorGcNumber();
+
     rt->gc.stats.count(gcstats::STAT_MINOR_GC);
 
     TraceMinorGCStart();
 
     TIME_START(total);
 
+    AutoTraceSession session(rt, MinorCollecting);
     AutoStopVerifyingBarriers av(rt, false);
+    AutoDisableProxyCheck disableStrictProxyChecking(rt);
+    DebugOnly<AutoEnterOOMUnsafeRegion> oomUnsafeRegion;
 
     // Move objects pointed to by roots from the nursery to the major heap.
-    MinorCollectionTracer trc(rt, this);
+    TenuringTracer mover(rt, this);
 
     // Mark the store buffer. This must happen first.
     TIME_START(markValues);
-    sb.markValues(&trc);
+    sb.markValues(mover);
     TIME_END(markValues);
 
     TIME_START(markCells);
-    sb.markCells(&trc);
+    sb.markCells(mover);
     TIME_END(markCells);
 
     TIME_START(markSlots);
-    sb.markSlots(&trc);
+    sb.markSlots(mover);
     TIME_END(markSlots);
 
     TIME_START(markWholeCells);
-    sb.markWholeCells(&trc);
+    sb.markWholeCells(mover);
     TIME_END(markWholeCells);
 
     TIME_START(markRelocatableValues);
-    sb.markRelocatableValues(&trc);
+    sb.markRelocatableValues(mover);
     TIME_END(markRelocatableValues);
 
     TIME_START(markRelocatableCells);
-    sb.markRelocatableCells(&trc);
+    sb.markRelocatableCells(mover);
     TIME_END(markRelocatableCells);
 
     TIME_START(markGenericEntries);
-    sb.markGenericEntries(&trc);
+    sb.markGenericEntries(&mover);
     TIME_END(markGenericEntries);
 
-    TIME_START(checkHashTables);
-#ifdef JS_GC_ZEAL
-    if (rt->gcZeal() == ZealCheckHashTablesOnMinorGC)
-        CheckHashTablesAfterMovingGC(rt);
-#endif
-    TIME_END(checkHashTables);
-
     TIME_START(markRuntime);
-    rt->gc.markRuntime(&trc);
+    rt->gc.markRuntime(&mover);
     TIME_END(markRuntime);
 
     TIME_START(markDebugger);
-    Debugger::markAll(&trc);
+    {
+        gcstats::AutoPhase ap(rt->gc.stats, gcstats::PHASE_MARK_ROOTS);
+        Debugger::markAll(&mover);
+    }
     TIME_END(markDebugger);
 
     TIME_START(clearNewObjectCache);
@@ -831,7 +490,7 @@ js::Nursery::collect(JSRuntime *rt, JS::gcreason::Reason reason, TypeObjectList 
     // objects are left to move. That is, we iterate to a fixed point.
     TIME_START(collectToFP);
     TenureCountCache tenureCounts;
-    collectToFixedPoint(&trc, tenureCounts);
+    collectToFixedPoint(mover, tenureCounts);
     TIME_END(collectToFP);
 
     // Update the array buffer object's view lists.
@@ -844,36 +503,14 @@ js::Nursery::collect(JSRuntime *rt, JS::gcreason::Reason reason, TypeObjectList 
 
     // Update any slot or element pointers whose destination has been tenured.
     TIME_START(updateJitActivations);
-    js::jit::UpdateJitActivationsForMinorGC<Nursery>(&rt->mainThread, &trc);
+    js::jit::UpdateJitActivationsForMinorGC(rt, &mover);
+    forwardedBuffers.finish();
     TIME_END(updateJitActivations);
 
-    // Resize the nursery.
-    TIME_START(resize);
-    double promotionRate = trc.tenuredSize / double(allocationEnd() - start());
-    if (promotionRate > 0.05)
-        growAllocableSpace();
-    else if (promotionRate < 0.01)
-        shrinkAllocableSpace();
-    TIME_END(resize);
-
-    // If we are promoting the nursery, or exhausted the store buffer with
-    // pointers to nursery things, which will force a collection well before
-    // the nursery is full, look for object types that are getting promoted
-    // excessively and try to pretenure them.
-    TIME_START(pretenure);
-    if (pretenureTypes && (promotionRate > 0.8 || reason == JS::gcreason::FULL_STORE_BUFFER)) {
-        for (size_t i = 0; i < ArrayLength(tenureCounts.entries); i++) {
-            const TenureCount &entry = tenureCounts.entries[i];
-            if (entry.count >= 3000)
-                pretenureTypes->append(entry.type); // ignore alloc failure
-        }
-    }
-    TIME_END(pretenure);
-
     // Sweep.
-    TIME_START(freeHugeSlots);
-    freeHugeSlots();
-    TIME_END(freeHugeSlots);
+    TIME_START(freeMallocedBuffers);
+    freeMallocedBuffers();
+    TIME_END(freeMallocedBuffers);
 
     TIME_START(sweep);
     sweep();
@@ -882,6 +519,37 @@ js::Nursery::collect(JSRuntime *rt, JS::gcreason::Reason reason, TypeObjectList 
     TIME_START(clearStoreBuffer);
     rt->gc.storeBuffer.clear();
     TIME_END(clearStoreBuffer);
+
+    // Make sure hashtables have been updated after the collection.
+    TIME_START(checkHashTables);
+#ifdef JS_GC_ZEAL
+    if (rt->gcZeal() == ZealCheckHashTablesOnMinorGC)
+        CheckHashTablesAfterMovingGC(rt);
+#endif
+    TIME_END(checkHashTables);
+
+    // Resize the nursery.
+    TIME_START(resize);
+    double promotionRate = mover.tenuredSize / double(allocationEnd() - start());
+    if (promotionRate > 0.05)
+        growAllocableSpace();
+    else if (promotionRate < 0.01)
+        shrinkAllocableSpace();
+    TIME_END(resize);
+
+    // If we are promoting the nursery, or exhausted the store buffer with
+    // pointers to nursery things, which will force a collection well before
+    // the nursery is full, look for object groups that are getting promoted
+    // excessively and try to pretenure them.
+    TIME_START(pretenure);
+    if (pretenureGroups && (promotionRate > 0.8 || reason == JS::gcreason::FULL_STORE_BUFFER)) {
+        for (size_t i = 0; i < ArrayLength(tenureCounts.entries); i++) {
+            const TenureCount& entry = tenureCounts.entries[i];
+            if (entry.count >= 3000)
+                pretenureGroups->append(entry.group); // ignore alloc failure
+        }
+    }
+    TIME_END(pretenure);
 
     // We ignore gcMaxBytes when allocating for minor collection. However, if we
     // overflowed, we disable the nursery. The next time we allocate, we'll fail
@@ -893,14 +561,12 @@ js::Nursery::collect(JSRuntime *rt, JS::gcreason::Reason reason, TypeObjectList 
 
     TraceMinorGCEnd();
 
-#ifdef PROFILE_NURSERY
     int64_t totalTime = TIME_TOTAL(total);
-
-    if (totalTime >= GCReportThreshold) {
+    if (enableProfiling_ && totalTime >= profileThreshold_) {
         static bool printedHeader = false;
         if (!printedHeader) {
             fprintf(stderr,
-                    "MinorGC: Reason               PRate  Size Time   mkVals mkClls mkSlts mkWCll mkRVal mkRCll mkGnrc ckTbls mkRntm mkDbgr clrNOC collct swpABO updtIn resize pretnr frSlts clrSB  sweep\n");
+                    "MinorGC: Reason               PRate  Size Time   mkVals mkClls mkSlts mkWCll mkRVal mkRCll mkGnrc ckTbls mkRntm mkDbgr clrNOC collct swpABO updtIn runFin frSlts clrSB  sweep resize pretnr\n");
             printedHeader = true;
         }
 
@@ -925,14 +591,13 @@ js::Nursery::collect(JSRuntime *rt, JS::gcreason::Reason reason, TypeObjectList 
                 TIME_TOTAL(collectToFP),
                 TIME_TOTAL(sweepArrayBufferViewList),
                 TIME_TOTAL(updateJitActivations),
-                TIME_TOTAL(resize),
-                TIME_TOTAL(pretenure),
-                TIME_TOTAL(freeHugeSlots),
+                TIME_TOTAL(freeMallocedBuffers),
                 TIME_TOTAL(clearStoreBuffer),
-                TIME_TOTAL(sweep));
+                TIME_TOTAL(sweep),
+                TIME_TOTAL(resize),
+                TIME_TOTAL(pretenure));
 #undef FMT
     }
-#endif
 }
 
 #undef TIME_START
@@ -940,12 +605,47 @@ js::Nursery::collect(JSRuntime *rt, JS::gcreason::Reason reason, TypeObjectList 
 #undef TIME_TOTAL
 
 void
-js::Nursery::freeHugeSlots()
+js::Nursery::FreeMallocedBuffersTask::transferBuffersToFree(MallocedBuffersSet& buffersToFree)
 {
-    FreeOp *fop = runtime()->defaultFreeOp();
-    for (HugeSlotsSet::Range r = hugeSlots.all(); !r.empty(); r.popFront())
-        fop->free_(r.front());
-    hugeSlots.clear();
+    // Transfer the contents of the source set to the task's buffers_ member by
+    // swapping the sets, which also clears the source.
+    MOZ_ASSERT(!isRunning());
+    MOZ_ASSERT(buffers_.empty());
+    mozilla::Swap(buffers_, buffersToFree);
+}
+
+void
+js::Nursery::FreeMallocedBuffersTask::run()
+{
+    for (MallocedBuffersSet::Range r = buffers_.all(); !r.empty(); r.popFront())
+        fop_->free_(r.front());
+    buffers_.clear();
+}
+
+void
+js::Nursery::freeMallocedBuffers()
+{
+    if (mallocedBuffers.empty())
+        return;
+
+    bool started;
+    {
+        AutoLockHelperThreadState lock;
+        freeMallocedBuffersTask->joinWithLockHeld();
+        freeMallocedBuffersTask->transferBuffersToFree(mallocedBuffers);
+        started = freeMallocedBuffersTask->startWithLockHeld();
+    }
+
+    if (!started)
+        freeMallocedBuffersTask->runFromMainThread(runtime());
+
+    MOZ_ASSERT(mallocedBuffers.empty());
+}
+
+void
+js::Nursery::waitBackgroundFreeEnd()
+{
+    freeMallocedBuffersTask->join();
 }
 
 void
@@ -953,7 +653,7 @@ js::Nursery::sweep()
 {
 #ifdef JS_GC_ZEAL
     /* Poison the nursery contents so touching a freed object will crash. */
-    JS_POISON((void *)start(), JS_SWEPT_NURSERY_PATTERN, nurserySize());
+    JS_POISON((void*)start(), JS_SWEPT_NURSERY_PATTERN, nurserySize());
     for (int i = 0; i < numNurseryChunks_; ++i)
         initChunk(i);
 
@@ -967,7 +667,7 @@ js::Nursery::sweep()
 #endif
     {
 #ifdef JS_CRASH_DIAGNOSTICS
-        JS_POISON((void *)start(), JS_SWEPT_NURSERY_PATTERN, allocationEnd() - start());
+        JS_POISON((void*)start(), JS_SWEPT_NURSERY_PATTERN, allocationEnd() - start());
         for (int i = 0; i < numActiveChunks_; ++i)
             chunk(i).trailer.runtime = runtime();
 #endif
@@ -998,5 +698,3 @@ js::Nursery::shrinkAllocableSpace()
     numActiveChunks_ = Max(numActiveChunks_ - 1, 1);
     updateDecommittedRegion();
 }
-
-#endif /* JSGC_GENERATIONAL */

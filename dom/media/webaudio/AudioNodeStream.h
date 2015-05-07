@@ -31,7 +31,8 @@ class AudioNodeEngine;
  * actual audio processing. AudioNodeStream contains the glue code that
  * integrates audio processing with the MediaStreamGraph.
  */
-class AudioNodeStream : public ProcessedMediaStream {
+class AudioNodeStream : public ProcessedMediaStream
+{
   typedef dom::ChannelCountMode ChannelCountMode;
   typedef dom::ChannelInterpretation ChannelInterpretation;
 
@@ -47,23 +48,8 @@ public:
    */
   AudioNodeStream(AudioNodeEngine* aEngine,
                   MediaStreamGraph::AudioNodeStreamKind aKind,
-                  TrackRate aSampleRate)
-    : ProcessedMediaStream(nullptr),
-      mEngine(aEngine),
-      mSampleRate(aSampleRate),
-      mKind(aKind),
-      mNumberOfInputChannels(2),
-      mMarkAsFinishedAfterThisBlock(false),
-      mAudioParamStream(false),
-      mPassThrough(false)
-  {
-    MOZ_ASSERT(NS_IsMainThread());
-    mChannelCountMode = ChannelCountMode::Max;
-    mChannelInterpretation = ChannelInterpretation::Speakers;
-    // AudioNodes are always producing data
-    mHasCurrentData = true;
-    MOZ_COUNT_CTOR(AudioNodeStream);
-  }
+                  TrackRate aSampleRate,
+                  AudioContext::AudioContextId aContextId);
 
 protected:
   ~AudioNodeStream();
@@ -98,7 +84,7 @@ public:
     mAudioParamStream = true;
   }
 
-  virtual AudioNodeStream* AsAudioNodeStream() MOZ_OVERRIDE { return this; }
+  virtual AudioNodeStream* AsAudioNodeStream() override { return this; }
 
   // Graph thread only
   void SetStreamTimeParameterImpl(uint32_t aIndex, MediaStream* aRelativeToStream,
@@ -106,14 +92,14 @@ public:
   void SetChannelMixingParametersImpl(uint32_t aNumberOfChannels,
                                       ChannelCountMode aChannelCountMoe,
                                       ChannelInterpretation aChannelInterpretation);
-  virtual void ProcessInput(GraphTime aFrom, GraphTime aTo, uint32_t aFlags) MOZ_OVERRIDE;
+  virtual void ProcessInput(GraphTime aFrom, GraphTime aTo, uint32_t aFlags) override;
   /**
    * Produce the next block of output, before input is provided.
    * ProcessInput() will be called later, and it then should not change
    * the output.  This is used only for DelayNodeEngine in a feedback loop.
    */
   void ProduceOutputBeforeInput(GraphTime aFrom);
-  TrackTicks GetCurrentPosition();
+  StreamTime GetCurrentPosition();
   bool IsAudioParamStream() const
   {
     return mAudioParamStream;
@@ -123,13 +109,13 @@ public:
   {
     return mLastChunks;
   }
-  virtual bool MainThreadNeedsUpdates() const MOZ_OVERRIDE
+  virtual bool MainThreadNeedsUpdates() const override
   {
     // Only source and external streams need updates on the main thread.
     return (mKind == MediaStreamGraph::SOURCE_STREAM && mFinished) ||
            mKind == MediaStreamGraph::EXTERNAL_STREAM;
   }
-  virtual bool IsIntrinsicallyConsumed() const MOZ_OVERRIDE
+  virtual bool IsIntrinsicallyConsumed() const override
   {
     return true;
   }
@@ -137,6 +123,7 @@ public:
   // Any thread
   AudioNodeEngine* Engine() { return mEngine; }
   TrackRate SampleRate() const { return mSampleRate; }
+  AudioContext::AudioContextId AudioContextId() const override { return mAudioContextId; }
 
   /**
    * Convert a time in seconds on the destination stream to ticks
@@ -145,23 +132,24 @@ public:
   double FractionalTicksFromDestinationTime(AudioNodeStream* aDestination,
                                             double aSeconds);
   /**
-   * Convert a time in seconds on the destination stream to nearest TrackTicks
+   * Convert a time in seconds on the destination stream to StreamTime
    * on this stream.
    */
-  TrackTicks TicksFromDestinationTime(MediaStream* aDestination,
+  StreamTime TicksFromDestinationTime(MediaStream* aDestination,
                                       double aSeconds);
   /**
    * Get the destination stream time in seconds corresponding to a position on
    * this stream.
    */
   double DestinationTimeFromTicks(AudioNodeStream* aDestination,
-                                  TrackTicks aPosition);
+                                  StreamTime aPosition);
 
-  size_t SizeOfExcludingThis(MallocSizeOf aMallocSizeOf) const MOZ_OVERRIDE;
-  size_t SizeOfIncludingThis(MallocSizeOf aMallocSizeOf) const MOZ_OVERRIDE;
+  size_t SizeOfExcludingThis(MallocSizeOf aMallocSizeOf) const override;
+  size_t SizeOfIncludingThis(MallocSizeOf aMallocSizeOf) const override;
 
   void SizeOfAudioNodesIncludingThis(MallocSizeOf aMallocSizeOf,
                                      AudioNodeSizes& aUsage) const;
+
 
 protected:
   void AdvanceOutputSegment();
@@ -182,8 +170,11 @@ protected:
   OutputChunks mLastChunks;
   // The stream's sampling rate
   const TrackRate mSampleRate;
+  // This is necessary to be able to find all the nodes for a given
+  // AudioContext. It is set on the main thread, in the constructor.
+  const AudioContext::AudioContextId mAudioContextId;
   // Whether this is an internal or external stream
-  MediaStreamGraph::AudioNodeStreamKind mKind;
+  const MediaStreamGraph::AudioNodeStreamKind mKind;
   // The number of input channels that this stream requires. 0 means don't care.
   uint32_t mNumberOfInputChannels;
   // The mixing modes

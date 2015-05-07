@@ -168,8 +168,6 @@ gfxGDIFont::Measure(gfxTextRun *aTextRun,
     return metrics;
 }
 
-#define OBLIQUE_SKEW_FACTOR 0.3
-
 void
 gfxGDIFont::Initialize()
 {
@@ -196,7 +194,7 @@ gfxGDIFont::Initialize()
 
     if (mAdjustedSize == 0.0) {
         mAdjustedSize = mStyle.size;
-        if (mStyle.sizeAdjust != 0.0 && mAdjustedSize > 0.0) {
+        if (mStyle.sizeAdjust > 0.0 && mAdjustedSize > 0.0) {
             // to implement font-size-adjust, we first create the "unadjusted" font
             FillLogFont(logFont, mAdjustedSize,
                         wantFakeItalic && !useCairoFakeItalic);
@@ -215,6 +213,8 @@ gfxGDIFont::Initialize()
             mFont = nullptr;
             delete mMetrics;
             mMetrics = nullptr;
+        } else if (mStyle.sizeAdjust == 0.0) {
+            mAdjustedSize = 0.0;
         }
     }
 

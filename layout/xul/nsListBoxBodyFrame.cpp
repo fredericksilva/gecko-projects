@@ -66,7 +66,7 @@ using namespace mozilla::dom;
 // do we wait before checking again?
 #define SMOOTH_INTERVAL 100
 
-class nsListScrollSmoother MOZ_FINAL : public nsITimerCallback
+class nsListScrollSmoother final : public nsITimerCallback
 {
 private:
   virtual ~nsListScrollSmoother();
@@ -139,10 +139,9 @@ NS_IMPL_ISUPPORTS(nsListScrollSmoother, nsITimerCallback)
 
 /////////////// nsListBoxBodyFrame //////////////////
 
-nsListBoxBodyFrame::nsListBoxBodyFrame(nsIPresShell* aPresShell,
-                                       nsStyleContext* aContext,
+nsListBoxBodyFrame::nsListBoxBodyFrame(nsStyleContext* aContext,
                                        nsBoxLayout* aLayoutManager)
-  : nsBoxFrame(aPresShell, aContext, false, aLayoutManager),
+  : nsBoxFrame(aContext, false, aLayoutManager),
     mTopFrame(nullptr),
     mBottomFrame(nullptr),
     mLinkupFrame(nullptr),
@@ -327,8 +326,10 @@ nsListBoxBodyFrame::GetPrefSize(nsBoxLayoutState& aBoxLayoutState)
 ///////////// nsIScrollbarMediator ///////////////
 
 void
-nsListBoxBodyFrame::ScrollByPage(nsScrollbarFrame* aScrollbar, int32_t aDirection)
+nsListBoxBodyFrame::ScrollByPage(nsScrollbarFrame* aScrollbar, int32_t aDirection,
+                                 nsIScrollbarMediator::ScrollSnapMode aSnap)
 {
+  // CSS Scroll Snapping is not enabled for XUL, aSnap is ignored
   MOZ_ASSERT(aScrollbar != nullptr);
   aScrollbar->SetIncrementToPage(aDirection);
   nsWeakFrame weakFrame(this);
@@ -340,8 +341,10 @@ nsListBoxBodyFrame::ScrollByPage(nsScrollbarFrame* aScrollbar, int32_t aDirectio
 }
 
 void
-nsListBoxBodyFrame::ScrollByWhole(nsScrollbarFrame* aScrollbar, int32_t aDirection)
+nsListBoxBodyFrame::ScrollByWhole(nsScrollbarFrame* aScrollbar, int32_t aDirection,
+                                  nsIScrollbarMediator::ScrollSnapMode aSnap)
 {
+  // CSS Scroll Snapping is not enabled for XUL, aSnap is ignored
   MOZ_ASSERT(aScrollbar != nullptr);
   aScrollbar->SetIncrementToWhole(aDirection);
   nsWeakFrame weakFrame(this);
@@ -353,8 +356,10 @@ nsListBoxBodyFrame::ScrollByWhole(nsScrollbarFrame* aScrollbar, int32_t aDirecti
 }
 
 void
-nsListBoxBodyFrame::ScrollByLine(nsScrollbarFrame* aScrollbar, int32_t aDirection)
+nsListBoxBodyFrame::ScrollByLine(nsScrollbarFrame* aScrollbar, int32_t aDirection,
+                                 nsIScrollbarMediator::ScrollSnapMode aSnap)
 {
+  // CSS Scroll Snapping is not enabled for XUL, aSnap is ignored
   MOZ_ASSERT(aScrollbar != nullptr);
   aScrollbar->SetIncrementToLine(aDirection);
   nsWeakFrame weakFrame(this);
@@ -582,7 +587,7 @@ nsListBoxBodyFrame::GetIndexOfItem(nsIDOMElement* aItem, int32_t* _retval)
     FlattenedChildIterator iter(mContent);
     for (nsIContent* child = iter.GetNextChild(); child; child = iter.GetNextChild()) {
       // we hit a list row, count it
-      if (child->Tag() == nsGkAtoms::listitem) {
+      if (child->IsXULElement(nsGkAtoms::listitem)) {
         // is this it?
         if (child == itemContent)
           return NS_OK;
@@ -608,7 +613,7 @@ nsListBoxBodyFrame::GetItemAtIndex(int32_t aIndex, nsIDOMElement** aItem)
   FlattenedChildIterator iter(mContent);
   for (nsIContent* child = iter.GetNextChild(); child; child = iter.GetNextChild()) {
     // we hit a list row, check if it is the one we are looking for
-    if (child->Tag() == nsGkAtoms::listitem) {
+    if (child->IsXULElement(nsGkAtoms::listitem)) {
       // is this it?
       if (itemCount == aIndex) {
         return CallQueryInterface(child, aItem);
@@ -710,7 +715,7 @@ nsListBoxBodyFrame::ComputeIntrinsicISize(nsBoxLayoutState& aBoxLayoutState)
 
     FlattenedChildIterator iter(mContent);
     for (nsIContent* child = iter.GetNextChild(); child; child = iter.GetNextChild()) {
-      if (child->Tag() == nsGkAtoms::listitem) {
+      if (child->IsXULElement(nsGkAtoms::listitem)) {
         nsRenderingContext* rendContext = aBoxLayoutState.GetRenderingContext();
         if (rendContext) {
           nsAutoString value;
@@ -748,7 +753,7 @@ nsListBoxBodyFrame::ComputeTotalRowCount()
   mRowCount = 0;
   FlattenedChildIterator iter(mContent);
   for (nsIContent* child = iter.GetNextChild(); child; child = iter.GetNextChild()) {
-    if (child->Tag() == nsGkAtoms::listitem) {
+    if (child->IsXULElement(nsGkAtoms::listitem)) {
       ++mRowCount;
     }
   }
@@ -1100,7 +1105,7 @@ IsListItemChild(nsListBoxBodyFrame* aParent, nsIContent* aChild,
                 nsIFrame** aChildFrame)
 {
   *aChildFrame = nullptr;
-  if (!aChild->IsXUL() || aChild->Tag() != nsGkAtoms::listitem) {
+  if (!aChild->IsXULElement(nsGkAtoms::listitem)) {
     return false;
   }
   nsIFrame* existingFrame = aChild->GetPrimaryFrame();
@@ -1464,7 +1469,7 @@ nsListBoxBodyFrame::GetListItemContentAt(int32_t aIndex, nsIContent** aContent)
   int32_t itemsFound = 0;
   FlattenedChildIterator iter(mContent);
   for (nsIContent* child = iter.GetNextChild(); child; child = iter.GetNextChild()) {
-    if (child->Tag() == nsGkAtoms::listitem) {
+    if (child->IsXULElement(nsGkAtoms::listitem)) {
       ++itemsFound;
       if (itemsFound-1 == aIndex) {
         *aContent = child;
@@ -1483,7 +1488,7 @@ nsListBoxBodyFrame::GetListItemNextSibling(nsIContent* aListItem, nsIContent** a
   nsIContent *prevKid = nullptr;
   FlattenedChildIterator iter(mContent);
   for (nsIContent* child = iter.GetNextChild(); child; child = iter.GetNextChild()) {
-    if (child->Tag() == nsGkAtoms::listitem) {
+    if (child->IsXULElement(nsGkAtoms::listitem)) {
       ++aSiblingIndex;
       if (prevKid == aListItem) {
         *aContent = child;
@@ -1526,7 +1531,7 @@ nsIFrame*
 NS_NewListBoxBodyFrame(nsIPresShell* aPresShell, nsStyleContext* aContext)
 {
   nsCOMPtr<nsBoxLayout> layout = NS_NewListBoxLayout();
-  return new (aPresShell) nsListBoxBodyFrame(aPresShell, aContext, layout);
+  return new (aPresShell) nsListBoxBodyFrame(aContext, layout);
 }
 
 NS_IMPL_FRAMEARENA_HELPERS(nsListBoxBodyFrame)

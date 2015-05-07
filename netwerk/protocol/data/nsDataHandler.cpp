@@ -7,6 +7,7 @@
 #include "nsDataHandler.h"
 #include "nsNetCID.h"
 #include "nsError.h"
+#include "DataChannelChild.h"
 
 static NS_DEFINE_CID(kSimpleURICID, NS_SIMPLEURI_CID);
 
@@ -18,7 +19,7 @@ nsDataHandler::nsDataHandler() {
 nsDataHandler::~nsDataHandler() {
 }
 
-NS_IMPL_ISUPPORTS(nsDataHandler, nsIProtocolHandler)
+NS_IMPL_ISUPPORTS(nsDataHandler, nsIProtocolHandler, nsISupportsWeakReference)
 
 nsresult
 nsDataHandler::Create(nsISupports* aOuter, const nsIID& aIID, void* *aResult) {
@@ -108,12 +109,22 @@ nsDataHandler::NewChannel2(nsIURI* uri,
                            nsIChannel** result)
 {
     NS_ENSURE_ARG_POINTER(uri);
-    nsDataChannel* channel = new nsDataChannel(uri);
-    if (!channel)
-        return NS_ERROR_OUT_OF_MEMORY;
+    nsDataChannel* channel;
+    if (XRE_GetProcessType() == GeckoProcessType_Default) {
+        channel = new nsDataChannel(uri);
+    } else {
+        channel = new mozilla::net::DataChannelChild(uri);
+    }
     NS_ADDREF(channel);
 
     nsresult rv = channel->Init();
+    if (NS_FAILED(rv)) {
+        NS_RELEASE(channel);
+        return rv;
+    }
+
+    // set the loadInfo on the new channel
+    rv = channel->SetLoadInfo(aLoadInfo);
     if (NS_FAILED(rv)) {
         NS_RELEASE(channel);
         return rv;

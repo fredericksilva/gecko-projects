@@ -15,10 +15,10 @@
 #include "mozilla/layers/Effects.h"     // for EffectChain
 #include "mozilla/mozalloc.h"           // for operator delete
 #include "nsAString.h"
-#include "nsAutoPtr.h"                  // for nsRefPtr
+#include "nsRefPtr.h"                   // for nsRefPtr
 #include "nsISupportsImpl.h"            // for MOZ_COUNT_CTOR, etc
-#include "nsPoint.h"                    // for nsIntPoint
 #include "nsString.h"                   // for nsAutoCString
+#include "gfxVR.h"
 
 namespace mozilla {
 namespace layers {
@@ -45,8 +45,6 @@ bool
 CanvasLayerComposite::SetCompositableHost(CompositableHost* aHost)
 {
   switch (aHost->GetType()) {
-    case CompositableType::BUFFER_IMAGE_SINGLE:
-    case CompositableType::BUFFER_IMAGE_BUFFERED:
     case CompositableType::IMAGE:
       mImageHost = aHost;
       return true;
@@ -67,7 +65,7 @@ CanvasLayerComposite::SetLayerManager(LayerManagerComposite* aManager)
 {
   LayerComposite::SetLayerManager(aManager);
   mManager = aManager;
-  if (mImageHost) {
+  if (mImageHost && mCompositor) {
     mImageHost->SetCompositor(mCompositor);
   }
 }

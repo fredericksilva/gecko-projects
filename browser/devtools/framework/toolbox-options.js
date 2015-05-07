@@ -71,12 +71,16 @@ function InfallibleGetBoolPref(key) {
 function OptionsPanel(iframeWindow, toolbox) {
   this.panelDoc = iframeWindow.document;
   this.panelWin = iframeWindow;
+
   this.toolbox = toolbox;
   this.isReady = false;
 
   this._prefChanged = this._prefChanged.bind(this);
   this._themeRegistered = this._themeRegistered.bind(this);
   this._themeUnregistered = this._themeUnregistered.bind(this);
+  this._disableJSClicked = this._disableJSClicked.bind(this);
+
+  this.disableJSNode = this.panelDoc.getElementById("devtools-disable-javascript");
 
   this._addListeners();
 
@@ -106,11 +110,6 @@ OptionsPanel.prototype = {
       this.setupThemeList();
       this.populatePreferences();
       this.updateDefaultTheme();
-
-      this._disableJSClicked = this._disableJSClicked.bind(this);
-
-      let disableJSNode = this.panelDoc.getElementById("devtools-disable-javascript");
-      disableJSNode.addEventListener("click", this._disableJSClicked, false);
     }).then(() => {
       this.isReady = true;
       this.emit("ready");
@@ -282,13 +281,7 @@ OptionsPanel.prototype = {
     for (let checkbox of prefCheckboxes) {
       checkbox.checked = GetPref(checkbox.getAttribute("data-pref"));
       checkbox.addEventListener("command", function() {
-        let data = {
-          pref: this.getAttribute("data-pref"),
-          newValue: this.checked
-        };
-        data.oldValue = GetPref(data.pref);
-        SetPref(data.pref, data.newValue);
-        gDevTools.emit("pref-changed", data);
+        setPrefAndEmit(this.getAttribute("data-pref"), this.checked);
       }.bind(checkbox));
     }
     let prefRadiogroups = this.panelDoc.querySelectorAll("radiogroup[data-pref]");
@@ -302,17 +295,7 @@ OptionsPanel.prototype = {
         }
       }
       radiogroup.addEventListener("select", function() {
-        let data = {
-          pref: this.getAttribute("data-pref"),
-          newValue: this.selectedItem.getAttribute("value")
-        };
-
-        data.oldValue = GetPref(data.pref);
-        SetPref(data.pref, data.newValue);
-
-        if (data.newValue != data.oldValue) {
-          gDevTools.emit("pref-changed", data);
-        }
+        setPrefAndEmit(this.getAttribute("data-pref"), this.selectedItem.getAttribute("value"));
       }.bind(radiogroup));
     }
     let prefMenulists = this.panelDoc.querySelectorAll("menulist[data-pref]");
@@ -327,21 +310,19 @@ OptionsPanel.prototype = {
         }
       }
       menulist.addEventListener("command", function() {
-        let data = {
-          pref: this.getAttribute("data-pref"),
-          newValue: this.value
-        };
-        data.oldValue = GetPref(data.pref);
-        SetPref(data.pref, data.newValue);
-        gDevTools.emit("pref-changed", data);
+        setPrefAndEmit(this.getAttribute("data-pref"), this.value);
       }.bind(menulist));
     }
 
-    this.target.client.attachTab(this.target.activeTab._actor, (response) => {
-      this._origJavascriptEnabled = response.javascriptEnabled;
-
-      this._populateDisableJSCheckbox();
-    });
+    if (this.target.activeTab) {
+      this.target.client.attachTab(this.target.activeTab._actor, (response) => {
+        this._origJavascriptEnabled = response.javascriptEnabled;
+        this.disableJSNode.checked = !this._origJavascriptEnabled;
+        this.disableJSNode.addEventListener("click", this._disableJSClicked, false);
+      });
+    } else {
+      this.disableJSNode.hidden = true;
+    }
   },
 
   updateDefaultTheme: function() {
@@ -361,11 +342,6 @@ OptionsPanel.prototype = {
     if (themeOption) {
       themeBox.selectedItem = themeOption;
     }
-  },
-
-  _populateDisableJSCheckbox: function() {
-    let cbx = this.panelDoc.getElementById("devtools-disable-javascript");
-    cbx.checked = !this._origJavascriptEnabled;
   },
 
   /**
@@ -396,24 +372,36 @@ OptionsPanel.prototype = {
     let deferred = promise.defer();
 
     this.destroyPromise = deferred.promise;
-
-    let disableJSNode = this.panelDoc.getElementById("devtools-disable-javascript");
-    disableJSNode.removeEventListener("click", this._disableJSClicked, false);
-
     this._removeListeners();
 
-    this.panelWin = this.panelDoc = null;
-    this._disableJSClicked = null;
+    if (this.target.activeTab) {
+      this.disableJSNode.removeEventListener("click", this._disableJSClicked, false);
+      // If JavaScript is disabled we need to revert it to it's original value.
+      let options = {
+        "javascriptEnabled": this._origJavascriptEnabled
+      };
+      this.target.activeTab.reconfigure(options, () => {
+        this.toolbox = null;
+        deferred.resolve();
+      }, true);
+    }
 
-    // If JavaScript is disabled we need to revert it to it's original value.
-    let options = {
-      "javascriptEnabled": this._origJavascriptEnabled
-    };
-    this.target.activeTab.reconfigure(options, () => {
-      this.toolbox = null;
-      deferred.resolve();
-    }, true);
+    this.panelWin = this.panelDoc = this.disableJSNode = null;
 
     return deferred.promise;
   }
 };
+
+/* Set a pref and emit the pref-changed event if needed. */
+function setPrefAndEmit(prefName, newValue) {
+  let data = {
+    pref: prefName,
+    newValue: newValue
+  };
+  data.oldValue = GetPref(data.pref);
+  SetPref(data.pref, data.newValue);
+
+  if (data.newValue != data.oldValue) {
+    gDevTools.emit("pref-changed", data);
+  }
+}

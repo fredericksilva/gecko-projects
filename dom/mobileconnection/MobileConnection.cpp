@@ -1,3 +1,5 @@
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -5,20 +7,22 @@
 #include "mozilla/dom/MobileConnection.h"
 
 #include "MobileConnectionCallback.h"
+#include "mozilla/AsyncEventDispatcher.h"
 #include "mozilla/dom/CFStateChangeEvent.h"
 #include "mozilla/dom/DataErrorEvent.h"
 #include "mozilla/dom/MozClirModeEvent.h"
 #include "mozilla/dom/MozEmergencyCbModeEvent.h"
 #include "mozilla/dom/MozOtaStatusEvent.h"
 #include "mozilla/dom/ToJSValue.h"
-#include "mozilla/dom/USSDReceivedEvent.h"
 #include "mozilla/Preferences.h"
 #include "mozilla/Services.h"
 #include "nsIDOMDOMRequest.h"
+#include "nsIIccInfo.h"
 #include "nsIPermissionManager.h"
 #include "nsIVariant.h"
 #include "nsJSON.h"
 #include "nsJSUtils.h"
+#include "nsRadioInterfaceLayer.h"
 #include "nsServiceManagerUtils.h"
 
 #define MOBILECONN_ERROR_INVALID_PARAMETER NS_LITERAL_STRING("InvalidParameter")
@@ -43,13 +47,15 @@ using mozilla::ErrorResult;
 using namespace mozilla::dom;
 using namespace mozilla::dom::mobileconnection;
 
-class MobileConnection::Listener MOZ_FINAL : public nsIMobileConnectionListener
+class MobileConnection::Listener final : public nsIMobileConnectionListener
+                                       , public nsIIccListener
 {
   MobileConnection* mMobileConnection;
 
 public:
   NS_DECL_ISUPPORTS
   NS_FORWARD_SAFE_NSIMOBILECONNECTIONLISTENER(mMobileConnection)
+  NS_FORWARD_SAFE_NSIICCLISTENER(mMobileConnection)
 
   explicit Listener(MobileConnection* aMobileConnection)
     : mMobileConnection(aMobileConnection)
@@ -70,7 +76,8 @@ private:
   }
 };
 
-NS_IMPL_ISUPPORTS(MobileConnection::Listener, nsIMobileConnectionListener)
+NS_IMPL_ISUPPORTS(MobileConnection::Listener, nsIMobileConnectionListener,
+                  nsIIccListener)
 
 NS_IMPL_CYCLE_COLLECTION_CLASS(MobileConnection)
 
@@ -82,6 +89,7 @@ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN_INHERITED(MobileConnection,
   // down.
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mVoice)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mData)
+  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mIccHandler)
 NS_IMPL_CYCLE_COLLECTION_TRAVERSE_END
 
 NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN_INHERITED(MobileConnection,
@@ -89,6 +97,7 @@ NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN_INHERITED(MobileConnection,
   tmp->Shutdown();
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mVoice)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mData)
+  NS_IMPL_CYCLE_COLLECTION_UNLINK(mIccHandler)
 NS_IMPL_CYCLE_COLLECTION_UNLINK_END
 
 NS_INTERFACE_MAP_BEGIN_CYCLE_COLLECTION_INHERITED(MobileConnection)
@@ -102,9 +111,14 @@ NS_IMPL_RELEASE_INHERITED(MobileConnection, DOMEventTargetHelper)
 
 MobileConnection::MobileConnection(nsPIDOMWindow* aWindow, uint32_t aClientId)
   : DOMEventTargetHelper(aWindow)
+  , mClientId(aClientId)
 {
   nsCOMPtr<nsIMobileConnectionService> service =
     do_GetService(NS_MOBILE_CONNECTION_SERVICE_CONTRACTID);
+
+  // Per WebAPI design, mIccId should be null instead of an empty string when no
+  // SIM card is inserted. Set null as default value.
+  mIccId.SetIsVoid(true);
 
   // Not being able to acquire the service isn't fatal since we check
   // for it explicitly below.
@@ -113,8 +127,9 @@ MobileConnection::MobileConnection(nsPIDOMWindow* aWindow, uint32_t aClientId)
     return;
   }
 
-  nsresult rv = service->GetItemByServiceId(aClientId,
+  nsresult rv = service->GetItemByServiceId(mClientId,
                                             getter_AddRefs(mMobileConnection));
+
   if (NS_FAILED(rv) || !mMobileConnection) {
     NS_WARNING("Could not acquire nsIMobileConnection!");
     return;
@@ -130,6 +145,22 @@ MobileConnection::MobileConnection(nsPIDOMWindow* aWindow, uint32_t aClientId)
                      "Failed registering mobile connection messages with service");
     UpdateVoice();
     UpdateData();
+
+    nsCOMPtr<nsIIccService> iccService = do_GetService(ICC_SERVICE_CONTRACTID);
+
+    if (iccService) {
+      iccService->GetIccByServiceId(mClientId, getter_AddRefs(mIccHandler));
+    }
+
+    if (!mIccHandler) {
+      NS_WARNING("Could not acquire nsIMobileConnection or nsIIcc!");
+      return;
+    }
+
+    rv = mIccHandler->RegisterListener(mListener);
+    NS_WARN_IF_FALSE(NS_SUCCEEDED(rv),
+                     "Failed registering icc messages with service");
+    UpdateIccId();
   }
 }
 
@@ -139,6 +170,10 @@ MobileConnection::Shutdown()
   if (mListener) {
     if (mMobileConnection) {
       mMobileConnection->UnregisterListener(mListener);
+    }
+
+    if (mIccHandler) {
+      mIccHandler->UnregisterListener(mListener);
     }
 
     mListener->Disconnect();
@@ -161,9 +196,9 @@ MobileConnection::DisconnectFromOwner()
 }
 
 JSObject*
-MobileConnection::WrapObject(JSContext* aCx)
+MobileConnection::WrapObject(JSContext* aCx, JS::Handle<JSObject*> aGivenProto)
 {
-  return MozMobileConnectionBinding::Wrap(aCx, this);
+  return MozMobileConnectionBinding::Wrap(aCx, this, aGivenProto);
 }
 
 bool
@@ -200,6 +235,27 @@ MobileConnection::UpdateData()
   nsCOMPtr<nsIMobileConnectionInfo> info;
   mMobileConnection->GetData(getter_AddRefs(info));
   mData->Update(info);
+}
+
+bool
+MobileConnection::UpdateIccId()
+{
+  nsAutoString iccId;
+  nsCOMPtr<nsIIccInfo> iccInfo;
+  if (mIccHandler &&
+      NS_SUCCEEDED(mIccHandler->GetIccInfo(getter_AddRefs(iccInfo))) &&
+      iccInfo) {
+    iccInfo->GetIccid(iccId);
+  } else {
+    iccId.SetIsVoid(true);
+  }
+
+  if (!mIccId.Equals(iccId)) {
+    mIccId = iccId;
+    return true;
+  }
+
+  return false;
 }
 
 nsresult
@@ -323,13 +379,7 @@ MobileConnection::Data() const
 void
 MobileConnection::GetIccId(nsString& aRetVal) const
 {
-  aRetVal.SetIsVoid(true);
-
-  if (!mMobileConnection) {
-    return;
-  }
-
-  mMobileConnection->GetIccId(aRetVal);
+  aRetVal = mIccId;
 }
 
 Nullable<MobileNetworkSelectionMode>
@@ -378,23 +428,20 @@ MobileConnection::GetSupportedNetworkTypes(nsTArray<MobileNetworkType>& aTypes) 
     return;
   }
 
-  char16_t** types = nullptr;
+  int32_t* types = nullptr;
   uint32_t length = 0;
 
   nsresult rv = mMobileConnection->GetSupportedNetworkTypes(&types, &length);
   NS_ENSURE_SUCCESS_VOID(rv);
 
   for (uint32_t i = 0; i < length; ++i) {
-    nsDependentString rawType(types[i]);
-    Nullable<MobileNetworkType> type = Nullable<MobileNetworkType>();
-    CONVERT_STRING_TO_NULLABLE_ENUM(rawType, MobileNetworkType, type);
+    int32_t type = types[i];
 
-    if (!type.IsNull()) {
-      aTypes.AppendElement(type.Value());
-    }
+    MOZ_ASSERT(type < static_cast<int32_t>(MobileNetworkType::EndGuard_));
+    aTypes.AppendElement(static_cast<MobileNetworkType>(type));
   }
 
-  NS_FREE_XPCOM_ALLOCATED_POINTER_ARRAY(length, types);
+  free(types);
 }
 
 already_AddRefed<DOMRequest>
@@ -587,48 +634,6 @@ MobileConnection::GetVoicePrivacyMode(ErrorResult& aRv)
     new MobileConnectionCallback(GetOwner(), request);
 
   nsresult rv = mMobileConnection->GetVoicePrivacyMode(requestCallback);
-  if (NS_FAILED(rv)) {
-    aRv.Throw(rv);
-    return nullptr;
-  }
-
-  return request.forget();
-}
-
-already_AddRefed<DOMRequest>
-MobileConnection::SendMMI(const nsAString& aMMIString, ErrorResult& aRv)
-{
-  if (!mMobileConnection) {
-    aRv.Throw(NS_ERROR_FAILURE);
-    return nullptr;
-  }
-
-  nsRefPtr<DOMRequest> request = new DOMRequest(GetOwner());
-  nsRefPtr<MobileConnectionCallback> requestCallback =
-    new MobileConnectionCallback(GetOwner(), request);
-
-  nsresult rv = mMobileConnection->SendMMI(aMMIString, requestCallback);
-  if (NS_FAILED(rv)) {
-    aRv.Throw(rv);
-    return nullptr;
-  }
-
-  return request.forget();
-}
-
-already_AddRefed<DOMRequest>
-MobileConnection::CancelMMI(ErrorResult& aRv)
-{
-  if (!mMobileConnection) {
-    aRv.Throw(NS_ERROR_FAILURE);
-    return nullptr;
-  }
-
-  nsRefPtr<DOMRequest> request = new DOMRequest(GetOwner());
-  nsRefPtr<MobileConnectionCallback> requestCallback =
-    new MobileConnectionCallback(GetOwner(), request);
-
-  nsresult rv = mMobileConnection->CancelMMI(requestCallback);
   if (NS_FAILED(rv)) {
     aRv.Throw(rv);
     return nullptr;
@@ -994,26 +999,6 @@ MobileConnection::NotifyDataChanged()
 }
 
 NS_IMETHODIMP
-MobileConnection::NotifyUssdReceived(const nsAString& aMessage,
-                                     bool aSessionEnded)
-{
-  if (!CheckPermission("mobileconnection")) {
-    return NS_OK;
-  }
-
-  USSDReceivedEventInit init;
-  init.mBubbles = false;
-  init.mCancelable = false;
-  init.mMessage = aMessage;
-  init.mSessionEnded = aSessionEnded;
-
-  nsRefPtr<USSDReceivedEvent> event =
-    USSDReceivedEvent::Constructor(this, NS_LITERAL_STRING("ussdreceived"), init);
-
-  return DispatchTrustedEvent(event);
-}
-
-NS_IMETHODIMP
 MobileConnection::NotifyDataError(const nsAString& aMessage)
 {
   if (!CheckPermission("mobileconnection")) {
@@ -1096,16 +1081,6 @@ MobileConnection::NotifyOtaStatusChanged(const nsAString& aStatus)
 }
 
 NS_IMETHODIMP
-MobileConnection::NotifyIccChanged()
-{
-  if (!CheckPermission("mobileconnection")) {
-    return NS_OK;
-  }
-
-  return DispatchTrustedEvent(NS_LITERAL_STRING("iccchange"));
-}
-
-NS_IMETHODIMP
 MobileConnection::NotifyRadioStateChanged()
 {
   if (!CheckPermission("mobileconnection")) {
@@ -1149,4 +1124,41 @@ NS_IMETHODIMP
 MobileConnection::NotifyNetworkSelectionModeChanged()
 {
   return NS_OK;
+}
+
+// nsIIccListener
+
+NS_IMETHODIMP
+MobileConnection::NotifyStkCommand(const nsAString& aMessage)
+{
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+MobileConnection::NotifyStkSessionEnd()
+{
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+MobileConnection::NotifyCardStateChanged()
+{
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+MobileConnection::NotifyIccInfoChanged()
+{
+  if (!CheckPermission("mobileconnection")) {
+    return NS_OK;
+  }
+
+  if (!UpdateIccId()) {
+    return NS_OK;
+  }
+
+  nsRefPtr<AsyncEventDispatcher> asyncDispatcher =
+    new AsyncEventDispatcher(this, NS_LITERAL_STRING("iccchange"), false);
+
+  return asyncDispatcher->PostDOMEvent();
 }

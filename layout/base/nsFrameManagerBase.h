@@ -21,6 +21,7 @@
 
 #include "nsDebug.h"
 #include "pldhash.h"
+#include "mozilla/Attributes.h"
 
 class nsIFrame;
 class nsIPresShell;
@@ -34,9 +35,9 @@ public:
     , mStyleSet(nullptr)
     , mRootFrame(nullptr)
     , mUndisplayedMap(nullptr)
+    , mDisplayContentsMap(nullptr)
     , mIsDestroyingFrames(false)
   {
-    mPlaceholderMap.ops = nullptr;
   }
 
   bool IsDestroyingFrames() { return mIsDestroyingFrames; }
@@ -59,12 +60,13 @@ protected:
   class UndisplayedMap;
 
   // weak link, because the pres shell owns us
-  nsIPresShell*                   mPresShell;
+  nsIPresShell* MOZ_NON_OWNING_REF mPresShell;
   // the pres shell owns the style set
   nsStyleSet*                     mStyleSet;
   nsIFrame*                       mRootFrame;
   PLDHashTable                    mPlaceholderMap;
   UndisplayedMap*                 mUndisplayedMap;
+  UndisplayedMap*                 mDisplayContentsMap;
   bool                            mIsDestroyingFrames;  // The frame manager is destroying some frame(s).
 
   // The frame tree generation number

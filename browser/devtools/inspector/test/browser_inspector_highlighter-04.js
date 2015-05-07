@@ -10,6 +10,7 @@ const TEST_URL = "data:text/html;charset=utf-8,<div>test</div>";
 
 // IDs of all highlighter elements that we expect to find in the canvasFrame.
 const ELEMENTS = ["box-model-root",
+                  "box-model-elements",
                   "box-model-margin",
                   "box-model-border",
                   "box-model-padding",
@@ -33,16 +34,10 @@ add_task(function*() {
   yield toolbox.highlighter.showBoxModel(divFront);
 
   for (let id of ELEMENTS) {
-    let {data: foundId} = yield executeInContent("Test:GetHighlighterAttribute", {
-      nodeID: id,
-      name: "id",
-      actorID: getHighlighterActorID(toolbox)
-    });
+    let foundId = yield getHighlighterNodeAttribute(toolbox.highlighter, id, "id");
     is(foundId, id, "Element " + id + " found");
   }
 
   info("Hide the box-model highlighter");
   yield toolbox.highlighter.hideBoxModel();
-
-  gBrowser.removeCurrentTab();
 });

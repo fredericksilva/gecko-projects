@@ -65,7 +65,28 @@ import android.widget.TextView;
  * Fragment that displays frecency search results in a ListView.
  */
 public class BrowserSearch extends HomeFragment
-                           implements GeckoEventListener {
+                           implements GeckoEventListener,
+                                      SearchEngineBar.OnSearchBarClickListener {
+
+    @RobocopTarget
+    public interface SuggestClientFactory {
+        public SuggestClient getSuggestClient(Context context, String template, int timeout, int max);
+    }
+
+    @RobocopTarget
+    public static class DefaultSuggestClientFactory implements SuggestClientFactory {
+        @Override
+        public SuggestClient getSuggestClient(Context context, String template, int timeout, int max) {
+            return new SuggestClient(context, template, timeout, max, true);
+        }
+    }
+
+    /**
+     * Set this to mock the suggestion mechanism. Public for access from tests.
+     */
+    @RobocopTarget
+    public static volatile SuggestClientFactory sSuggestClientFactory = new DefaultSuggestClientFactory();
+
     // Logging tag name
     private static final String LOGTAG = "GeckoBrowserSearch";
 
@@ -104,8 +125,13 @@ public class BrowserSearch extends HomeFragment
     // The list showing search results
     private HomeListView mList;
 
-    // Client that performs search suggestion queries
-    private volatile SuggestClient mSuggestClient;
+    // The bar on the bottom of the screen displaying search engine options.
+    private SearchEngineBar mSearchEngineBar;
+
+    // Client that performs search suggestion queries.
+    // Public for testing.
+    @RobocopTarget
+    public volatile SuggestClient mSuggestClient;
 
     // List of search engines from Gecko.
     // Do not mutate this list.
@@ -205,23 +231,6 @@ public class BrowserSearch extends HomeFragment
     }
 
     @Override
-    public void onStart() {
-        super.onStart();
-
-        // Adjusting the window size when showing the keyboard results in the underlying
-        // activity being painted when the keyboard is hidden (bug 933422). This can be
-        // prevented by not resizing the window.
-        getActivity().getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING);
-    }
-
-    @Override
-    public void onStop() {
-        super.onStop();
-
-        getActivity().getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
-    }
-
-    @Override
     public void onResume() {
         super.onResume();
 
@@ -246,6 +255,7 @@ public class BrowserSearch extends HomeFragment
         // If the style of the list changes, inflate it from an XML.
         mView = (LinearLayout) inflater.inflate(R.layout.browser_search, container, false);
         mList = (HomeListView) mView.findViewById(R.id.home_list_view);
+        mSearchEngineBar = (SearchEngineBar) mView.findViewById(R.id.search_engine_bar);
 
         return mView;
     }
@@ -256,6 +266,9 @@ public class BrowserSearch extends HomeFragment
 
         EventDispatcher.getInstance().unregisterGeckoThreadListener(this,
             "SearchEngines:Data");
+
+        mSearchEngineBar.setAdapter(null);
+        mSearchEngineBar = null;
 
         mList.setAdapter(null);
         mList = null;
@@ -328,6 +341,12 @@ public class BrowserSearch extends HomeFragment
         registerForContextMenu(mList);
         EventDispatcher.getInstance().registerGeckoThreadListener(this,
             "SearchEngines:Data");
+
+        // If the view backed by this Fragment is being recreated, we will not receive
+        // a new search engine data event so refresh the new search engine bar's data
+        // & Views with the data we have.
+        mSearchEngineBar.setSearchEngines(mSearchEngines);
+        mSearchEngineBar.setOnSearchBarClickListener(this);
     }
 
     @Override
@@ -539,6 +558,8 @@ public class BrowserSearch extends HomeFragment
 
                 if (engine.name.equals(suggestEngine) && suggestTemplate != null) {
                     // Suggest engine should be at the front of the list.
+                    // We're baking in an assumption here that the suggest engine
+                    // is also the default engine.
                     searchEngines.add(0, engine);
 
                     // The only time Tabs.getInstance().getSelectedTab() should
@@ -549,12 +570,8 @@ public class BrowserSearch extends HomeFragment
                     final boolean isPrivate = (tab != null && tab.isPrivate());
 
                     // Only create a new instance of SuggestClient if it hasn't been
-                    // set yet. e.g. Robocop tests might set it directly before search
-                    // engines are loaded.
-                    if (mSuggestClient == null && !isPrivate) {
-                        setSuggestClient(new SuggestClient(getActivity(), suggestTemplate,
-                                    SUGGESTION_TIMEOUT, SUGGESTION_MAX));
-                    }
+                    // set yet.
+                    maybeSetSuggestClient(suggestTemplate, isPrivate);
                 } else {
                     searchEngines.add(engine);
                 }
@@ -566,6 +583,8 @@ public class BrowserSearch extends HomeFragment
             if (mAdapter != null) {
                 mAdapter.notifyDataSetChanged();
             }
+
+            mSearchEngineBar.setSearchEngines(mSearchEngines);
 
             // Show suggestions opt-in prompt only if suggestions are not enabled yet,
             // user hasn't been prompted and we're not on a private browsing tab.
@@ -579,18 +598,20 @@ public class BrowserSearch extends HomeFragment
         filterSuggestions();
     }
 
-    /**
-     * Sets the private SuggestClient instance. Should only be called if the suggestClient is
-     * null (i.e. has not yet been initialized or has been nulled). Non-private access is
-     * for testing purposes only.
-     */
-    @RobocopTarget
-    public void setSuggestClient(final SuggestClient client) {
-        if (mSuggestClient != null) {
-            throw new IllegalStateException("Can only set the SuggestClient if it has not " +
-                    "yet been initialized!");
+    @Override
+    public void onSearchBarClickListener(final SearchEngine searchEngine) {
+        Telemetry.sendUIEvent(TelemetryContract.Event.LOAD_URL, TelemetryContract.Method.LIST_ITEM,
+                "searchenginebar");
+
+        mSearchListener.onSearch(searchEngine, mSearchTerm);
+    }
+
+    private void maybeSetSuggestClient(final String suggestTemplate, final boolean isPrivate) {
+        if (mSuggestClient != null || isPrivate) {
+            return;
         }
-        mSuggestClient = client;
+
+        mSuggestClient = sSuggestClientFactory.getSuggestClient(getActivity(), suggestTemplate, SUGGESTION_TIMEOUT, SUGGESTION_MAX);
     }
 
     private void showSuggestionsOptIn() {

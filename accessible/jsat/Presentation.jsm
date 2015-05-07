@@ -75,6 +75,12 @@ Presenter.prototype = {
   selectionChanged: function selectionChanged(aObject) {}, // jshint ignore:line
 
   /**
+   * Name has changed.
+   * @param {nsIAccessible} aAccessible the object whose value has changed.
+   */
+  nameChanged: function nameChanged(aAccessible) {}, // jshint ignore: line
+
+  /**
    * Value has changed.
    * @param {nsIAccessible} aAccessible the object whose value has changed.
    */
@@ -314,17 +320,19 @@ AndroidPresenter.prototype.actionInvoked =
   function AndroidPresenter_actionInvoked(aObject, aActionName) {
     let state = Utils.getState(aObject);
 
-    // Checkable objects will have a state changed event we will use instead.
-    if (state.contains(States.CHECKABLE)) {
-      return null;
+    // Checkable objects use TalkBack's text derived from the event state,
+    // so we don't populate the text here.
+    let text = '';
+    if (!state.contains(States.CHECKABLE)) {
+      text = Utils.localize(UtteranceGenerator.genForAction(aObject,
+        aActionName));
     }
 
     return {
       type: this.type,
       details: [{
         eventType: this.ANDROID_VIEW_CLICKED,
-        text: Utils.localize(UtteranceGenerator.genForAction(aObject,
-          aActionName)),
+        text: text,
         checked: state.contains(States.CHECKED)
       }]
     };
@@ -451,6 +459,18 @@ AndroidPresenter.prototype.liveRegion =
       UtteranceGenerator.genForLiveRegion(aContext, aIsHide, aModifiedText));
   };
 
+AndroidPresenter.prototype.noMove =
+  function AndroidPresenter_noMove(aMoveMethod) {
+    return {
+      type: this.type,
+      details: [
+      { eventType: this.ANDROID_VIEW_ACCESSIBILITY_FOCUSED,
+        exitView: aMoveMethod,
+        text: ['']
+      }]
+    };
+  };
+
 /**
  * A B2G presenter for Gaia.
  */
@@ -495,14 +515,27 @@ B2GPresenter.prototype.pivotChanged =
           pattern: this.PIVOT_CHANGE_HAPTIC_PATTERN,
           isKey: Utils.isActivatableOnFingerUp(aContext.accessible),
           reason: this.pivotChangedReasons[aReason],
-          isUserInput: aIsUserInput
+          isUserInput: aIsUserInput,
+          hints: aContext.interactionHints
         }
       }
     };
   };
 
+B2GPresenter.prototype.nameChanged =
+  function B2GPresenter_nameChanged(aAccessible, aIsPolite = true) {
+    return {
+      type: this.type,
+      details: {
+        eventType: 'name-change',
+        data: aAccessible.name,
+        options: {enqueue: aIsPolite}
+      }
+    };
+  };
+
 B2GPresenter.prototype.valueChanged =
-  function B2GPresenter_valueChanged(aAccessible) {
+  function B2GPresenter_valueChanged(aAccessible, aIsPolite = true) {
 
     // the editable value changes are handled in the text changed presenter
     if (Utils.getState(aAccessible).contains(States.EDITABLE)) {
@@ -513,7 +546,8 @@ B2GPresenter.prototype.valueChanged =
       type: this.type,
       details: {
         eventType: 'value-change',
-        data: aAccessible.value
+        data: aAccessible.value,
+        options: {enqueue: aIsPolite}
       }
     };
   };
@@ -674,6 +708,10 @@ this.Presentation = { // jshint ignore:line
                                                       aIsFromUserInput) {
     return [p.textSelectionChanged(aText, aStart, aEnd, aOldStart, aOldEnd, // jshint ignore:line
       aIsFromUserInput) for each (p in this.presenters)]; // jshint ignore:line
+  },
+
+  nameChanged: function nameChanged(aAccessible) {
+    return [ p.nameChanged(aAccessible) for (p of this.presenters) ]; // jshint ignore:line
   },
 
   valueChanged: function valueChanged(aAccessible) {

@@ -8,6 +8,7 @@
 #include "IMETextTxn.h"
 #include "nsGkAtoms.h"
 #include "mozilla/dom/Selection.h"
+#include "nsQueryObject.h"
 
 using namespace mozilla;
 using namespace mozilla::dom;
@@ -251,7 +252,7 @@ NS_IMETHODIMP PlaceholderTxn::Commit()
   return NS_OK;
 }
 
-NS_IMETHODIMP PlaceholderTxn::RememberEndingSelection()
+nsresult PlaceholderTxn::RememberEndingSelection()
 {
   nsRefPtr<Selection> selection = mEditor->GetSelection();
   NS_ENSURE_TRUE(selection, NS_ERROR_NULL_POINTER);

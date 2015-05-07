@@ -23,7 +23,7 @@ function errorRequestHandler(request, response) {
       code: parseInt(responseCode),
       errno: INVALID_AUTH_TOKEN,
       error: "INVALID_AUTH_TOKEN",
-      message: "INVALID_AUTH_TOKEN",
+      message: "INVALID_AUTH_TOKEN"
     }));
   }
 }
@@ -37,7 +37,8 @@ add_task(function* setup_server() {
 
 add_task(function* error_offline() {
   Services.io.offline = true;
-  yield MozLoopService.hawkRequest(LOOP_SESSION_TYPE.GUEST, "/offline", "GET").then(
+  Services.prefs.setBoolPref("network.dns.offline-localhost", false);
+  yield MozLoopServiceInternal.hawkRequestInternal(LOOP_SESSION_TYPE.GUEST, "/offline", "GET").then(
     () => Assert.ok(false, "Should have rejected"),
     (error) => {
       MozLoopServiceInternal.setError("testing", error);
@@ -58,7 +59,7 @@ add_task(cleanup_between_tests);
 add_task(function* guest_401() {
   Services.prefs.setCharPref("loop.hawk-session-token", "guest");
   Services.prefs.setCharPref("loop.hawk-session-token.fxa", "fxa");
-  yield MozLoopService.hawkRequest(LOOP_SESSION_TYPE.GUEST, "/401", "POST").then(
+  yield MozLoopServiceInternal.hawkRequestInternal(LOOP_SESSION_TYPE.GUEST, "/401", "POST").then(
     () => Assert.ok(false, "Should have rejected"),
     (error) => {
       Assert.strictEqual(Services.prefs.getPrefType("loop.hawk-session-token"),
@@ -74,7 +75,6 @@ add_task(function* guest_401() {
       Assert.strictEqual(err.code, 401);
       Assert.strictEqual(err.friendlyMessage, getLoopString("session_expired_error_description"));
       Assert.equal(err.friendlyDetails, null);
-      Assert.equal(err.friendlyDetailsButtonLabel, null);
   });
 });
 
@@ -83,7 +83,7 @@ add_task(cleanup_between_tests);
 add_task(function* fxa_401() {
   Services.prefs.setCharPref("loop.hawk-session-token", "guest");
   Services.prefs.setCharPref("loop.hawk-session-token.fxa", "fxa");
-  yield MozLoopService.hawkRequest(LOOP_SESSION_TYPE.FXA, "/401", "POST").then(
+  yield MozLoopServiceInternal.hawkRequestInternal(LOOP_SESSION_TYPE.FXA, "/401", "POST").then(
     () => Assert.ok(false, "Should have rejected"),
     (error) => {
       Assert.strictEqual(Services.prefs.getCharPref("loop.hawk-session-token"),
@@ -105,7 +105,7 @@ add_task(function* fxa_401() {
 add_task(cleanup_between_tests);
 
 add_task(function* error_404() {
-  yield MozLoopService.hawkRequest(LOOP_SESSION_TYPE.GUEST, "/404", "GET").then(
+  yield MozLoopServiceInternal.hawkRequestInternal(LOOP_SESSION_TYPE.GUEST, "/404", "GET").then(
     () => Assert.ok(false, "Should have rejected"),
     (error) => {
       MozLoopServiceInternal.setError("testing", error);
@@ -115,14 +115,13 @@ add_task(function* error_404() {
       Assert.strictEqual(err.code, 404);
       Assert.strictEqual(err.friendlyMessage, getLoopString("generic_failure_title"));
       Assert.equal(err.friendlyDetails, null);
-      Assert.equal(err.friendlyDetailsButtonLabel, null);
   });
 });
 
 add_task(cleanup_between_tests);
 
 add_task(function* error_500() {
-  yield MozLoopService.hawkRequest(LOOP_SESSION_TYPE.GUEST, "/500", "GET").then(
+  yield MozLoopServiceInternal.hawkRequestInternal(LOOP_SESSION_TYPE.GUEST, "/500", "GET").then(
     () => Assert.ok(false, "Should have rejected"),
     (error) => {
       MozLoopServiceInternal.setError("testing", error);
@@ -139,7 +138,7 @@ add_task(function* error_500() {
 add_task(cleanup_between_tests);
 
 add_task(function* profile_500() {
-  yield MozLoopService.hawkRequest(LOOP_SESSION_TYPE.GUEST, "/500", "GET").then(
+  yield MozLoopServiceInternal.hawkRequestInternal(LOOP_SESSION_TYPE.GUEST, "/500", "GET").then(
     () => Assert.ok(false, "Should have rejected"),
     (error) => {
       MozLoopServiceInternal.setError("profile", error);
@@ -149,14 +148,13 @@ add_task(function* profile_500() {
       Assert.strictEqual(err.code, 500);
       Assert.strictEqual(err.friendlyMessage, getLoopString("problem_accessing_account"));
       Assert.equal(err.friendlyDetails, null);
-      Assert.equal(err.friendlyDetailsButtonLabel, null);
   });
 });
 
 add_task(cleanup_between_tests);
 
 add_task(function* error_503() {
-  yield MozLoopService.hawkRequest(LOOP_SESSION_TYPE.GUEST, "/503", "GET").then(
+  yield MozLoopServiceInternal.hawkRequestInternal(LOOP_SESSION_TYPE.GUEST, "/503", "GET").then(
     () => Assert.ok(false, "Should have rejected"),
     (error) => {
       MozLoopServiceInternal.setError("testing", error);
@@ -175,13 +173,14 @@ add_task(cleanup_between_tests);
 function run_test() {
   setupFakeLoopServer();
 
-  // Set the expiry time one hour in the future so that an error is shown when the guest session expires.
-  MozLoopServiceInternal.expiryTimeSeconds = (Date.now() / 1000) + 3600;
+  Services.prefs.setBoolPref("loop.createdRoom", true);
 
   do_register_cleanup(() => {
     Services.prefs.clearUserPref("loop.hawk-session-token");
     Services.prefs.clearUserPref("loop.hawk-session-token.fxa");
     Services.prefs.clearUserPref("loop.urlsExpiryTimeSeconds");
+    Services.prefs.clearUserPref("network.dns.offline-localhost");
+    Services.prefs.clearUserPref("loop.createdRoom");
     MozLoopService.errors.clear();
   });
 

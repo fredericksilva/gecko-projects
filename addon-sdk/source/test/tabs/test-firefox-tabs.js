@@ -15,6 +15,7 @@ const { browserWindows } = require('sdk/windows');
 const { set: setPref } = require("sdk/preferences/service");
 const DEPRECATE_PREF = "devtools.errorconsole.deprecation_warnings";
 const fixtures = require("../fixtures");
+const { base64jpeg } = fixtures;
 
 // Bug 682681 - tab.title should never be empty
 exports.testBug682681_aboutURI = function(assert, done) {
@@ -370,29 +371,30 @@ exports.testTabMove = function(assert, done) {
 };
 
 exports.testIgnoreClosing = function(assert, done) {
-  let originalWindow = browserWindows.activeWindow;
+  let originalWindow = viewFor(browserWindows.activeWindow);
   openBrowserWindow(function(window, browser) {
-    let url = "data:text/html;charset=utf-8,foobar";
+    onFocus(window).then(() => {
+      let url = "data:text/html;charset=utf-8,foobar";
 
-    assert.equal(tabs.length, 2, "should be two windows open each with one tab");
+      assert.equal(tabs.length, 2, "should be two windows open each with one tab");
 
-    tabs.on('ready', function onReady(tab) {
-      tabs.removeListener('ready', onReady);
+      tabs.on('ready', function onReady(tab) {
+        tabs.removeListener('ready', onReady);
 
-      let win = tab.window;
-      assert.equal(win.tabs.length, 2, "should be two tabs in the new window");
-      assert.equal(tabs.length, 3, "should be three tabs in total");
+        let win = tab.window;
+        assert.equal(win.tabs.length, 2, "should be two tabs in the new window");
+        assert.equal(tabs.length, 3, "should be three tabs in total");
 
-      tab.close(function() {
-        assert.equal(win.tabs.length, 1, "should be one tab in the new window");
-        assert.equal(tabs.length, 2, "should be two tabs in total");
+        tab.close(function() {
+          assert.equal(win.tabs.length, 1, "should be one tab in the new window");
+          assert.equal(tabs.length, 2, "should be two tabs in total");
 
-        originalWindow.once("activate", done);
-        close(window);
+          close(window).then(onFocus(originalWindow)).then(done).then(null, assert.fail);
+        });
       });
-    });
 
-    tabs.open(url);
+      tabs.open(url);
+    });
   });
 };
 
@@ -917,13 +919,23 @@ exports['test window focus changes active tab'] = function(assert, done) {
       focus(win2).then(function() {
         tabs.on("activate", function onActivate(tab) {
           tabs.removeListener("activate", onActivate);
-          assert.pass("activate was called on windows focus change.");
-          assert.equal(tab.url, url1, 'the activated tab url is correct');
 
-          return close(win2).then(function() {
-            assert.pass('window 2 was closed');
-            return close(win1);
-          }).then(done).then(null, assert.fail);
+          if (tab.readyState === 'uninitialized') {
+            tab.once('ready', whenReady);
+          }
+          else {
+            whenReady(tab);
+          }
+
+          function whenReady(tab) {
+            assert.pass("activate was called on windows focus change.");
+            assert.equal(tab.url, url1, 'the activated tab url is correct');
+
+            return close(win2).then(function() {
+              assert.pass('window 2 was closed');
+              return close(win1);
+            }).then(done).then(null, assert.fail);
+          }
         });
 
         win1.focus();
@@ -1009,7 +1021,7 @@ exports.testOnLoadEventWithImage = function(assert, done) {
   let count = 0;
 
   tabs.open({
-    url: fixtures.url('Firefox.jpg'),
+    url: base64jpeg,
     inBackground: true,
     onLoad: function(tab) {
       if (++count > 1) {
@@ -1078,4 +1090,4 @@ function openBrowserWindow(callback, url) {
   return window;
 }
 
-require('sdk/test').run(exports);
+require("sdk/test").run(exports);

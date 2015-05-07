@@ -69,22 +69,6 @@ var gSavePrintSettings = false;
 var gFocusedElement = null;
 
 var PrintUtils = {
-  bailOut: function () {
-    let pref = Components.classes["@mozilla.org/preferences-service;1"]
-                         .getService(Components.interfaces.nsIPrefBranch);
-    let allow_for_testing = false;
-    try {
-      allow_for_testing = pref.getBoolPref("print.enable_e10s_testing");
-    } catch(e) {
-      // The pref wasn't set, so I guess we're not overriding.
-    }
-    if (this.usingRemoteTabs && !allow_for_testing) {
-      alert("e10s printing is not implemented yet. Bug 927188.");
-      return true;
-    }
-    return false;
-  },
-
   /**
    * Shows the page setup dialog, and saves any settings changed in
    * that dialog if print.save_print_settings is set to true.
@@ -92,9 +76,6 @@ var PrintUtils = {
    * @return true on success, false on failure
    */
   showPageSetup: function () {
-    if (this.bailOut()) {
-      return;
-    }
     try {
       var printSettings = this.getPrintSettings();
       var PRINTPROMPTSVC = Components.classes["@mozilla.org/embedcomp/printingprompt-service;1"]
@@ -132,10 +113,6 @@ var PrintUtils = {
    */
   print: function (aWindow, aBrowser)
   {
-    if (this.bailOut()) {
-      return;
-    }
-
     if (!aWindow) {
       // If we're using remote browsers, chances are that window.content will
       // not be defined.
@@ -166,11 +143,9 @@ var PrintUtils = {
                       "to a browser.");
     }
 
-    let printSettings = this.getPrintSettings();
-
     let mm = aBrowser.messageManager;
+
     mm.sendAsyncMessage("Printing:Print", null, {
-      printSettings: printSettings,
       contentWindow: aWindow,
     });
   },
@@ -207,9 +182,6 @@ var PrintUtils = {
    */
   printPreview: function (aListenerObj)
   {
-    if (this.bailOut()) {
-      return;
-    }
     // if we're already in PP mode, don't set the listener; chances
     // are it is null because someone is calling printPreview() to
     // get us to refresh the display.
@@ -438,10 +410,9 @@ var PrintUtils = {
     // listener.
     let ppBrowser = this._listener.getPrintPreviewBrowser();
     let mm = ppBrowser.messageManager;
-    let printSettings = this.getPrintSettings();
     mm.sendAsyncMessage("Printing:Preview:Enter", null, {
-      printSettings: printSettings,
-      contentWindow: this._sourceBrowser.contentWindowAsCPOW,
+      contentWindow: this._sourceBrowser.contentWindowAsCPOW ||
+                     this._sourceBrowser.contentWindow,
     });
 
     if (this._webProgressPP.value) {
@@ -451,6 +422,15 @@ var PrintUtils = {
 
     let onEntered = (message) => {
       mm.removeMessageListener("Printing:PrintPreview:Entered", onEntered);
+
+      if (message.data.failed) {
+        // Something went wrong while putting the document into print preview
+        // mode. Bail out.
+        this._listener.onEnter();
+        this._listener.onExit();
+        return;
+      }
+
       // Stash the focused element so that we can return to it after exiting
       // print preview.
       gFocusedElement = document.commandDispatcher.focusedElement;
@@ -474,7 +454,6 @@ var PrintUtils = {
       printPreviewTB = document.createElementNS(XUL_NS, "toolbar");
       printPreviewTB.setAttribute("printpreview", true);
       printPreviewTB.id = "print-preview-toolbar";
-      printPreviewTB.className = "toolbar-primary";
 
       let navToolbox = this._listener.getNavToolbox();
       navToolbox.parentNode.insertBefore(printPreviewTB, navToolbox);
@@ -521,7 +500,7 @@ var PrintUtils = {
     if (gFocusedElement)
       fm.setFocus(gFocusedElement, fm.FLAG_NOSCROLL);
     else
-      window.content.focus();
+      this._sourceBrowser.focus();
     gFocusedElement = null;
 
     this._listener.onExit();

@@ -108,20 +108,20 @@ public:
     NS_DECL_NSIEXPATSINK
 
     // nsIContentSink
-    NS_IMETHOD WillParse(void);
-    NS_IMETHOD WillBuildModel(nsDTDMode aDTDMode);
-    NS_IMETHOD DidBuildModel(bool aTerminated);
-    NS_IMETHOD WillInterrupt(void);
-    NS_IMETHOD WillResume(void);
-    NS_IMETHOD SetParser(nsParserBase* aParser);
-    virtual void FlushPendingNotifications(mozFlushType aType) { }
-    NS_IMETHOD SetDocumentCharset(nsACString& aCharset) { return NS_OK; }
-    virtual nsISupports *GetTarget() { return nullptr; }
+    NS_IMETHOD WillParse(void) override;
+    NS_IMETHOD WillBuildModel(nsDTDMode aDTDMode) override;
+    NS_IMETHOD DidBuildModel(bool aTerminated) override;
+    NS_IMETHOD WillInterrupt(void) override;
+    NS_IMETHOD WillResume(void) override;
+    NS_IMETHOD SetParser(nsParserBase* aParser) override;
+    virtual void FlushPendingNotifications(mozFlushType aType) override { }
+    NS_IMETHOD SetDocumentCharset(nsACString& aCharset) override { return NS_OK; }
+    virtual nsISupports *GetTarget() override { return nullptr; }
 
     // nsIRDFContentSink
-    NS_IMETHOD Init(nsIURI* aURL);
-    NS_IMETHOD SetDataSource(nsIRDFDataSource* aDataSource);
-    NS_IMETHOD GetDataSource(nsIRDFDataSource*& aDataSource);
+    NS_IMETHOD Init(nsIURI* aURL) override;
+    NS_IMETHOD SetDataSource(nsIRDFDataSource* aDataSource) override;
+    NS_IMETHOD GetDataSource(nsIRDFDataSource*& aDataSource) override;
 
     // pseudo constants
     static int32_t gRefCnt;
@@ -343,7 +343,7 @@ RDFContentSinkImpl::~RDFContentSinkImpl()
 
         delete mContextStack;
     }
-    moz_free(mText);
+    free(mText);
 
 
     if (--gRefCnt == 0) {
@@ -455,7 +455,7 @@ RDFContentSinkImpl::HandleEndElement(const char16_t *aName)
                  ("rdfxml: extra close tag '%s' at line %d",
                   tagCStr, 0/*XXX fix me */);
 
-          NS_Free(tagCStr);
+          free(tagCStr);
       }
 #endif
 
@@ -755,7 +755,7 @@ RDFContentSinkImpl::AddText(const char16_t* aText, int32_t aLength)
 {
     // Create buffer when we first need it
     if (0 == mTextSize) {
-        mText = (char16_t *) moz_malloc(sizeof(char16_t) * 4096);
+        mText = (char16_t *) malloc(sizeof(char16_t) * 4096);
         if (!mText) {
             return NS_ERROR_OUT_OF_MEMORY;
         }
@@ -773,7 +773,7 @@ RDFContentSinkImpl::AddText(const char16_t* aText, int32_t aLength)
         int32_t newSize = (2 * mTextSize > (mTextSize + aLength)) ?
                           (2 * mTextSize) : (mTextSize + aLength);
         char16_t* newText = 
-            (char16_t *) moz_realloc(mText, sizeof(char16_t) * newSize);
+            (char16_t *) realloc(mText, sizeof(char16_t) * newSize);
         if (!newText)
             return NS_ERROR_OUT_OF_MEMORY;
         mTextSize = newSize;

@@ -233,8 +233,8 @@ private:
   nsresult          BuildFileList(PRFileDesc *aFd = nullptr);
   nsresult          BuildSynthetics();
 
-  nsZipArchive& operator=(const nsZipArchive& rhs) MOZ_DELETE;
-  nsZipArchive(const nsZipArchive& rhs) MOZ_DELETE;
+  nsZipArchive& operator=(const nsZipArchive& rhs) = delete;
+  nsZipArchive(const nsZipArchive& rhs) = delete;
 };
 
 /** 
@@ -257,8 +257,8 @@ private:
   uint16_t      mSlot;
   bool          mRegExp;
 
-  nsZipFind& operator=(const nsZipFind& rhs) MOZ_DELETE;
-  nsZipFind(const nsZipFind& rhs) MOZ_DELETE;
+  nsZipFind& operator=(const nsZipFind& rhs) = delete;
+  nsZipFind(const nsZipFind& rhs) = delete;
 };
 
 /** 
@@ -385,6 +385,8 @@ public:
                        PRFileDesc **aFd = nullptr);
   static nsresult Init(nsZipArchive *zip, const char *entry,
                        nsZipHandle **ret);
+  static nsresult Init(const uint8_t* aData, uint32_t aLen,
+                       nsZipHandle **aRet);
 
   NS_METHOD_(MozExternalRefCountType) AddRef(void);
   NS_METHOD_(MozExternalRefCountType) Release(void);

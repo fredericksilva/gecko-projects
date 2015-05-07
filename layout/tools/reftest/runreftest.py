@@ -22,9 +22,9 @@ SCRIPT_DIRECTORY = os.path.abspath(os.path.realpath(os.path.dirname(sys.argv[0])
 sys.path.insert(0, SCRIPT_DIRECTORY)
 
 from automationutils import (
-    addCommonOptions,
     dumpScreen,
     environment,
+    printstatus,
     processLeakLog
 )
 import mozcrash
@@ -149,6 +149,7 @@ class RefTest(object):
             break
         dirs.add(path)
         path = os.path.split(path)[0]
+    mozinfo.find_and_update_from_json(*dirs)
 
   def getFullPath(self, path):
     "Get an absolute path relative to self.oldcwd."
@@ -205,6 +206,7 @@ class RefTest(object):
     # Ensure that telemetry is disabled, so we don't connect to the telemetry
     # server in the middle of the tests.
     prefs['toolkit.telemetry.enabled'] = False
+    prefs['toolkit.telemetry.unified'] = False
     # Likewise for safebrowsing.
     prefs['browser.safebrowsing.enabled'] = False
     prefs['browser.safebrowsing.malware.enabled'] = False
@@ -219,9 +221,12 @@ class RefTest(object):
     # And for about:newtab content fetch and pings.
     prefs['browser.newtabpage.directory.source'] = 'data:application/json,{"reftest":1}'
     prefs['browser.newtabpage.directory.ping'] = ''
+    # Allow unsigned add-ons
+    prefs['xpinstall.signatures.required'] = False
 
     #Don't use auto-enabled e10s
     prefs['browser.tabs.remote.autostart.1'] = False
+    prefs['browser.tabs.remote.autostart.2'] = False
     if options.e10s:
       prefs['browser.tabs.remote.autostart'] = True
 
@@ -283,11 +288,45 @@ class RefTest(object):
     browserEnv["XPCOM_MEM_BLOAT_LOG"] = self.leakLogFile
     return browserEnv
 
+  def killNamedOrphans(self, pname):
+    """ Kill orphan processes matching the given command name """
+    log.info("Checking for orphan %s processes..." % pname)
+    def _psInfo(line):
+      if pname in line:
+        log.info(line)
+    process = mozprocess.ProcessHandler(['ps', '-f'],
+                                        processOutputLine=_psInfo)
+    process.run()
+    process.wait()
+
+    def _psKill(line):
+      parts = line.split()
+      if len(parts) == 3 and parts[0].isdigit():
+        pid = int(parts[0])
+        if parts[2] == pname and parts[1] == '1':
+          log.info("killing %s orphan with pid %d" % (pname, pid))
+          try:
+            os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+          except Exception as e:
+            log.info("Failed to kill process %d: %s" % (pid, str(e)))
+    process = mozprocess.ProcessHandler(['ps', '-o', 'pid,ppid,comm'],
+                                        processOutputLine=_psKill)
+    process.run()
+    process.wait()
+
   def cleanup(self, profileDir):
     if profileDir:
       shutil.rmtree(profileDir, True)
 
   def runTests(self, testPath, options, cmdlineArgs = None):
+    # Despite our efforts to clean up servers started by this script, in practice
+    # we still see infrequent cases where a process is orphaned and interferes
+    # with future tests, typically because the old server is keeping the port in use.
+    # Try to avoid those failures by checking for and killing orphan servers before
+    # trying to start new ones.
+    self.killNamedOrphans('ssltunnel')
+    self.killNamedOrphans('xpcshell')
+
     if not options.runTestsInParallel:
       return self.runSerialTests(testPath, options, cmdlineArgs)
 
@@ -395,13 +434,13 @@ class RefTest(object):
             return
       else:
         try:
-          proc.kill(sig=signal.SIGABRT)
+          process.kill(sig=signal.SIGABRT)
         except OSError:
           # https://bugzilla.mozilla.org/show_bug.cgi?id=921509
           log.info("Can't trigger Breakpad, process no longer exists")
         return
     log.info("Can't trigger Breakpad, just killing process")
-    proc.kill()
+    process.kill()
 
   ### output processing
 
@@ -618,8 +657,26 @@ class ReftestOptions(OptionParser):
   def __init__(self):
     OptionParser.__init__(self)
     defaults = {}
-    addCommonOptions(self)
-
+    self.add_option("--xre-path",
+                    action = "store", type = "string", dest = "xrePath",
+                    # individual scripts will set a sane default
+                    default = None,
+                    help = "absolute path to directory containing XRE (probably xulrunner)")
+    self.add_option("--symbols-path",
+                    action = "store", type = "string", dest = "symbolsPath",
+                    default = None,
+                    help = "absolute path to directory containing breakpad symbols, or the URL of a zip file containing symbols")
+    self.add_option("--debugger",
+                    action = "store", dest = "debugger",
+                    help = "use the given debugger to launch the application")
+    self.add_option("--debugger-args",
+                    action = "store", dest = "debuggerArgs",
+                    help = "pass the given args to the debugger _before_ "
+                           "the application on the command line")
+    self.add_option("--debugger-interactive",
+                    action = "store_true", dest = "debuggerInteractive",
+                    help = "prevents the test harness from redirecting "
+                        "stdout and stderr for interactive debuggers")
     self.add_option("--appname",
                     action = "store", type = "string", dest = "app",
                     help = "absolute path to application, overriding default")
@@ -761,7 +818,10 @@ class ReftestOptions(OptionParser):
       if options.debugger is not None:
         self.error("cannot specify a debugger with parallel tests")
 
-    options.leakThresholds = {"default": options.defaultLeakThreshold}
+    options.leakThresholds = {
+        "default": options.defaultLeakThreshold,
+        "tab": 25000,  # See dependencies of bug 1051230.
+    }
 
     return options
 

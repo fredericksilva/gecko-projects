@@ -10,7 +10,7 @@
 #include <stdio.h>                      // for FILE
 #include <sys/types.h>                  // for int32_t, int64_t
 #include "FrameMetrics.h"               // for FrameMetrics
-#include "Units.h"                      // for LayerMargin, LayerPoint
+#include "Units.h"                      // for LayerMargin, LayerPoint, ParentLayerIntRect
 #include "gfxContext.h"                 // for GraphicsOperator
 #include "gfxTypes.h"
 #include "gfxColor.h"                   // for gfxRGBA
@@ -21,6 +21,7 @@
 #include "mozilla/Assertions.h"         // for MOZ_ASSERT_HELPER2, etc
 #include "mozilla/DebugOnly.h"          // for DebugOnly
 #include "mozilla/EventForwards.h"      // for nsPaintEvent
+#include "mozilla/Maybe.h"              // for Maybe
 #include "mozilla/RefPtr.h"             // for TemporaryRef
 #include "mozilla/StyleAnimationValue.h" // for StyleAnimationValue, etc
 #include "mozilla/TimeStamp.h"          // for TimeStamp, TimeDuration
@@ -44,7 +45,8 @@
 #include "nsTArrayForwardDeclare.h"     // for InfallibleTArray
 #include "nscore.h"                     // for nsACString, nsAString
 #include "prlog.h"                      // for PRLogModuleInfo
-#include "gfx2DGlue.h"
+#include "nsIWidget.h"                  // For plugin window configuration information structs
+#include "gfxVR.h"
 
 class gfxContext;
 
@@ -55,11 +57,9 @@ namespace mozilla {
 class ComputedTimingFunction;
 class FrameLayerBuilder;
 class StyleAnimationValue;
-class WebGLContext;
 
 namespace gl {
 class GLContext;
-class SharedSurface;
 }
 
 namespace gfx {
@@ -76,7 +76,6 @@ class Animation;
 class AnimationData;
 class AsyncPanZoomController;
 class ClientLayerManager;
-class CommonLayerAttributes;
 class Layer;
 class LayerMetricsWrapper;
 class PaintedLayer;
@@ -93,18 +92,15 @@ class ShadowableLayer;
 class ShadowLayerForwarder;
 class LayerManagerComposite;
 class SpecificLayerAttributes;
-class SurfaceDescriptor;
 class Compositor;
-struct TextureFactoryIdentifier;
-struct EffectMask;
 
 namespace layerscope {
 class LayersPacket;
 }
 
-#define MOZ_LAYER_DECL_NAME(n, e)                           \
-  virtual const char* Name() const { return n; }            \
-  virtual LayerType GetType() const { return e; }
+#define MOZ_LAYER_DECL_NAME(n, e)                              \
+  virtual const char* Name() const override { return n; }  \
+  virtual LayerType GetType() const override { return e; }
 
 /**
  * Base class for userdata objects attached to layers and layer managers.
@@ -306,7 +302,7 @@ public:
 
   virtual bool HasShadowManagerInternal() const { return false; }
   bool HasShadowManager() const { return HasShadowManagerInternal(); }
-
+  virtual void StorePluginWidgetConfigurations(const nsTArray<nsIWidget::Configuration>& aConfigurations) {}
   bool IsSnappingEffectiveTransforms() { return mSnapEffectiveTransforms; }
 
 
@@ -669,6 +665,10 @@ public:
 
   virtual float RequestProperty(const nsAString& property) { return -1; }
 
+  const TimeStamp& GetAnimationReadyTime() const {
+    return mAnimationReadyTime;
+  }
+
 protected:
   nsRefPtr<Layer> mRoot;
   gfx::UserData mUserData;
@@ -692,6 +692,9 @@ protected:
   static PRLogModuleInfo* sLog;
   uint64_t mId;
   bool mInTransaction;
+  // The time when painting most recently finished. This is recorded so that
+  // we can time any play-pending animations from this point.
+  TimeStamp mAnimationReadyTime;
 private:
   struct FramesTimingRecording
   {
@@ -908,6 +911,13 @@ public:
    * outside the dispatch-to-content region, we can initiate a gesture without
    * consulting the content thread. Otherwise we must dispatch the event to
    * content.
+   * Note that if a layer or any ancestor layer has a ForceEmptyHitRegion
+   * override in GetEventRegionsOverride() then the hit-region must be treated
+   * as empty. Similarly, if there is a ForceDispatchToContent override then
+   * the dispatch-to-content region must be treated as encompassing the entire
+   * hit region, and therefore we must consult the content thread before
+   * initiating a gesture. (If both flags are set, ForceEmptyHitRegion takes
+   * priority.)
    */
   /**
    * CONSTRUCTION PHASE ONLY
@@ -975,20 +985,20 @@ public:
    * in device pixels.
    * If aRect is null no clipping will be performed.
    */
-  void SetClipRect(const nsIntRect* aRect)
+  void SetClipRect(const Maybe<ParentLayerIntRect>& aRect)
   {
-    if (mUseClipRect) {
+    if (mClipRect) {
       if (!aRect) {
         MOZ_LAYERS_LOG_IF_SHADOWABLE(this, ("Layer::Mutated(%p) ClipRect was %d,%d,%d,%d is <none>", this,
-                         mClipRect.x, mClipRect.y, mClipRect.width, mClipRect.height));
-        mUseClipRect = false;
+                         mClipRect->x, mClipRect->y, mClipRect->width, mClipRect->height));
+        mClipRect.reset();
         Mutated();
       } else {
-        if (!aRect->IsEqualEdges(mClipRect)) {
+        if (!aRect->IsEqualEdges(*mClipRect)) {
           MOZ_LAYERS_LOG_IF_SHADOWABLE(this, ("Layer::Mutated(%p) ClipRect was %d,%d,%d,%d is %d,%d,%d,%d", this,
-                           mClipRect.x, mClipRect.y, mClipRect.width, mClipRect.height,
+                           mClipRect->x, mClipRect->y, mClipRect->width, mClipRect->height,
                            aRect->x, aRect->y, aRect->width, aRect->height));
-          mClipRect = *aRect;
+          mClipRect = aRect;
           Mutated();
         }
       }
@@ -996,8 +1006,7 @@ public:
       if (aRect) {
         MOZ_LAYERS_LOG_IF_SHADOWABLE(this, ("Layer::Mutated(%p) ClipRect was <none> is %d,%d,%d,%d", this,
                          aRect->x, aRect->y, aRect->width, aRect->height));
-        mUseClipRect = true;
-        mClipRect = *aRect;
+        mClipRect = aRect;
         Mutated();
       }
     }
@@ -1093,12 +1102,18 @@ public:
 
   // Call AddAnimation to add a new animation to this layer from layout code.
   // Caller must fill in all the properties of the returned animation.
+  // A later animation overrides an earlier one.
   Animation* AddAnimation();
   // ClearAnimations clears animations on this layer.
   void ClearAnimations();
   // This is only called when the layer tree is updated. Do not call this from
   // layout code.  To add an animation to this layer, use AddAnimation.
   void SetAnimations(const AnimationArray& aAnimations);
+  // Go through all animations in this layer and its children and, for
+  // any animations with a null start time, update their start time such
+  // that at |aReadyTime| the animation's current time corresponds to its
+  // 'initial current time' value.
+  void StartPendingAnimations(const TimeStamp& aReadyTime);
 
   // These are a parallel to AddAnimation and clearAnimations, except
   // they add pending animations that apply only when the next
@@ -1180,13 +1195,25 @@ public:
    * If a layer is a scrollbar layer, |aScrollId| holds the scroll identifier
    * of the scrollable content that the scrollbar is for.
    */
-  void SetScrollbarData(FrameMetrics::ViewID aScrollId, ScrollDirection aDir)
+  void SetScrollbarData(FrameMetrics::ViewID aScrollId, ScrollDirection aDir, float aThumbRatio)
   {
     if (mScrollbarTargetId != aScrollId ||
-        mScrollbarDirection != aDir) {
+        mScrollbarDirection != aDir ||
+        mScrollbarThumbRatio != aThumbRatio)
+    {
       MOZ_LAYERS_LOG_IF_SHADOWABLE(this, ("Layer::Mutated(%p) ScrollbarData", this));
       mScrollbarTargetId = aScrollId;
       mScrollbarDirection = aDir;
+      mScrollbarThumbRatio = aThumbRatio;
+      Mutated();
+    }
+  }
+
+  // Set during construction for the container layer of scrollbar components.
+  void SetIsScrollbarContainer()
+  {
+    if (!mIsScrollbarContainer) {
+      mIsScrollbarContainer = true;
       Mutated();
     }
   }
@@ -1194,7 +1221,7 @@ public:
   // These getters can be used anytime.
   float GetOpacity() { return mOpacity; }
   gfx::CompositionOp GetMixBlendMode() const { return mMixBlendMode; }
-  const nsIntRect* GetClipRect() { return mUseClipRect ? &mClipRect : nullptr; }
+  const Maybe<ParentLayerIntRect>& GetClipRect() const { return mClipRect; }
   uint32_t GetContentFlags() { return mContentFlags; }
   const nsIntRect& GetLayerBounds() const { return mLayerBounds; }
   const nsIntRegion& GetVisibleRegion() const { return mVisibleRegion; }
@@ -1213,8 +1240,9 @@ public:
   virtual Layer* GetLastChild() const { return nullptr; }
   const gfx::Matrix4x4 GetTransform() const;
   const gfx::Matrix4x4& GetBaseTransform() const { return mTransform; }
-  float GetPostXScale() const { return mPostXScale; }
-  float GetPostYScale() const { return mPostYScale; }
+  // Note: these are virtual because ContainerLayerComposite overrides them.
+  virtual float GetPostXScale() const { return mPostXScale; }
+  virtual float GetPostYScale() const { return mPostYScale; }
   bool GetIsFixedPosition() { return mIsFixedPosition; }
   bool GetIsStickyPosition() { return mStickyPositionData; }
   LayerPoint GetFixedPositionAnchor() { return mAnchor; }
@@ -1224,8 +1252,28 @@ public:
   const LayerRect& GetStickyScrollRangeInner() { return mStickyPositionData->mInner; }
   FrameMetrics::ViewID GetScrollbarTargetContainerId() { return mScrollbarTargetId; }
   ScrollDirection GetScrollbarDirection() { return mScrollbarDirection; }
+  float GetScrollbarThumbRatio() { return mScrollbarThumbRatio; }
+  bool IsScrollbarContainer() { return mIsScrollbarContainer; }
   Layer* GetMaskLayer() const { return mMaskLayer; }
 
+
+  /**
+   * Retrieve the root level visible region for |this| taking into account
+   * clipping applied to parent layers of |this| as well as subtracting
+   * visible regions of higher siblings of this layer and each ancestor.
+   *
+   * Note translation values for offsets of visible regions and accumulated
+   * aLayerOffset are integer rounded using Point's RoundedToInt.
+   *
+   * @param aResult - the resulting visible region of this layer.
+   * @param aLayerOffset - this layer's total offset from the root layer.
+   * @return - false if during layer tree traversal a parent or sibling
+   *  transform is found to be non-translational. This method returns early
+   *  in this case, results will not be valid. Returns true on successful
+   *  traversal.
+   */
+  bool GetVisibleRegionRelativeToRootLayer(nsIntRegion& aResult,
+                                           nsIntPoint* aLayerOffset);
 
   // Note that all lengths in animation data are either in CSS pixels or app
   // units and must be converted to device pixels by the compositor.
@@ -1234,6 +1282,8 @@ public:
 
   uint64_t GetAnimationGeneration() { return mAnimationGeneration; }
   void SetAnimationGeneration(uint64_t aCount) { mAnimationGeneration = aCount; }
+
+  bool HasTransformAnimation() const;
 
   /**
    * Returns the local transform for this layer: either mTransform or,
@@ -1362,7 +1412,7 @@ public:
   // These getters can be used anytime.  They return the effective
   // values that should be used when drawing this layer to screen,
   // accounting for this layer possibly being a shadow.
-  const nsIntRect* GetEffectiveClipRect();
+  const Maybe<ParentLayerIntRect>& GetEffectiveClipRect();
   const nsIntRegion& GetEffectiveVisibleRegion();
 
   /**
@@ -1386,6 +1436,23 @@ public:
    * such ancestor), but for BasicLayers it's different.
    */
   const gfx::Matrix4x4& GetEffectiveTransform() const { return mEffectiveTransform; }
+
+  /**
+   * This returns the effective transform for Layer's buffer computed by
+   * ComputeEffectiveTransforms. Typically this is a transform that transforms
+   * this layer's buffer all the way to some intermediate surface or destination
+   * surface. For non-BasicLayers this will be a transform to the nearest
+   * ancestor with UseIntermediateSurface() (or to the root, if there is no
+   * such ancestor), but for BasicLayers it's different.
+   *
+   * By default, its value is same to GetEffectiveTransform().
+   * When ImageLayer is rendered with ScaleMode::STRETCH,
+   * it becomes different from GetEffectiveTransform().
+   */
+  virtual const gfx::Matrix4x4& GetEffectiveTransformForBuffer() const
+  {
+    return mEffectiveTransform;
+  }
 
   /**
    * @param aTransformToSurface the composition of the transforms
@@ -1627,12 +1694,11 @@ protected:
   float mOpacity;
   gfx::CompositionOp mMixBlendMode;
   bool mForceIsolatedGroup;
-  nsIntRect mClipRect;
+  Maybe<ParentLayerIntRect> mClipRect;
   nsIntRect mTileSourceRect;
   nsIntRegion mInvalidRegion;
   nsTArray<nsRefPtr<AsyncPanZoomController> > mApzcs;
   uint32_t mContentFlags;
-  bool mUseClipRect;
   bool mUseTileSourceRect;
   bool mIsFixedPosition;
   LayerPoint mAnchor;
@@ -1645,6 +1711,11 @@ protected:
   nsAutoPtr<StickyPositionData> mStickyPositionData;
   FrameMetrics::ViewID mScrollbarTargetId;
   ScrollDirection mScrollbarDirection;
+  // The scrollbar thumb ratio is the ratio of the thumb position (in the CSS
+  // pixels of the scrollframe's parent's space) to the scroll position (in the
+  // CSS pixels of the scrollframe's space).
+  float mScrollbarThumbRatio;
+  bool mIsScrollbarContainer;
   DebugOnly<uint32_t> mDebugColorIndex;
   // If this layer is used for OMTA, then this counter is used to ensure we
   // stay in sync with the animation manager
@@ -1693,11 +1764,11 @@ public:
    */
   const nsIntRegion& GetValidRegion() const { return mValidRegion; }
 
-  virtual PaintedLayer* AsPaintedLayer() { return this; }
+  virtual PaintedLayer* AsPaintedLayer() override { return this; }
 
   MOZ_LAYER_DECL_NAME("PaintedLayer", TYPE_PAINTED)
 
-  virtual void ComputeEffectiveTransforms(const gfx::Matrix4x4& aTransformToSurface)
+  virtual void ComputeEffectiveTransforms(const gfx::Matrix4x4& aTransformToSurface) override
   {
     gfx::Matrix4x4 idealTransform = GetLocalTransform() * aTransformToSurface;
     gfx::Matrix residual;
@@ -1743,9 +1814,9 @@ protected:
     mContentFlags = 0; // Clear NO_TEXT, NO_TEXT_OVER_TRANSPARENT
   }
 
-  virtual void PrintInfo(std::stringstream& aStream, const char* aPrefix);
+  virtual void PrintInfo(std::stringstream& aStream, const char* aPrefix) override;
 
-  virtual void DumpPacket(layerscope::LayersPacket* aPacket, const void* aParent);
+  virtual void DumpPacket(layerscope::LayersPacket* aPacket, const void* aParent) override;
 
   /**
    * ComputeEffectiveTransforms snaps the ideal transform to get mEffectiveTransform.
@@ -1825,21 +1896,35 @@ public:
     Mutated();
   }
 
-  virtual void FillSpecificAttributes(SpecificLayerAttributes& aAttrs);
+  void SetScaleToResolution(bool aScaleToResolution, float aResolution)
+  {
+    if (mScaleToResolution == aScaleToResolution && mPresShellResolution == aResolution) {
+      return;
+    }
+
+    MOZ_LAYERS_LOG_IF_SHADOWABLE(this, ("Layer::Mutated(%p) ScaleToResolution", this));
+    mScaleToResolution = aScaleToResolution;
+    mPresShellResolution = aResolution;
+    Mutated();
+  }
+
+  virtual void FillSpecificAttributes(SpecificLayerAttributes& aAttrs) override;
 
   void SortChildrenBy3DZOrder(nsTArray<Layer*>& aArray);
 
   // These getters can be used anytime.
 
-  virtual ContainerLayer* AsContainerLayer() { return this; }
-  virtual const ContainerLayer* AsContainerLayer() const { return this; }
+  virtual ContainerLayer* AsContainerLayer() override { return this; }
+  virtual const ContainerLayer* AsContainerLayer() const override { return this; }
 
-  virtual Layer* GetFirstChild() const { return mFirstChild; }
-  virtual Layer* GetLastChild() const { return mLastChild; }
+  virtual Layer* GetFirstChild() const override { return mFirstChild; }
+  virtual Layer* GetLastChild() const override { return mLastChild; }
   float GetPreXScale() const { return mPreXScale; }
   float GetPreYScale() const { return mPreYScale; }
   float GetInheritedXScale() const { return mInheritedXScale; }
   float GetInheritedYScale() const { return mInheritedYScale; }
+  float GetPresShellResolution() const { return mPresShellResolution; }
+  bool ScaleToResolution() const { return mScaleToResolution; }
 
   MOZ_LAYER_DECL_NAME("ContainerLayer", TYPE_CONTAINER)
 
@@ -1849,7 +1934,7 @@ public:
    * container is backend-specific. ComputeEffectiveTransforms must also set
    * mUseIntermediateSurface.
    */
-  virtual void ComputeEffectiveTransforms(const gfx::Matrix4x4& aTransformToSurface) = 0;
+  virtual void ComputeEffectiveTransforms(const gfx::Matrix4x4& aTransformToSurface) override = 0;
 
   /**
    * Call this only after ComputeEffectiveTransforms has been invoked
@@ -1889,6 +1974,30 @@ public:
    */
   static bool HasOpaqueAncestorLayer(Layer* aLayer);
 
+  void SetChildrenChanged(bool aVal) {
+    mChildrenChanged = aVal;
+  }
+
+  void SetEventRegionsOverride(EventRegionsOverride aVal) {
+    if (mEventRegionsOverride == aVal) {
+      return;
+    }
+
+    MOZ_LAYERS_LOG_IF_SHADOWABLE(this, ("Layer::Mutated(%p) EventRegionsOverride", this));
+    mEventRegionsOverride = aVal;
+    Mutated();
+  }
+
+  EventRegionsOverride GetEventRegionsOverride() const {
+    return mEventRegionsOverride;
+  }
+
+  /**
+   * VR
+   */
+  void SetVRHMDInfo(gfx::VRHMDInfo* aHMD) { mHMDInfo = aHMD; }
+  gfx::VRHMDInfo* GetVRHMDInfo() { return mHMDInfo; }
+
 protected:
   friend class ReadbackProcessor;
 
@@ -1916,9 +2025,9 @@ protected:
    */
   void ComputeEffectiveTransformsForChildren(const gfx::Matrix4x4& aTransformToSurface);
 
-  virtual void PrintInfo(std::stringstream& aStream, const char* aPrefix);
+  virtual void PrintInfo(std::stringstream& aStream, const char* aPrefix) override;
 
-  virtual void DumpPacket(layerscope::LayersPacket* aPacket, const void* aParent);
+  virtual void DumpPacket(layerscope::LayersPacket* aPacket, const void* aParent) override;
 
   Layer* mFirstChild;
   Layer* mLastChild;
@@ -1928,9 +2037,19 @@ protected:
   // be part of mTransform.
   float mInheritedXScale;
   float mInheritedYScale;
+  // For layers corresponding to an nsDisplayResolution, the resolution of the
+  // associated pres shell; for other layers, 1.0.
+  float mPresShellResolution;
+  // Whether the compositor should scale to mPresShellResolution.
+  bool mScaleToResolution;
   bool mUseIntermediateSurface;
   bool mSupportsComponentAlphaChildren;
   bool mMayHaveReadbackChild;
+  // This is updated by ComputeDifferences. This will be true if we need to invalidate
+  // the intermediate surface.
+  bool mChildrenChanged;
+  EventRegionsOverride mEventRegionsOverride;
+  nsRefPtr<gfx::VRHMDInfo> mHMDInfo;
 };
 
 /**
@@ -1940,7 +2059,7 @@ protected:
  */
 class ColorLayer : public Layer {
 public:
-  virtual ColorLayer* AsColorLayer() { return this; }
+  virtual ColorLayer* AsColorLayer() override { return this; }
 
   /**
    * CONSTRUCTION PHASE ONLY
@@ -1973,7 +2092,7 @@ public:
 
   MOZ_LAYER_DECL_NAME("ColorLayer", TYPE_COLOR)
 
-  virtual void ComputeEffectiveTransforms(const gfx::Matrix4x4& aTransformToSurface)
+  virtual void ComputeEffectiveTransforms(const gfx::Matrix4x4& aTransformToSurface) override
   {
     gfx::Matrix4x4 idealTransform = GetLocalTransform() * aTransformToSurface;
     mEffectiveTransform = SnapTransformTranslation(idealTransform, nullptr);
@@ -1986,9 +2105,9 @@ protected:
       mColor(0.0, 0.0, 0.0, 0.0)
   {}
 
-  virtual void PrintInfo(std::stringstream& aStream, const char* aPrefix);
+  virtual void PrintInfo(std::stringstream& aStream, const char* aPrefix) override;
 
-  virtual void DumpPacket(layerscope::LayersPacket* aPacket, const void* aParent);
+  virtual void DumpPacket(layerscope::LayersPacket* aPacket, const void* aParent) override;
 
   nsIntRect mBounds;
   gfxRGBA mColor;
@@ -2119,7 +2238,7 @@ public:
 
   MOZ_LAYER_DECL_NAME("CanvasLayer", TYPE_CANVAS)
 
-  virtual void ComputeEffectiveTransforms(const gfx::Matrix4x4& aTransformToSurface)
+  virtual void ComputeEffectiveTransforms(const gfx::Matrix4x4& aTransformToSurface) override
   {
     // Snap our local transform first, and snap the inherited transform as well.
     // This makes our snapping equivalent to what would happen if our content
@@ -2143,9 +2262,9 @@ protected:
     , mDirty(false)
   {}
 
-  virtual void PrintInfo(std::stringstream& aStream, const char* aPrefix);
+  virtual void PrintInfo(std::stringstream& aStream, const char* aPrefix) override;
 
-  virtual void DumpPacket(layerscope::LayersPacket* aPacket, const void* aParent);
+  virtual void DumpPacket(layerscope::LayersPacket* aPacket, const void* aParent) override;
 
   void FireDidTransactionCallback()
   {
@@ -2192,13 +2311,13 @@ class RefLayer : public ContainerLayer {
   friend class LayerManager;
 
 private:
-  virtual bool InsertAfter(Layer* aChild, Layer* aAfter) MOZ_OVERRIDE
+  virtual bool InsertAfter(Layer* aChild, Layer* aAfter) override
   { MOZ_CRASH(); return false; }
 
-  virtual bool RemoveChild(Layer* aChild)
+  virtual bool RemoveChild(Layer* aChild) override
   { MOZ_CRASH(); return false; }
 
-  virtual bool RepositionChild(Layer* aChild, Layer* aAfter)
+  virtual bool RepositionChild(Layer* aChild, Layer* aAfter) override
   { MOZ_CRASH(); return false; }
 
   using Layer::SetFrameMetrics;
@@ -2251,14 +2370,14 @@ public:
   }
 
   // These getters can be used anytime.
-  virtual RefLayer* AsRefLayer() { return this; }
+  virtual RefLayer* AsRefLayer() override { return this; }
 
   virtual int64_t GetReferentId() { return mId; }
 
   /**
    * DRAWING PHASE ONLY
    */
-  virtual void FillSpecificAttributes(SpecificLayerAttributes& aAttrs);
+  virtual void FillSpecificAttributes(SpecificLayerAttributes& aAttrs) override;
 
   MOZ_LAYER_DECL_NAME("RefLayer", TYPE_REF)
 
@@ -2267,9 +2386,9 @@ protected:
     : ContainerLayer(aManager, aImplData) , mId(0)
   {}
 
-  virtual void PrintInfo(std::stringstream& aStream, const char* aPrefix);
+  virtual void PrintInfo(std::stringstream& aStream, const char* aPrefix) override;
 
-  virtual void DumpPacket(layerscope::LayersPacket* aPacket, const void* aParent);
+  virtual void DumpPacket(layerscope::LayersPacket* aPacket, const void* aParent) override;
 
   Layer* mTempReferent;
   // 0 is a special value that means "no ID".

@@ -97,9 +97,6 @@ let EventListener = {
 
     // Restore the form data and scroll position.
     gContentRestore.restoreDocument();
-
-    // Ask SessionStore.jsm to trigger SSTabRestored.
-    sendAsyncMessage("SessionStore:restoreDocumentComplete", {epoch: epoch});
   }
 };
 
@@ -119,41 +116,18 @@ let MessageListener = {
   },
 
   receiveMessage: function ({name, data}) {
+    // The docShell might be gone. Don't process messages,
+    // that will just lead to errors anyway.
+    if (!docShell) {
+      return;
+    }
+
     switch (name) {
       case "SessionStore:restoreHistory":
-        let reloadCallback = () => {
-          // Inform SessionStore.jsm about the reload. It will send
-          // restoreTabContent in response.
-          sendAsyncMessage("SessionStore:reloadPendingTab", {epoch: data.epoch});
-        };
-        gContentRestore.restoreHistory(data.epoch, data.tabData, reloadCallback);
-
-        // When restoreHistory finishes, we send a synchronous message to
-        // SessionStore.jsm so that it can run SSTabRestoring. Users of
-        // SSTabRestoring seem to get confused if chrome and content are out of
-        // sync about the state of the restore (particularly regarding
-        // docShell.currentURI). Using a synchronous message is the easiest way
-        // to temporarily synchronize them.
-        sendSyncMessage("SessionStore:restoreHistoryComplete", {epoch: data.epoch});
+        this.restoreHistory(data);
         break;
       case "SessionStore:restoreTabContent":
-        let epoch = gContentRestore.getRestoreEpoch();
-        let finishCallback = () => {
-          // Tell SessionStore.jsm that it may want to restore some more tabs,
-          // since it restores a max of MAX_CONCURRENT_TAB_RESTORES at a time.
-          sendAsyncMessage("SessionStore:restoreTabContentComplete", {epoch: epoch});
-        };
-
-        // We need to pass the value of didStartLoad back to SessionStore.jsm.
-        let didStartLoad = gContentRestore.restoreTabContent(data.loadArguments, finishCallback);
-
-        sendAsyncMessage("SessionStore:restoreTabContentStarted", {epoch: epoch});
-
-        if (!didStartLoad) {
-          // Pretend that the load succeeded so that event handlers fire correctly.
-          sendAsyncMessage("SessionStore:restoreTabContentComplete", {epoch: epoch});
-          sendAsyncMessage("SessionStore:restoreDocumentComplete", {epoch: epoch});
-        }
+        this.restoreTabContent(data);
         break;
       case "SessionStore:resetRestore":
         gContentRestore.resetRestore();
@@ -161,6 +135,57 @@ let MessageListener = {
       default:
         debug("received unknown message '" + name + "'");
         break;
+    }
+  },
+
+  restoreHistory({epoch, tabData, loadArguments}) {
+    gContentRestore.restoreHistory(epoch, tabData, loadArguments, {
+      onReload() {
+        // Inform SessionStore.jsm about the reload. It will send
+        // restoreTabContent in response.
+        sendAsyncMessage("SessionStore:reloadPendingTab", {epoch});
+      },
+
+      // Note: The two callbacks passed here will only be used when a load
+      // starts that was not initiated by sessionstore itself. This can happen
+      // when some code calls browser.loadURI() on a pending browser/tab.
+
+      onLoadStarted() {
+        // Notify the parent that the tab is no longer pending.
+        sendSyncMessage("SessionStore:restoreTabContentStarted", {epoch});
+      },
+
+      onLoadFinished() {
+        // Tell SessionStore.jsm that it may want to restore some more tabs,
+        // since it restores a max of MAX_CONCURRENT_TAB_RESTORES at a time.
+        sendAsyncMessage("SessionStore:restoreTabContentComplete", {epoch});
+      }
+    });
+
+    // When restoreHistory finishes, we send a synchronous message to
+    // SessionStore.jsm so that it can run SSTabRestoring. Users of
+    // SSTabRestoring seem to get confused if chrome and content are out of
+    // sync about the state of the restore (particularly regarding
+    // docShell.currentURI). Using a synchronous message is the easiest way
+    // to temporarily synchronize them.
+    sendSyncMessage("SessionStore:restoreHistoryComplete", {epoch});
+  },
+
+  restoreTabContent({loadArguments}) {
+    let epoch = gContentRestore.getRestoreEpoch();
+
+    // We need to pass the value of didStartLoad back to SessionStore.jsm.
+    let didStartLoad = gContentRestore.restoreTabContent(loadArguments, () => {
+      // Tell SessionStore.jsm that it may want to restore some more tabs,
+      // since it restores a max of MAX_CONCURRENT_TAB_RESTORES at a time.
+      sendAsyncMessage("SessionStore:restoreTabContentComplete", {epoch});
+    });
+
+    sendAsyncMessage("SessionStore:restoreTabContentStarted", {epoch});
+
+    if (!didStartLoad) {
+      // Pretend that the load succeeded so that event handlers fire correctly.
+      sendAsyncMessage("SessionStore:restoreTabContentComplete", {epoch});
     }
   }
 };
@@ -203,7 +228,11 @@ let SyncHandler = {
    * can occur by sending data shortly before flushing synchronously.
    */
   flushAsync: function () {
-    MessageQueue.flushAsync();
+    if (!Services.prefs.getBoolPref("browser.sessionstore.debug")) {
+      throw new Error("flushAsync() must be used for testing, only.");
+    }
+
+    MessageQueue.send();
   }
 };
 
@@ -236,6 +265,9 @@ let SessionHistoryListener = {
     if (!SessionHistory.isEmpty(docShell)) {
       this.collect();
     }
+
+    // Listen for page title changes.
+    addEventListener("DOMTitleChanged", this);
   },
 
   uninit: function () {
@@ -249,6 +281,10 @@ let SessionHistoryListener = {
     if (docShell) {
       MessageQueue.push("history", () => SessionHistory.collect(docShell));
     }
+  },
+
+  handleEvent(event) {
+    this.collect();
   },
 
   onFrameTreeCollected: function () {
@@ -661,9 +697,8 @@ let MessageQueue = {
 
     // Send all data to the parent process.
     sendMessage("SessionStore:update", {
-      id: this._id,
-      data: data,
-      telemetry: telemetry
+      id: this._id, data, telemetry,
+      isFinal: options.isFinal || false
     });
 
     // Increase our unique message ID.
@@ -687,20 +722,6 @@ let MessageQueue = {
 
     this._data.clear();
     this._lastUpdated.clear();
-  },
-
-  /**
-   * DO NOT USE - DEBUGGING / TESTING ONLY
-   *
-   * This function is used to simulate certain situations where race conditions
-   * can occur by sending data shortly before flushing synchronously.
-   */
-  flushAsync: function () {
-    if (!Services.prefs.getBoolPref("browser.sessionstore.debug")) {
-      throw new Error("flushAsync() must be used for testing, only.");
-    }
-
-    this.send();
   }
 };
 
@@ -730,12 +751,8 @@ function handleRevivedTab() {
 
     removeEventListener("pagehide", handleRevivedTab);
 
-    // We can't send a message using the frame message manager because by
-    // the time we reach the unload event handler, it's "too late", and messages
-    // won't be sent or received. The child-process message manager works though,
-    // despite the fact that we're really running in the parent process.
-    let browser = docShell.chromeEventHandler;
-    cpmm.sendSyncMessage("SessionStore:RemoteTabRevived", null, {browser: browser});
+    // Notify the parent.
+    sendAsyncMessage("SessionStore:crashedTabRevived");
   }
 }
 
@@ -744,6 +761,10 @@ function handleRevivedTab() {
 addEventListener("pagehide", handleRevivedTab);
 
 addEventListener("unload", () => {
+  // Upon frameLoader destruction, send a final update message to
+  // the parent and flush all data currently held in the child.
+  MessageQueue.send({isFinal: true});
+
   // If we're browsing from the tab crashed UI to a URI that causes the tab
   // to go remote again, we catch this in the unload event handler, because
   // swapping out the non-remote browser for a remote one in

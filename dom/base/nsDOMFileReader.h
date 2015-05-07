@@ -1,4 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -30,10 +31,10 @@ class File;
 }
 }
 
-class nsDOMFileReader : public mozilla::dom::FileIOObject,
-                        public nsIDOMFileReader,
-                        public nsIInterfaceRequestor,
-                        public nsSupportsWeakReference
+class nsDOMFileReader final : public mozilla::dom::FileIOObject,
+                              public nsIDOMFileReader,
+                              public nsIInterfaceRequestor,
+                              public nsSupportsWeakReference
 {
   typedef mozilla::ErrorResult ErrorResult;
   typedef mozilla::dom::GlobalObject GlobalObject;
@@ -51,18 +52,18 @@ public:
   NS_DECL_NSIINTERFACEREQUESTOR
 
   // FileIOObject overrides
-  virtual void DoAbort(nsAString& aEvent) MOZ_OVERRIDE;
+  virtual void DoAbort(nsAString& aEvent) override;
 
-  virtual nsresult DoReadData(nsIAsyncInputStream* aStream, uint64_t aCount) MOZ_OVERRIDE;
+  virtual nsresult DoReadData(nsIAsyncInputStream* aStream, uint64_t aCount) override;
 
   virtual nsresult DoOnLoadEnd(nsresult aStatus, nsAString& aSuccessEvent,
-                               nsAString& aTerminationEvent) MOZ_OVERRIDE;
+                               nsAString& aTerminationEvent) override;
 
   nsPIDOMWindow* GetParentObject() const
   {
     return GetOwner();
   }
-  virtual JSObject* WrapObject(JSContext* aCx) MOZ_OVERRIDE;
+  virtual JSObject* WrapObject(JSContext* aCx, JS::Handle<JSObject*> aGivenProto) override;
 
   // WebIDL
   static already_AddRefed<nsDOMFileReader>
@@ -131,7 +132,7 @@ protected:
   nsresult GetAsDataURL(nsIDOMBlob *aFile, const char *aFileData, uint32_t aDataLen, nsAString &aResult);
 
   void FreeFileData() {
-    moz_free(mFileData);
+    free(mFileData);
     mFileData = nullptr;
     mDataLen = 0;
   }

@@ -237,10 +237,9 @@ nsResProtocolHandler::NewURI(const nsACString &aSpec,
 {
     nsresult rv;
 
-    nsResURL *resURL = new nsResURL();
+    nsRefPtr<nsResURL> resURL = new nsResURL();
     if (!resURL)
         return NS_ERROR_OUT_OF_MEMORY;
-    NS_ADDREF(resURL);
 
     // unescape any %2f and %2e to make sure nsStandardURL coalesces them.
     // Later net_GetFileFromURLSpec() will do a full unescape and we want to
@@ -272,9 +271,9 @@ nsResProtocolHandler::NewURI(const nsACString &aSpec,
       spec.Append(last, src-last);
 
     rv = resURL->Init(nsIStandardURL::URLTYPE_STANDARD, -1, spec, aCharset, aBaseURI);
-    if (NS_SUCCEEDED(rv))
-        rv = CallQueryInterface(resURL, result);
-    NS_RELEASE(resURL);
+    if (NS_SUCCEEDED(rv)) {
+        resURL.forget(result);
+    }
     return rv;
 }
 
@@ -284,14 +283,18 @@ nsResProtocolHandler::NewChannel2(nsIURI* uri,
                                   nsIChannel** result)
 {
     NS_ENSURE_ARG_POINTER(uri);
-    nsresult rv;
     nsAutoCString spec;
+    nsresult rv = ResolveURI(uri, spec);
+    NS_ENSURE_SUCCESS(rv, rv);
 
-    rv = ResolveURI(uri, spec);
-    if (NS_FAILED(rv)) return rv;
+    nsCOMPtr<nsIURI> newURI;
+    rv = NS_NewURI(getter_AddRefs(newURI), spec);
+    NS_ENSURE_SUCCESS(rv, rv);
 
-    rv = mIOService->NewChannel(spec, nullptr, nullptr, result);
-    if (NS_FAILED(rv)) return rv;
+    rv = NS_NewChannelInternal(result,
+                               newURI,
+                               aLoadInfo);
+    NS_ENSURE_SUCCESS(rv, rv);
 
     nsLoadFlags loadFlags = 0;
     (*result)->GetLoadFlags(&loadFlags);

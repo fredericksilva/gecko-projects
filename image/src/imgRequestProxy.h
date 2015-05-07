@@ -4,10 +4,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#ifndef imgRequestProxy_h__
-#define imgRequestProxy_h__
+#ifndef mozilla_image_src_imgRequestProxy_h
+#define mozilla_image_src_imgRequestProxy_h
 
-#include "mozilla/WeakPtr.h"
 #include "imgIRequest.h"
 #include "nsISecurityInfoProvider.h"
 
@@ -18,8 +17,10 @@
 #include "nsAutoPtr.h"
 #include "nsThreadUtils.h"
 #include "mozilla/TimeStamp.h"
+#include "mozilla/gfx/Rect.h"
 
 #include "imgRequest.h"
+#include "IProgressObserver.h"
 
 #define NS_IMGREQUESTPROXY_CID \
 { /* 20557898-1dd2-11b2-8f65-9c462ee2bc95 */         \
@@ -30,9 +31,7 @@
 }
 
 class imgINotificationObserver;
-class imgRequestNotifyRunnable;
 class imgStatusNotifyRunnable;
-struct nsIntRect;
 class ProxyBehaviour;
 
 namespace mozilla {
@@ -44,10 +43,10 @@ class ProgressTracker;
 } // namespace mozilla
 
 class imgRequestProxy : public imgIRequest,
+                        public mozilla::image::IProgressObserver,
                         public nsISupportsPriority,
                         public nsISecurityInfoProvider,
-                        public nsITimedChannel,
-                        public mozilla::SupportsWeakPtr<imgRequestProxy>
+                        public nsITimedChannel
 {
 protected:
   virtual ~imgRequestProxy();
@@ -70,12 +69,14 @@ public:
   // Callers to Init or ChangeOwner are required to call NotifyListener after
   // (although not immediately after) doing so.
   nsresult Init(imgRequest* aOwner,
-                nsILoadGroup *aLoadGroup,
+                nsILoadGroup* aLoadGroup,
                 ImageURL* aURI,
-                imgINotificationObserver *aObserver);
+                imgINotificationObserver* aObserver);
 
-  nsresult ChangeOwner(imgRequest *aNewOwner); // this will change mOwner.  Do not call this if the previous
-                                               // owner has already sent notifications out!
+  nsresult ChangeOwner(imgRequest* aNewOwner); // this will change mOwner.
+                                               // Do not call this if the
+                                               // previous owner has already
+                                               // sent notifications out!
 
   void AddToLoadGroup();
   void RemoveFromLoadGroup(bool releaseLoadGroup);
@@ -95,19 +96,29 @@ public:
   // asynchronously-called function.
   void SyncNotifyListener();
 
+  // imgINotificationObserver methods:
+  virtual void Notify(int32_t aType,
+                      const mozilla::gfx::IntRect* aRect = nullptr) override;
+  virtual void OnLoadComplete(bool aLastPart) override;
+
+  // imgIOnloadBlocker methods:
+  virtual void BlockOnload() override;
+  virtual void UnblockOnload() override;
+
+  // Other, internal-only methods:
+  virtual void SetHasImage() override;
+  virtual void OnStartDecode() override;
+
   // Whether we want notifications from ProgressTracker to be deferred until
   // an event it has scheduled has been fired.
-  bool NotificationsDeferred() const
+  virtual bool NotificationsDeferred() const override
   {
     return mDeferNotifications;
   }
-  void SetNotificationsDeferred(bool aDeferNotifications)
+  virtual void SetNotificationsDeferred(bool aDeferNotifications) override
   {
     mDeferNotifications = aDeferNotifications;
   }
-
-  // XXXbholley - This eventually gets folded into the new notification API.
-  void SetHasImage();
 
   // Removes all animation consumers that were created with
   // IncrementAnimationConsumers. This is necessary since we need
@@ -115,15 +126,15 @@ public:
   // imgRequest::RemoveProxy
   void ClearAnimationConsumers();
 
-  virtual nsresult Clone(imgINotificationObserver* aObserver, imgRequestProxy** aClone);
+  virtual nsresult Clone(imgINotificationObserver* aObserver,
+                         imgRequestProxy** aClone);
   nsresult GetStaticRequest(imgRequestProxy** aReturn);
 
-  nsresult GetURI(ImageURL **aURI);
+  nsresult GetURI(ImageURL** aURI);
 
 protected:
   friend class mozilla::image::ProgressTracker;
   friend class imgStatusNotifyRunnable;
-  friend class imgRequestNotifyRunnable;
 
   class imgCancelRunnable;
   friend class imgCancelRunnable;
@@ -133,9 +144,9 @@ protected:
     public:
       imgCancelRunnable(imgRequestProxy* owner, nsresult status)
         : mOwner(owner), mStatus(status)
-      {}
+      { }
 
-      NS_IMETHOD Run() {
+      NS_IMETHOD Run() override {
         mOwner->DoCancel(mStatus);
         return NS_OK;
       }
@@ -144,27 +155,6 @@ protected:
       nsRefPtr<imgRequestProxy> mOwner;
       nsresult mStatus;
   };
-
-  // The following notification functions are protected to ensure that (friend
-  // class) ProgressTracker is the only class allowed to send us
-  // notifications.
-
-  void OnStartDecode     ();
-  void OnStartContainer  ();
-  void OnFrameUpdate     (const nsIntRect * aRect);
-  void OnStopFrame       ();
-  void OnStopDecode      ();
-  void OnDiscard         ();
-  void OnUnlockedDraw    ();
-  void OnImageIsAnimated ();
-
-  /* non-virtual sort-of-nsIRequestObserver methods */
-  void OnStartRequest();
-  void OnStopRequest(bool aLastPart);
-
-  /* non-virtual imgIOnloadBlocker methods */
-  void BlockOnload();
-  void UnblockOnload();
 
   /* Finish up canceling ourselves */
   void DoCancel(nsresult status);
@@ -184,9 +174,10 @@ protected:
 
   nsITimedChannel* TimedChannel()
   {
-    if (!GetOwner())
+    if (!GetOwner()) {
       return nullptr;
-    return GetOwner()->mTimedChannel;
+    }
+    return GetOwner()->GetTimedChannel();
   }
 
   already_AddRefed<Image> GetImage() const;
@@ -227,10 +218,6 @@ private:
   // Whether we want to defer our notifications by the non-virtual Observer
   // interfaces as image loads proceed.
   bool mDeferNotifications;
-
-  // We only want to send OnStartContainer once for each proxy, but we might
-  // get multiple OnStartContainer calls.
-  bool mSentStartContainer;
 };
 
 // Used for static image proxies for which no requests are available, so
@@ -241,12 +228,12 @@ class imgRequestProxyStatic : public imgRequestProxy
 public:
   imgRequestProxyStatic(Image* aImage, nsIPrincipal* aPrincipal);
 
-  NS_IMETHOD GetImagePrincipal(nsIPrincipal** aPrincipal) MOZ_OVERRIDE;
+  NS_IMETHOD GetImagePrincipal(nsIPrincipal** aPrincipal) override;
 
   using imgRequestProxy::Clone;
 
   virtual nsresult Clone(imgINotificationObserver* aObserver,
-                         imgRequestProxy** aClone) MOZ_OVERRIDE;
+                         imgRequestProxy** aClone) override;
 
 protected:
   friend imgRequestProxy* NewStaticProxy(imgRequestProxy*);
@@ -256,4 +243,4 @@ protected:
   nsCOMPtr<nsIPrincipal> mPrincipal;
 };
 
-#endif // imgRequestProxy_h__
+#endif // mozilla_image_src_imgRequestProxy_h

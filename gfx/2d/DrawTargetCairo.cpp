@@ -12,6 +12,7 @@
 #include "BorrowedContext.h"
 #include "FilterNodeSoftware.h"
 #include "mozilla/Scoped.h"
+#include "mozilla/Vector.h"
 
 #include "cairo.h"
 #include "cairo-tee.h"
@@ -209,6 +210,8 @@ CopyToImageSurface(unsigned char *aData,
                    int32_t aStride,
                    SurfaceFormat aFormat)
 {
+  MOZ_ASSERT(aData);
+
   cairo_surface_t* surf = cairo_image_surface_create(GfxFormatToCairoFormat(aFormat),
                                                      aRect.width,
                                                      aRect.height);
@@ -261,6 +264,10 @@ cairo_surface_t* CreateSubImageForData(unsigned char* aData,
                                        int aStride,
                                        SurfaceFormat aFormat)
 {
+  if (!aData) {
+    gfxWarning() << "DrawTargetCairo.CreateSubImageForData null aData";
+    return nullptr;
+  }
   unsigned char *data = aData +
                         aRect.y * aStride +
                         aRect.x * BytesPerPixel(aFormat);
@@ -373,8 +380,8 @@ GetCairoSurfaceForSourceSurface(SourceSurface *aSurface,
   // covers the details of how to run into it, but the full detailed
   // investigation hasn't been done to determine the underlying cause.  We
   // will just handle the failure to allocate the surface to avoid a crash.
-  if (cairo_surface_status(surf)) {
-    if (cairo_surface_status(surf) == CAIRO_STATUS_INVALID_STRIDE) {
+  if (!surf || cairo_surface_status(surf)) {
+    if (surf && (cairo_surface_status(surf) == CAIRO_STATUS_INVALID_STRIDE)) {
       // If we failed because of an invalid stride then copy into
       // a new surface with a stride that cairo chooses. No need to
       // set user data since we're not dependent on the original
@@ -393,7 +400,7 @@ GetCairoSurfaceForSourceSurface(SourceSurface *aSurface,
 
   cairo_surface_set_user_data(surf,
                               &surfaceDataKey,
-                              data.forget().drop(),
+                              data.forget().take(),
                               ReleaseData);
   return surf;
 }
@@ -406,6 +413,8 @@ class AutoClearDeviceOffset
 public:
   explicit AutoClearDeviceOffset(SourceSurface* aSurface)
     : mSurface(nullptr)
+    , mX(0)
+    , mY(0)
   {
     Init(aSurface);
   }
@@ -654,10 +663,9 @@ DrawTargetCairo::Snapshot()
 
   IntSize size = GetSize();
 
-  cairo_content_t content = cairo_surface_get_content(mSurface);
   mSnapshot = new SourceSurfaceCairo(mSurface,
                                      size,
-                                     CairoContentToGfxFormat(content),
+                                     GfxFormatForCairoSurface(mSurface),
                                      this);
   return mSnapshot;
 }
@@ -1046,6 +1054,12 @@ DrawTargetCairo::ClearRect(const Rect& aRect)
 {
   AutoPrepareForDrawing prep(this, mContext);
 
+  if (!mContext || aRect.Width() <= 0 || aRect.Height() <= 0 ||
+      !IsFinite(aRect.X()) || !IsFinite(aRect.Width()) ||
+      !IsFinite(aRect.Y()) || !IsFinite(aRect.Height())) {
+    gfxCriticalError(CriticalLog::DefaultOptions(false)) << "ClearRect with invalid argument " << gfx::hexa(mContext) << " with " << aRect.Width() << "x" << aRect.Height() << " [" << aRect.X() << ", " << aRect.Y() << "]";
+  }
+
   cairo_set_antialias(mContext, CAIRO_ANTIALIAS_NONE);
   cairo_new_path(mContext);
   cairo_set_operator(mContext, CAIRO_OPERATOR_CLEAR);
@@ -1149,8 +1163,16 @@ DrawTargetCairo::FillGlyphs(ScaledFont *aFont,
 
   cairo_set_antialias(mContext, GfxAntialiasToCairoAntialias(aOptions.mAntialiasMode));
 
-  // Convert our GlyphBuffer into an array of Cairo glyphs.
-  std::vector<cairo_glyph_t> glyphs(aBuffer.mNumGlyphs);
+  // Convert our GlyphBuffer into a vector of Cairo glyphs. This code can
+  // execute millions of times in short periods, so we want to avoid heap
+  // allocation whenever possible. So we use an inline vector capacity of 1024
+  // bytes (the maximum allowed by mozilla::Vector), which gives an inline
+  // length of 1024 / 24 = 42 elements, which is enough to typically avoid heap
+  // allocation in ~99% of cases.
+  Vector<cairo_glyph_t, 1024 / sizeof(cairo_glyph_t)> glyphs;
+  if (!glyphs.resizeUninitialized(aBuffer.mNumGlyphs)) {
+    MOZ_CRASH("glyphs allocation failed");
+  }
   for (uint32_t i = 0; i < aBuffer.mNumGlyphs; ++i) {
     glyphs[i].index = aBuffer.mGlyphs[i].mIndex;
     glyphs[i].x = aBuffer.mGlyphs[i].mPosition.x;
@@ -1339,8 +1361,16 @@ DrawTargetCairo::CreateSourceSurfaceFromData(unsigned char *aData,
                                              int32_t aStride,
                                              SurfaceFormat aFormat) const
 {
+  if (!aData) {
+    gfxWarning() << "DrawTargetCairo::CreateSourceSurfaceFromData null aData";
+    return nullptr;
+  }
+
   cairo_surface_t* surf = CopyToImageSurface(aData, IntRect(IntPoint(), aSize),
                                              aStride, aFormat);
+  if (!surf) {
+    return nullptr;
+  }
 
   RefPtr<SourceSurfaceCairo> source_surf = new SourceSurfaceCairo(surf, aSize, aFormat);
   cairo_surface_destroy(surf);
@@ -1480,11 +1510,12 @@ DrawTargetCairo::CreateSimilarDrawTarget(const IntSize &aSize, SurfaceFormat aFo
 
   if (!cairo_surface_status(similar)) {
     RefPtr<DrawTargetCairo> target = new DrawTargetCairo();
-    target->InitAlreadyReferenced(similar, aSize);
-    return target.forget();
+    if (target->InitAlreadyReferenced(similar, aSize)) {
+      return target.forget();
+    }
   }
 
-  gfxCriticalError() << "Failed to create similar cairo surface! Size: " << aSize << " Status: " << cairo_surface_status(similar);
+  gfxCriticalError(CriticalLog::DefaultOptions(Factory::ReasonableSurfaceSize(aSize))) << "Failed to create similar cairo surface! Size: " << aSize << " Status: " << cairo_surface_status(similar);
 
   return nullptr;
 }
@@ -1493,8 +1524,9 @@ bool
 DrawTargetCairo::InitAlreadyReferenced(cairo_surface_t* aSurface, const IntSize& aSize, SurfaceFormat* aFormat)
 {
   if (cairo_surface_status(aSurface)) {
-    gfxCriticalError() << "Attempt to create DrawTarget for invalid surface. "
-                       << aSize << " Cairo Status: " << cairo_surface_status(aSurface);
+    gfxCriticalError(CriticalLog::DefaultOptions(Factory::ReasonableSurfaceSize(aSize)))
+      << "Attempt to create DrawTarget for invalid surface. "
+      << aSize << " Cairo Status: " << cairo_surface_status(aSurface);
     cairo_surface_destroy(aSurface);
     return false;
   }
@@ -1502,7 +1534,7 @@ DrawTargetCairo::InitAlreadyReferenced(cairo_surface_t* aSurface, const IntSize&
   mContext = cairo_create(aSurface);
   mSurface = aSurface;
   mSize = aSize;
-  mFormat = aFormat ? *aFormat : CairoContentToGfxFormat(cairo_surface_get_content(aSurface));
+  mFormat = aFormat ? *aFormat : GfxFormatForCairoSurface(aSurface);
 
   // Cairo image surface have a bug where they will allocate a mask surface (for clipping)
   // the size of the clip extents, and don't take the surface extents into account.
@@ -1537,8 +1569,11 @@ DrawTargetCairo::CreateShadowDrawTarget(const IntSize &aSize, SurfaceFormat aFor
   // operations in graphics memory.
   if (aSigma == 0.0F) {
     RefPtr<DrawTargetCairo> target = new DrawTargetCairo();
-    target->InitAlreadyReferenced(similar, aSize);
-    return target.forget();
+    if (target->InitAlreadyReferenced(similar, aSize)) {
+      return target.forget();
+    } else {
+      return nullptr;
+    }
   }
 
   cairo_surface_t* blursurf = cairo_image_surface_create(CAIRO_FORMAT_A8,
@@ -1560,8 +1595,10 @@ DrawTargetCairo::CreateShadowDrawTarget(const IntSize &aSize, SurfaceFormat aFor
   cairo_surface_destroy(similar);
 
   RefPtr<DrawTargetCairo> target = new DrawTargetCairo();
-  target->InitAlreadyReferenced(tee, aSize);
-  return target.forget();
+  if (target->InitAlreadyReferenced(tee, aSize)) {
+    return target.forget();
+  }
+  return nullptr;
 }
 
 bool

@@ -41,6 +41,18 @@ def get_free_port(start_port, exclude=None):
         finally:
             s.close()
 
+def browser_command(binary, args, debug_info):
+    if debug_info:
+        if debug_info.requiresEscapedArgs:
+            args = [item.replace("&", "\\&") for item in args]
+        debug_args = [debug_info.path] + debug_info.args
+    else:
+        debug_args = []
+
+    command = [binary] + args
+
+    return debug_args, command
+
 
 class BrowserError(Exception):
     pass
@@ -86,11 +98,6 @@ class Browser(object):
         pass
 
     @abstractmethod
-    def on_output(self, line):
-        """Callback function used with ProcessHandler to handle output from the browser process."""
-        pass
-
-    @abstractmethod
     def pid(self):
         """pid of the browser process or None if there is no pid"""
         pass
@@ -99,6 +106,10 @@ class Browser(object):
     def is_alive(self):
         """Boolean indicating whether the browser process is still running"""
         pass
+
+    def setup_ssl(self, hosts):
+        """Return a certificate to use for tests requiring ssl that will be trusted by the browser"""
+        raise NotImplementedError("ssl testing not supported")
 
     def cleanup(self):
         """Browser-specific cleanup that is run after the testrun is finished"""
@@ -113,6 +124,7 @@ class Browser(object):
         """Return a list of dictionaries containing information about crashes that happend
         in the browser, or an empty list if no crashes occurred"""
         self.logger.crash(process, test)
+
 
 class NullBrowser(Browser):
     def start(self):
@@ -132,6 +144,7 @@ class NullBrowser(Browser):
 
     def on_output(self, line):
         raise NotImplementedError
+
 
 class ExecutorBrowser(object):
     def __init__(self, **kwargs):

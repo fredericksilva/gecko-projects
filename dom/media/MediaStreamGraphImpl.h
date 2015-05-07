@@ -99,7 +99,7 @@ public:
    */
   explicit MediaStreamGraphImpl(bool aRealtime,
                                 TrackRate aSampleRate,
-                                DOMMediaStream::TrackTypeHints aHint,
+                                bool aStartWithAudioDriver = false,
                                 dom::AudioChannel aChannel = dom::AudioChannel::Normal);
 
   /**
@@ -248,6 +248,49 @@ public:
    * Mark aStream and all its inputs (recursively) as consumed.
    */
   static void MarkConsumed(MediaStream* aStream);
+
+  /**
+   * Given the Id of an AudioContext, return the set of all MediaStreams that
+   * are part of this context.
+   */
+  void StreamSetForAudioContext(dom::AudioContext::AudioContextId aAudioContextId,
+                                mozilla::LinkedList<MediaStream>& aStreamSet);
+
+  /**
+   * Called when a suspend/resume/close operation has been completed, on the
+   * graph thread.
+   */
+  void AudioContextOperationCompleted(MediaStream* aStream,
+                                      void* aPromise,
+                                      dom::AudioContextOperation aOperation);
+
+  /**
+   * Apply and AudioContext operation (suspend/resume/closed), on the graph
+   * thread.
+   */
+  void ApplyAudioContextOperationImpl(AudioNodeStream* aStream,
+                                      dom::AudioContextOperation aOperation,
+                                      void* aPromise);
+
+  /*
+   * Move streams from the mStreams to mSuspendedStream if suspending/closing an
+   * AudioContext, or the inverse when resuming an AudioContext.
+   */
+  void MoveStreams(dom::AudioContextOperation aAudioContextOperation,
+                   mozilla::LinkedList<MediaStream>& aStreamSet);
+
+  /*
+   * Reset some state about the streams before suspending them, or resuming
+   * them.
+   */
+  void ResetVisitedStreamState();
+
+  /*
+   * True if a stream is suspended, that is, is not in mStreams, but in
+   * mSuspendedStream.
+   */
+  bool StreamSuspended(MediaStream* aStream);
+
   /**
    * Sort mStreams so that every stream not in a cycle is after any streams
    * it depends on, and every stream in a cycle is marked as being in a cycle.
@@ -285,10 +328,8 @@ public:
                            GraphTime aTime, GraphTime aEndBlockingDecisions,
                            GraphTime* aEnd);
   /**
-   * Returns smallest value of t such that
-   * TimeToTicksRoundUp(aSampleRate, t) is a multiple of WEBAUDIO_BLOCK_SIZE
-   * and floor(TimeToTicksRoundUp(aSampleRate, t)/WEBAUDIO_BLOCK_SIZE) >
-   * floor(TimeToTicksRoundUp(aSampleRate, aTime)/WEBAUDIO_BLOCK_SIZE).
+   * Returns smallest value of t such that t is a multiple of
+   * WEBAUDIO_BLOCK_SIZE and t > aTime.
    */
   GraphTime RoundUpToNextAudioBlock(GraphTime aTime);
   /**
@@ -352,7 +393,7 @@ public:
    * Queue audio (mix of stream audio and silence for blocked intervals)
    * to the audio output stream. Returns the number of frames played.
    */
-  TrackTicks PlayAudio(MediaStream* aStream, GraphTime aFrom, GraphTime aTo);
+  StreamTime PlayAudio(MediaStream* aStream, GraphTime aFrom, GraphTime aTo);
   /**
    * Set the correct current video frame for stream aStream.
    */
@@ -370,7 +411,10 @@ public:
   /**
    * Returns true when there are no active streams.
    */
-  bool IsEmpty() { return mStreams.IsEmpty() && mPortCount == 0; }
+  bool IsEmpty()
+  {
+    return mStreams.IsEmpty() && mSuspendedStreams.IsEmpty() && mPortCount == 0;
+  }
 
   // For use by control messages, on graph thread only.
   /**
@@ -398,27 +442,23 @@ public:
     mStreamOrderDirty = true;
   }
 
-  TrackRate AudioSampleRate() const { return mSampleRate; }
-  TrackRate GraphRate() const { return mSampleRate; }
   // Always stereo for now.
   uint32_t AudioChannelCount() { return 2; }
 
   double MediaTimeToSeconds(GraphTime aTime)
   {
-    return TrackTicksToSeconds(GraphRate(), aTime);
+    NS_ASSERTION(0 <= aTime && aTime <= STREAM_TIME_MAX, "Bad time");
+    return static_cast<double>(aTime)/GraphRate();
   }
   GraphTime SecondsToMediaTime(double aS)
   {
-    return SecondsToTicksRoundDown(GraphRate(), aS);
+    NS_ASSERTION(0 <= aS && aS <= TRACK_TICKS_MAX/TRACK_RATE_MAX,
+                 "Bad seconds");
+    return GraphRate() * aS;
   }
   GraphTime MillisecondsToMediaTime(int32_t aMS)
   {
     return RateConvertTicksRoundDown(GraphRate(), 1000, aMS);
-  }
-
-  TrackTicks TimeToTicksRoundDown(TrackRate aRate, StreamTime aTime)
-  {
-    return RateConvertTicksRoundDown(aRate, GraphRate(), aTime);
   }
 
   /**
@@ -434,6 +474,11 @@ public:
   GraphDriver* CurrentDriver() {
     AssertOnGraphThreadOrNotRunning();
     return mDriver;
+  }
+
+  bool RemoveMixerCallback(MixerCallbackReceiver* aReceiver)
+  {
+    return mMixer.RemoveCallback(aReceiver);
   }
 
   /**
@@ -488,6 +533,13 @@ public:
    * unnecessary thread-safe refcount changes.
    */
   nsTArray<MediaStream*> mStreams;
+  /**
+   * This stores MediaStreams that are part of suspended AudioContexts.
+   * mStreams and mSuspendStream are disjoint sets: a stream is either suspended
+   * or not suspended. Suspended streams are not ordered in UpdateStreamOrder,
+   * and are therefore not doing any processing.
+   */
+  nsTArray<MediaStream*> mSuspendedStreams;
   /**
    * Streams from mFirstCycleBreaker to the end of mStreams produce output
    * before they receive input.  They correspond to DelayNodes that are in
@@ -595,12 +647,6 @@ public:
   GraphTime mEndTime;
 
   /**
-   * Sample rate at which this graph runs. For real time graphs, this is
-   * the rate of the audio mixer. For offline graphs, this is the rate specified
-   * at construction.
-   */
-  TrackRate mSampleRate;
-  /**
    * True when we need to do a forced shutdown during application shutdown.
    */
   bool mForceShutDown;
@@ -661,6 +707,8 @@ public:
   nsRefPtr<AudioOutputObserver> mFarendObserverRef;
 #endif
 
+  uint32_t AudioChannel() const { return mAudioChannel; }
+
 private:
   virtual ~MediaStreamGraphImpl();
 
@@ -694,6 +742,9 @@ private:
   bool mCanRunMessagesSynchronously;
 #endif
 
+  // We use uint32_t instead AudioChannel because this is just used as key for
+  // the hashtable gGraphs.
+  uint32_t mAudioChannel;
 };
 
 }

@@ -1,4 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -19,7 +20,6 @@
 class nsIDocShell;
 class nsIDOMEvent;
 class nsIEventListenerInfo;
-class nsIScriptContext;
 class nsPIDOMWindow;
 class JSTracer;
 
@@ -150,7 +150,7 @@ inline EventListenerFlags AllEventsAtSystemGroupCapture()
  * Event listener manager
  */
 
-class EventListenerManager MOZ_FINAL
+class EventListenerManager final
 {
   ~EventListenerManager();
 
@@ -162,7 +162,7 @@ public:
     nsString mTypeString; // for non-main-threads
     uint16_t mEventType;
 
-    enum ListenerType MOZ_ENUM_TYPE(uint8_t)
+    enum ListenerType : uint8_t
     {
       eNativeListener = 0,
       eJSEventListener,
@@ -551,7 +551,7 @@ protected:
   uint32_t mNoListenerForEvent : 23;
 
   nsAutoTObserverArray<Listener, 2> mListeners;
-  dom::EventTarget* mTarget;  // WEAK
+  dom::EventTarget* MOZ_NON_OWNING_REF mTarget;
   nsCOMPtr<nsIAtom> mNoListenerForEventAtom;
 
   friend class ELMCreationDetector;

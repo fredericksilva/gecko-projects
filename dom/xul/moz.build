@@ -12,7 +12,6 @@ if CONFIG['MOZ_XUL']:
     DIRS += ['templates']
 
     XPIDL_SOURCES += [
-        'nsIXULContextMenuBuilder.idl',
         'nsIXULOverlayProvider.idl',
     ]
 
@@ -23,7 +22,6 @@ if CONFIG['MOZ_XUL']:
     UNIFIED_SOURCES += [
         'nsXULCommandDispatcher.cpp',
         'nsXULContentSink.cpp',
-        'nsXULContextMenuBuilder.cpp',
         'nsXULElement.cpp',
         'nsXULPopupListener.cpp',
         'nsXULPrototypeCache.cpp',
@@ -43,8 +41,6 @@ UNIFIED_SOURCES += [
 ]
 
 FAIL_ON_WARNINGS = True
-
-MSVC_ENABLE_PGO = True
 
 LOCAL_INCLUDES += [
     '/docshell/base',

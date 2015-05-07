@@ -68,8 +68,8 @@ PRLogModuleInfo* nsURILoader::mLog = nullptr;
  * Each instance remains alive until its target URL has been loaded
  * (or aborted).
  */
-class nsDocumentOpenInfo MOZ_FINAL : public nsIStreamListener
-                                   , public nsIThreadRetargetableStreamListener
+class nsDocumentOpenInfo final : public nsIStreamListener
+                               , public nsIThreadRetargetableStreamListener
 {
 public:
   // Needed for nsCOMPtr to work right... Don't call this!
@@ -723,7 +723,7 @@ nsDocumentOpenInfo::TryContentListener(nsIURIContentListener* aListener,
   
   bool abort = false;
   bool isPreferred = (mFlags & nsIURILoader::IS_CONTENT_PREFERRED) != 0;
-  nsresult rv = aListener->DoContent(mContentType.get(),
+  nsresult rv = aListener->DoContent(mContentType,
                                      isPreferred,
                                      aChannel,
                                      getter_AddRefs(m_targetStreamListener),

@@ -34,11 +34,19 @@ public:
 
   enum HardwareState
   {
+    kHardwareUninitialized,
     kHardwareClosed,
     kHardwareOpen,
     kHardwareOpenFailed
   };
-  virtual void OnHardwareStateChange(HardwareState aState) { }
+  // aReason:
+  //    NS_OK : state change was expected and normal;
+  //    NS_ERROR_FAILURE : one or more system-level components failed and
+  //                       the camera was closed;
+  //    NS_ERROR_NOT_AVAILABLE : the hardware is in use by another process
+  //                             and cannot be acquired, or another process
+  //                             was given access to the camera hardware.
+  virtual void OnHardwareStateChange(HardwareState aState, nsresult aReason) { }
 
   enum PreviewState
   {
@@ -81,7 +89,7 @@ public:
 
   virtual void OnAutoFocusComplete(bool aAutoFocusSucceeded) { }
   virtual void OnAutoFocusMoving(bool aIsMoving) { }
-  virtual void OnTakePictureComplete(uint8_t* aData, uint32_t aLength, const nsAString& aMimeType) { }
+  virtual void OnTakePictureComplete(const uint8_t* aData, uint32_t aLength, const nsAString& aMimeType) { }
   virtual void OnFacesDetected(const nsTArray<ICameraControl::Face>& aFaces) { }
 
   enum UserContext

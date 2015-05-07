@@ -1,5 +1,5 @@
 /* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set sw=2 ts=8 et ft=cpp : */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -7,6 +7,7 @@
 #include "mozilla/PreallocatedProcessManager.h"
 #include "mozilla/ClearOnShutdown.h"
 #include "mozilla/Preferences.h"
+#include "mozilla/unused.h"
 #include "mozilla/dom/ContentParent.h"
 #include "mozilla/dom/ScriptSettings.h"
 #include "nsIPropertyBag2.h"
@@ -33,7 +34,7 @@ namespace {
  * This singleton class implements the static methods on
  * PreallocatedProcessManager.
  */
-class PreallocatedProcessManagerImpl MOZ_FINAL
+class PreallocatedProcessManagerImpl final
   : public nsIObserver
 {
 public:
@@ -111,11 +112,13 @@ PreallocatedProcessManagerImpl::Singleton()
 NS_IMPL_ISUPPORTS(PreallocatedProcessManagerImpl, nsIObserver)
 
 PreallocatedProcessManagerImpl::PreallocatedProcessManagerImpl()
-  : mEnabled(false)
+  :
 #ifdef MOZ_NUWA_PROCESS
-  , mPreallocateAppProcessTask(nullptr)
+    mPreallocateAppProcessTask(nullptr)
   , mIsNuwaReady(false)
+  ,
 #endif
+    mEnabled(false)
   , mShutdown(false)
 {}
 
@@ -288,11 +291,11 @@ PreallocatedProcessManagerImpl::PublishSpareProcess(ContentParent* aContent)
 {
   MOZ_ASSERT(NS_IsMainThread());
 
-  if (Preferences::GetBool("dom.ipc.processPriorityManager.testMode")) {
+  if (Preferences::GetBool("dom.ipc.preallocatedProcessManager.testMode")) {
     AutoJSContext cx;
     nsCOMPtr<nsIMessageBroadcaster> ppmm =
       do_GetService("@mozilla.org/parentprocessmessagemanager;1");
-    nsresult rv = ppmm->BroadcastAsyncMessage(
+    mozilla::unused << ppmm->BroadcastAsyncMessage(
       NS_LITERAL_STRING("TEST-ONLY:nuwa-add-new-process"),
       JS::NullHandleValue, JS::NullHandleValue, cx, 1);
   }
@@ -334,11 +337,11 @@ PreallocatedProcessManagerImpl::OnNuwaReady()
   ProcessPriorityManager::SetProcessPriority(mPreallocatedAppProcess,
                                              hal::PROCESS_PRIORITY_MASTER);
   mIsNuwaReady = true;
-  if (Preferences::GetBool("dom.ipc.processPriorityManager.testMode")) {
+  if (Preferences::GetBool("dom.ipc.preallocatedProcessManager.testMode")) {
     AutoJSContext cx;
     nsCOMPtr<nsIMessageBroadcaster> ppmm =
       do_GetService("@mozilla.org/parentprocessmessagemanager;1");
-    nsresult rv = ppmm->BroadcastAsyncMessage(
+    mozilla::unused << ppmm->BroadcastAsyncMessage(
       NS_LITERAL_STRING("TEST-ONLY:nuwa-ready"),
       JS::NullHandleValue, JS::NullHandleValue, cx, 1);
   }
@@ -355,7 +358,7 @@ PreallocatedProcessManagerImpl::PreallocatedProcessReady()
 void
 PreallocatedProcessManagerImpl::NuwaFork()
 {
-  mPreallocatedAppProcess->SendNuwaFork();
+  mozilla::unused << mPreallocatedAppProcess->SendNuwaFork();
 }
 #endif
 

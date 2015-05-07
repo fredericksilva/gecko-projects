@@ -10,15 +10,8 @@ const { Cc, Ci, Cu } = require("chrome");
 const Services = require("Services");
 const { ActorPool, appendExtraActors, createExtraActors } = require("devtools/server/actors/common");
 const { DebuggerServer } = require("devtools/server/main");
-const { dumpProtocolSpec } = require("devtools/server/protocol");
-const makeDebugger = require("./utils/make-debugger");
-const DevToolsUtils = require("devtools/toolkit/DevToolsUtils");
 
-DevToolsUtils.defineLazyGetter(this, "StyleSheetActor", () => {
-  return require("devtools/server/actors/stylesheets").StyleSheetActor;
-});
-
-DevToolsUtils.defineLazyGetter(this, "ppmm", () => {
+loader.lazyGetter(this, "ppmm", () => {
   return Cc["@mozilla.org/parentprocessmessagemanager;1"].getService(Ci.nsIMessageBroadcaster);
 });
 
@@ -103,14 +96,10 @@ function RootActor(aConnection, aParameters) {
   this._onAddonListChanged = this.onAddonListChanged.bind(this);
   this._extraActors = {};
 
-  // Map of DOM stylesheets to StyleSheetActors
-  this._styleSheetActors = new Map();
+  this._globalActorPool = new ActorPool(this.conn);
+  this.conn.addActorPool(this._globalActorPool);
 
-  // This creates a Debugger instance for chrome debugging all globals.
-  this.makeDebugger = makeDebugger.bind(null, {
-    findDebuggees: dbg => dbg.findAllGlobals(),
-    shouldAddNewGlobalAsDebuggee: () => true
-  });
+  this._chromeActor = null;
 }
 
 RootActor.prototype = {
@@ -119,17 +108,17 @@ RootActor.prototype = {
 
   traits: {
     sources: true,
+    // Whether the inspector actor allows modifying outer HTML.
     editOuterHTML: true,
+    // Whether the inspector actor allows modifying innerHTML and inserting
+    // adjacent HTML.
+    pasteHTML: true,
     // Whether the server-side highlighter actor exists and can be used to
     // remotely highlight nodes (see server/actors/highlighter.js)
     highlightable: true,
     // Which custom highlighter does the server-side highlighter actor supports?
     // (see server/actors/highlighter.js)
-    customHighlighters: [
-      "BoxModelHighlighter",
-      "CssTransformHighlighter",
-      "SelectorHighlighter"
-    ],
+    customHighlighters: true,
     // Whether the inspector actor implements the getImageDataFromURL
     // method that returns data-uris for image URLs. This is used for image
     // tooltips for instance
@@ -141,6 +130,9 @@ RootActor.prototype = {
     storageInspectorReadOnly: true,
     // Whether conditional breakpoints are supported
     conditionalBreakpoints: true,
+    // Whether the server supports full source actors (breakpoints on
+    // eval scripts, etc)
+    debuggerSourceActors: true,
     bulk: true,
     // Whether the style rule actor implements the modifySelector method
     // that modifies the rule's selector
@@ -150,10 +142,36 @@ RootActor.prototype = {
     addNewRule: true,
     // Whether the dom node actor implements the getUniqueSelector method
     getUniqueSelector: true,
+    // Whether the director scripts are supported
+    directorScripts: true,
     // Whether the debugger server supports
     // blackboxing/pretty-printing (not supported in Fever Dream yet)
     noBlackBoxing: false,
-    noPrettyPrinting: false
+    noPrettyPrinting: false,
+    // Whether the page style actor implements the getUsedFontFaces method
+    // that returns the font faces used on a node
+    getUsedFontFaces: true,
+    // Trait added in Gecko 38, indicating that all features necessary for
+    // grabbing allocations from the MemoryActor are available for the performance tool
+    memoryActorAllocations: true,
+    // Added in Gecko 40, indicating that the backend isn't stupid about
+    // sending resumption packets on tab navigation.
+    noNeedToFakeResumptionOnNavigation: true,
+    // Added in Firefox 40. Indicates that the backend supports registering custom
+    // commands through the WebConsoleCommands API.
+    webConsoleCommands: true,
+    // Whether root actor exposes tab actors
+    // if allowChromeProcess is true, you can fetch a ChromeActor instance
+    // to debug chrome and any non-content ressource via getProcess request
+    // if allocChromeProcess is defined, but not true, it means that root actor
+    // no longer expose tab actors, but also that getProcess forbids
+    // exposing actors for security reasons
+    get allowChromeProcess() {
+      return DebuggerServer.allowChromeProcess;
+    },
+    // Whether or not `getProfile()` supports specifying a `startTime`
+    // and `endTime` to filter out samples. Fx40+
+    profilerDataFilterable: true
   },
 
   /**
@@ -167,66 +185,6 @@ RootActor.prototype = {
       testConnectionPrefix: this.conn.prefix,
       traits: this.traits
     };
-  },
-
-  /**
-   * This is true for the root actor only, used by some child actors
-   */
-  get isRootActor() true,
-
-  /**
-   * The (chrome) window, for use by child actors
-   */
-  get window() isWorker ? null : Services.wm.getMostRecentWindow(DebuggerServer.chromeWindowType),
-
-  /**
-   * The list of all windows
-   */
-  get windows() {
-    return this.docShells.map(docShell => {
-      return docShell.QueryInterface(Ci.nsIInterfaceRequestor)
-                     .getInterface(Ci.nsIDOMWindow);
-    });
-  },
-
-  /**
-   * URL of the chrome window.
-   */
-  get url() { return this.window ? this.window.document.location.href : null; },
-
-  /**
-   * The top level window's docshell
-   */
-  get docShell() {
-    return this.window
-      .QueryInterface(Ci.nsIInterfaceRequestor)
-      .getInterface(Ci.nsIDocShell);
-  },
-
-  /**
-   * The list of all docshells
-   */
-  get docShells() {
-    let docShellsEnum = this.docShell.getDocShellEnumerator(
-      Ci.nsIDocShellTreeItem.typeAll,
-      Ci.nsIDocShell.ENUMERATE_FORWARDS
-    );
-
-    let docShells = [];
-    while (docShellsEnum.hasMoreElements()) {
-      docShells.push(docShellsEnum.getNext());
-    }
-
-    return docShells;
-  },
-
-  /**
-   * Getter for the best nsIWebProgress for to watching this window.
-   */
-  get webProgress() {
-    return this.docShell
-      .QueryInterface(Ci.nsIInterfaceRequestor)
-      .getInterface(Ci.nsIWebProgress);
   },
 
   /**
@@ -244,8 +202,11 @@ RootActor.prototype = {
       this._parameters.onShutdown();
     }
     this._extraActors = null;
-    this._styleSheetActors.clear();
-    this._styleSheetActors = null;
+    this.conn = null;
+    this._tabActorPool = null;
+    this._globalActorPool = null;
+    this._parameters = null;
+    this._chromeActor = null;
   },
 
   /* The 'listTabs' request and the 'tabListChanged' notification. */
@@ -280,14 +241,12 @@ RootActor.prototype = {
         newActorPool.addActor(tabActor);
         tabActorList.push(tabActor);
       }
-
       /* DebuggerServer.addGlobalActor support: create actors. */
       if (!this._globalActorPool) {
         this._globalActorPool = new ActorPool(this.conn);
-        this._createExtraActors(this._parameters.globalActorFactories, this._globalActorPool);
         this.conn.addActorPool(this._globalActorPool);
       }
-
+      this._createExtraActors(this._parameters.globalActorFactories, this._globalActorPool);
       /*
        * Drop the old actorID -> actor map. Actors that still mattered were
        * added to the new map; others will go away.
@@ -320,6 +279,33 @@ RootActor.prototype = {
       tabList.onListChanged = this._onTabListChanged;
 
       return reply;
+    });
+  },
+
+  onGetTab: function (options) {
+    let tabList = this._parameters.tabList;
+    if (!tabList) {
+      return { error: "noTabs",
+               message: "This root actor has no browser tabs." };
+    }
+    if (!this._tabActorPool) {
+      this._tabActorPool = new ActorPool(this.conn);
+      this.conn.addActorPool(this._tabActorPool);
+    }
+    return tabList.getTab(options)
+                  .then(tabActor => {
+      tabActor.parentID = this.actorID;
+      this._tabActorPool.addActor(tabActor);
+
+      return { tab: tabActor.form() };
+    }, error => {
+      if (error.error) {
+        // Pipe expected errors as-is to the client
+        return error;
+      } else {
+        return { error: "noTab",
+                 message: "Unexpected error while calling getTab(): " + error };
+      }
     });
   },
 
@@ -374,14 +360,35 @@ RootActor.prototype = {
     return { processes: processes };
   },
 
-  onAttachProcess: function (aRequest) {
-    let mm = ppmm.getChildAt(aRequest.id);
-    if (!mm) {
-      return { error: "noProcess",
-               message: "There is no process with id '" + aRequest.id + "'." };
+  onGetProcess: function (aRequest) {
+    if (!DebuggerServer.allowChromeProcess) {
+      return { error: "forbidden",
+               message: "You are not allowed to debug chrome." };
     }
-    return DebuggerServer.connectToContent(this.conn, mm)
-                         .then(form => ({ form: form }));
+    if (("id" in aRequest) && typeof(aRequest.id) != "number") {
+      return { error: "wrongParameter",
+               message: "getProcess requires a valid `id` attribute." };
+    }
+    // If the request doesn't contains id parameter or id is 0
+    // (id == 0, based on onListProcesses implementation)
+    if ((!("id" in aRequest)) || aRequest.id === 0) {
+      if (!this._chromeActor) {
+        // Create a ChromeActor for the parent process
+        let { ChromeActor } = require("devtools/server/actors/chrome");
+        this._chromeActor = new ChromeActor(this.conn);
+        this._globalActorPool.addActor(this._chromeActor);
+      }
+
+      return { form: this._chromeActor.form() };
+    } else {
+      let mm = ppmm.getChildAt(aRequest.id);
+      if (!mm) {
+        return { error: "noProcess",
+                 message: "There is no process with id '" + aRequest.id + "'." };
+      }
+      return DebuggerServer.connectToContent(this.conn, mm)
+                           .then(form => ({ form }));
+    }
   },
 
   /* This is not in the spec, but it's used by tests. */
@@ -393,72 +400,42 @@ RootActor.prototype = {
     return Cu.cloneInto(aRequest, {});
   },
 
-  onProtocolDescription: dumpProtocolSpec,
+  onProtocolDescription: function () {
+    return require("devtools/server/protocol").dumpProtocolSpec();
+  },
 
   /* Support for DebuggerServer.addGlobalActor. */
   _createExtraActors: createExtraActors,
   _appendExtraActors: appendExtraActors,
 
-  /* ThreadActor hooks. */
-
   /**
-   * Prepare to enter a nested event loop by disabling debuggee events.
+   * Remove the extra actor (added by DebuggerServer.addGlobalActor or
+   * DebuggerServer.addTabActor) name |aName|.
    */
-  preNest: function() {
-    // Disable events in all open windows.
-    let e = Services.wm.getEnumerator(null);
-    while (e.hasMoreElements()) {
-      let win = e.getNext();
-      let windowUtils = win.QueryInterface(Ci.nsIInterfaceRequestor)
-                           .getInterface(Ci.nsIDOMWindowUtils);
-      windowUtils.suppressEventHandling(true);
-      windowUtils.suspendTimeouts();
+  removeActorByName: function(aName) {
+    if (aName in this._extraActors) {
+      const actor = this._extraActors[aName];
+      if (this._globalActorPool.has(actor)) {
+        this._globalActorPool.removeActor(actor);
+      }
+      if (this._tabActorPool) {
+        // Iterate over TabActor instances to also remove tab actors
+        // created during listTabs for each document.
+        this._tabActorPool.forEach(tab => {
+          tab.removeActorByName(aName);
+        });
+      }
+      delete this._extraActors[aName];
     }
-  },
-
-  /**
-   * Prepare to exit a nested event loop by enabling debuggee events.
-   */
-  postNest: function(aNestData) {
-    // Enable events in all open windows.
-    let e = Services.wm.getEnumerator(null);
-    while (e.hasMoreElements()) {
-      let win = e.getNext();
-      let windowUtils = win.QueryInterface(Ci.nsIInterfaceRequestor)
-                           .getInterface(Ci.nsIDOMWindowUtils);
-      windowUtils.resumeTimeouts();
-      windowUtils.suppressEventHandling(false);
-    }
-  },
-
-  /**
-   * Create or return the StyleSheetActor for a style sheet. This method
-   * is here because the Style Editor and Inspector share style sheet actors.
-   *
-   * @param DOMStyleSheet styleSheet
-   *        The style sheet to creat an actor for.
-   * @return StyleSheetActor actor
-   *         The actor for this style sheet.
-   *
-   */
-  createStyleSheetActor: function(styleSheet) {
-    if (this._styleSheetActors.has(styleSheet)) {
-      return this._styleSheetActors.get(styleSheet);
-    }
-    let actor = new StyleSheetActor(styleSheet, this);
-    this._styleSheetActors.set(styleSheet, actor);
-
-    this._globalActorPool.addActor(actor);
-
-    return actor;
-  }
+   }
 };
 
 RootActor.prototype.requestTypes = {
   "listTabs": RootActor.prototype.onListTabs,
+  "getTab": RootActor.prototype.onGetTab,
   "listAddons": RootActor.prototype.onListAddons,
   "listProcesses": RootActor.prototype.onListProcesses,
-  "attachProcess": RootActor.prototype.onAttachProcess,
+  "getProcess": RootActor.prototype.onGetProcess,
   "echo": RootActor.prototype.onEcho,
   "protocolDescription": RootActor.prototype.onProtocolDescription
 };

@@ -18,8 +18,10 @@ void
 ImageMetadata::SetOnImage(RasterImage* image)
 {
   if (mHotspotX != -1 && mHotspotY != -1) {
-    nsCOMPtr<nsISupportsPRUint32> intwrapx = do_CreateInstance(NS_SUPPORTS_PRUINT32_CONTRACTID);
-    nsCOMPtr<nsISupportsPRUint32> intwrapy = do_CreateInstance(NS_SUPPORTS_PRUINT32_CONTRACTID);
+    nsCOMPtr<nsISupportsPRUint32> intwrapx =
+      do_CreateInstance(NS_SUPPORTS_PRUINT32_CONTRACTID);
+    nsCOMPtr<nsISupportsPRUint32> intwrapy =
+      do_CreateInstance(NS_SUPPORTS_PRUINT32_CONTRACTID);
     intwrapx->SetData(mHotspotX);
     intwrapy->SetData(mHotspotY);
     image->Set("hotspotX", intwrapx);
@@ -27,10 +29,6 @@ ImageMetadata::SetOnImage(RasterImage* image)
   }
 
   image->SetLoopCount(mLoopCount);
-
-  for (uint32_t i = 0; i < image->GetNumFrames(); i++) {
-    image->SetFrameAsNonPremult(i, mIsNonPremultiplied);
-  }
 }
 
 } // namespace image

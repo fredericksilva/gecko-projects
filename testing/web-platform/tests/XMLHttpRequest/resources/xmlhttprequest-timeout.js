@@ -1,5 +1,5 @@
 /* Test adapted from Alex Vincent's XHR2 timeout tests, written for Mozilla.
-   https://hg.mozilla.org/mozilla-central/file/tip/dom/base/test/
+   https://hg.mozilla.org/mozilla-central/file/tip/content/base/test/
    Released into the public domain or under BSD, according to
    https://bugzilla.mozilla.org/show_bug.cgi?id=525816#c86
 */
@@ -11,12 +11,12 @@
    request handlers.
  */
 
-var TIME_NORMAL_LOAD = 1000;
-var TIME_LATE_TIMEOUT = 800;
-var TIME_XHR_LOAD = 600;
-var TIME_REGULAR_TIMEOUT = 400;
-var TIME_SYNC_TIMEOUT = 200;
-var TIME_DELAY = 200;
+var TIME_NORMAL_LOAD = 5000;
+var TIME_LATE_TIMEOUT = 4000;
+var TIME_XHR_LOAD = 3000;
+var TIME_REGULAR_TIMEOUT = 2000;
+var TIME_SYNC_TIMEOUT = 1000;
+var TIME_DELAY = 1000;
 
 /*
  * This should point to a resource that responds with a text/plain resource after a delay of TIME_XHR_LOAD milliseconds.

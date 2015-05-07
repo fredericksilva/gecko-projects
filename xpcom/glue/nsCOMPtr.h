@@ -20,14 +20,13 @@
  *                      -- scc
  */
 
+#include "mozilla/AlreadyAddRefed.h"
 #include "mozilla/Assertions.h"
 #include "mozilla/Attributes.h"
 #include "mozilla/Move.h"
-#include "mozilla/NullPtr.h"
 #include "mozilla/TypeTraits.h"
 
-#include "AlreadyAddRefed.h"
-#include "nsDebug.h" // for |NS_ABORT_IF_FALSE|, |NS_ASSERTION|
+#include "nsDebug.h" // for |NS_ASSERTION|
 #include "nsISupportsUtils.h" // for |nsresult|, |NS_ADDREF|, |NS_GET_TEMPLATE_IID| et al
 
 #include "nsCycleCollectionNoteChild.h"
@@ -110,9 +109,9 @@
 #endif
 
 namespace mozilla {
-
-struct unused_t;
-
+namespace dom {
+template<class T> class OwningNonNull;
+} // namespace dom
 } // namespace mozilla
 
 template<class T>
@@ -146,7 +145,7 @@ dont_AddRef(already_AddRefed<T>&& aAlreadyAddRefedPtr)
  *
  * See |class nsGetInterface| for an example.
  */
-class nsCOMPtr_helper
+class MOZ_STACK_CLASS nsCOMPtr_helper
 {
 public:
   virtual nsresult NS_FASTCALL operator()(const nsIID&, void**) const = 0;
@@ -158,7 +157,7 @@ public:
  * often enough that the codesize savings are big enough to warrant the
  * specialcasing.
  */
-class MOZ_STACK_CLASS nsQueryInterface MOZ_FINAL
+class MOZ_STACK_CLASS nsQueryInterface final
 {
 public:
   explicit
@@ -167,10 +166,10 @@ public:
   nsresult NS_FASTCALL operator()(const nsIID& aIID, void**) const;
 
 private:
-  nsISupports* mRawPtr;
+  nsISupports* MOZ_OWNING_REF mRawPtr;
 };
 
-class nsQueryInterfaceWithError
+class nsQueryInterfaceWithError final
 {
 public:
   nsQueryInterfaceWithError(nsISupports* aRawPtr, nsresult* aError)
@@ -182,7 +181,7 @@ public:
   nsresult NS_FASTCALL operator()(const nsIID& aIID, void**) const;
 
 private:
-  nsISupports* mRawPtr;
+  nsISupports* MOZ_OWNING_REF mRawPtr;
   nsresult* mErrorPtr;
 };
 
@@ -219,7 +218,7 @@ do_QueryInterface(already_AddRefed<T>&, nsresult*)
 
 ////////////////////////////////////////////////////////////////////////////
 // Using servicemanager with COMPtrs
-class nsGetServiceByCID
+class nsGetServiceByCID final
 {
 public:
   explicit nsGetServiceByCID(const nsCID& aCID) : mCID(aCID) {}
@@ -230,7 +229,7 @@ private:
   const nsCID& mCID;
 };
 
-class nsGetServiceByCIDWithError
+class nsGetServiceByCIDWithError final
 {
 public:
   nsGetServiceByCIDWithError(const nsCID& aCID, nsresult* aErrorPtr)
@@ -246,7 +245,7 @@ private:
   nsresult* mErrorPtr;
 };
 
-class nsGetServiceByContractID
+class nsGetServiceByContractID final
 {
 public:
   explicit nsGetServiceByContractID(const char* aContractID)
@@ -260,7 +259,7 @@ private:
   const char* mContractID;
 };
 
-class nsGetServiceByContractIDWithError
+class nsGetServiceByContractIDWithError final
 {
 public:
   nsGetServiceByContractIDWithError(const char* aContractID, nsresult* aErrorPtr)
@@ -319,7 +318,7 @@ public:
   begin_assignment();
 
 protected:
-  NS_MAY_ALIAS_PTR(nsISupports) mRawPtr;
+  NS_MAY_ALIAS_PTR(nsISupports) MOZ_OWNING_REF mRawPtr;
 
   void assign_assuming_AddRef(nsISupports* aNewPtr)
   {
@@ -342,7 +341,7 @@ protected:
 // template<class T> class nsGetterAddRefs;
 
 template<class T>
-class nsCOMPtr MOZ_FINAL
+class nsCOMPtr final
 #ifdef NSCAP_FEATURE_USE_BASE
   : private nsCOMPtr_base
 #endif
@@ -378,7 +377,7 @@ private:
   }
 
 private:
-  T* mRawPtr;
+  T* MOZ_OWNING_REF mRawPtr;
 #endif
 
 public:
@@ -533,6 +532,10 @@ public:
     NSCAP_ASSERT_NO_QUERY_NEEDED();
   }
 
+  // Defined in OwningNonNull.h
+  template<class U>
+  MOZ_IMPLICIT nsCOMPtr(const mozilla::dom::OwningNonNull<U>& aOther);
+
 
   // Assignment operators
 
@@ -624,6 +627,10 @@ public:
     return *this;
   }
 
+  // Defined in OwningNonNull.h
+  template<class U>
+  nsCOMPtr<T>& operator=(const mozilla::dom::OwningNonNull<U>& aOther);
+
   // Exchange ownership with |aRhs|; can save a pair of refcount operations.
   void swap(nsCOMPtr<T>& aRhs)
   {
@@ -693,10 +700,10 @@ public:
   // necessary to resolve ambiguity.
   operator T*() const { return get(); }
 
-  T* operator->() const
+  T* operator->() const MOZ_NO_ADDREF_RELEASE_ON_RETURN
   {
-    NS_ABORT_IF_FALSE(mRawPtr != 0,
-                      "You can't dereference a NULL nsCOMPtr with operator->().");
+    MOZ_ASSERT(mRawPtr != 0,
+               "You can't dereference a NULL nsCOMPtr with operator->().");
     return get();
   }
 
@@ -707,8 +714,8 @@ public:
 public:
   T& operator*() const
   {
-    NS_ABORT_IF_FALSE(mRawPtr != 0,
-                      "You can't dereference a NULL nsCOMPtr with operator*().");
+    MOZ_ASSERT(mRawPtr != 0,
+               "You can't dereference a NULL nsCOMPtr with operator*().");
     return *get();
   }
 
@@ -972,10 +979,10 @@ public:
   // necessary to resolve ambiguity/
   operator nsISupports* () const { return get(); }
 
-  nsISupports* operator->() const
+  nsISupports* operator->() const MOZ_NO_ADDREF_RELEASE_ON_RETURN
   {
-    NS_ABORT_IF_FALSE(mRawPtr != 0,
-                      "You can't dereference a NULL nsCOMPtr with operator->().");
+    MOZ_ASSERT(mRawPtr != 0,
+               "You can't dereference a NULL nsCOMPtr with operator->().");
     return get();
   }
 
@@ -987,8 +994,8 @@ public:
 
   nsISupports& operator*() const
   {
-    NS_ABORT_IF_FALSE(mRawPtr != 0,
-                      "You can't dereference a NULL nsCOMPtr with operator*().");
+    MOZ_ASSERT(mRawPtr != 0,
+               "You can't dereference a NULL nsCOMPtr with operator*().");
     return *get();
   }
 

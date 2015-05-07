@@ -1,4 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -14,6 +15,7 @@
 #include "mozilla/Preferences.h"
 #include "nsString.h"
 #include "mozilla/dom/ipc/BlobChild.h"
+#include "mozilla/unused.h"
 
 using namespace mozilla::dom;
 using namespace mozilla::dom::mobilemessage;
@@ -70,7 +72,8 @@ SendCursorRequest(const IPCMobileMessageCursor& aRequest,
 
   // Add an extra ref for IPDL. Will be released in
   // SmsChild::DeallocPMobileMessageCursor().
-  actor->AddRef();
+  nsRefPtr<MobileMessageCursorChild> actorCopy(actor);
+  mozilla::unused << actorCopy.forget().take();
 
   smsChild->SendPMobileMessageCursorConstructor(actor, aRequest);
 
@@ -179,6 +182,21 @@ SmsIPCService::GetSmscAddress(uint32_t aServiceId,
   return SendRequest(GetSmscAddressRequest(aServiceId), aRequest);
 }
 
+
+NS_IMETHODIMP
+SmsIPCService::SetSmscAddress(uint32_t aServiceId,
+                              const nsAString& aNumber,
+                              uint32_t aTypeOfNumber,
+                              uint32_t aNumberPlanIdentification,
+                              nsIMobileMessageCallback* aRequest)
+{
+  return SendRequest(SetSmscAddressRequest(aServiceId,
+                                           nsString(aNumber),
+                                           aTypeOfNumber,
+                                           aNumberPlanIdentification),
+                     aRequest);
+}
+
 NS_IMETHODIMP
 SmsIPCService::Send(uint32_t aServiceId,
                     const nsAString& aNumber,
@@ -191,14 +209,6 @@ SmsIPCService::Send(uint32_t aServiceId,
                                                               nsString(aMessage),
                                                               aSilent)),
                      aRequest);
-}
-
-NS_IMETHODIMP
-SmsIPCService::IsSilentNumber(const nsAString& aNumber,
-                              bool*            aIsSilent)
-{
-  NS_ERROR("We should not be here!");
-  return NS_ERROR_FAILURE;
 }
 
 NS_IMETHODIMP

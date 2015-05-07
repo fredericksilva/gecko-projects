@@ -1,4 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -28,7 +29,7 @@ public:
   NS_IMETHOD Run() {
     // It guarantees the reference will be released on main thread.
     nsCountedRef<nsMainThreadSourceSurfaceRef> surface;
-    surface.own(mImage->GetAsSourceSurface().drop());
+    surface.own(mImage->GetAsSourceSurface().take());
 
     if (surface->GetFormat() == gfx::SurfaceFormat::B8G8R8A8) {
       mDataSourceSurface = surface->GetDataSurface();
@@ -82,7 +83,7 @@ public:
     , mFailed(false)
   {}
 
-  NS_IMETHOD Run()
+  NS_IMETHOD Run() override
   {
     nsresult rv = NS_OK;
     MOZ_ASSERT(NS_IsMainThread());
@@ -190,7 +191,7 @@ public:
     return rv;
   }
 
-  NS_IMETHOD Run()
+  NS_IMETHOD Run() override
   {
     uint64_t imgSize;
     void* imgData = nullptr;

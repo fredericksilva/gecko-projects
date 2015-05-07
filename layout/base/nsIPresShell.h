@@ -22,6 +22,7 @@
 
 #include "mozilla/EventForwards.h"
 #include "mozilla/MemoryReporting.h"
+#include "mozilla/StaticPtr.h"
 #include "mozilla/WeakPtr.h"
 #include "gfxPoint.h"
 #include "nsTHashtable.h"
@@ -33,6 +34,7 @@
 #include "nsColor.h"
 #include "nsCompatibility.h"
 #include "nsFrameManagerBase.h"
+#include "nsRect.h"
 #include "mozFlushType.h"
 #include "nsWeakReference.h"
 #include <stdio.h> // for FILE definition
@@ -79,8 +81,6 @@ class nsDisplayListBuilder;
 class nsPIDOMWindow;
 struct nsPoint;
 class nsINode;
-struct nsIntPoint;
-struct nsIntRect;
 struct nsRect;
 class nsRegion;
 class nsRefreshDriver;
@@ -94,7 +94,6 @@ class DocAccessible;
 } // namespace a11y
 } // namespace mozilla
 #endif
-class nsIWidget;
 struct nsArenaMemoryStats;
 class nsITimer;
 
@@ -136,13 +135,13 @@ typedef struct CapturingContentInfo {
   bool mPointerLock;
   bool mRetargetToElement;
   bool mPreventDrag;
-  nsIContent* mContent;
+  mozilla::StaticRefPtr<nsIContent> mContent;
 } CapturingContentInfo;
 
-// 79c0f49f-77f1-4cc5-80d1-6552e85ccb0c
+// b7b89561-4f03-44b3-9afa-b47e7f313ffb
 #define NS_IPRESSHELL_IID \
-  { 0xa0a4b515, 0x0b91, 0x4f13, \
-    { 0xa0, 0x60, 0x4b, 0xfb, 0x35, 0x00, 0xdc, 0x00 } }
+  { 0xb7b89561, 0x4f03, 0x44b3, \
+    { 0x9a, 0xfa, 0xb4, 0x7e, 0x7f, 0x31, 0x3f, 0xfb } }
 
 // debug VerifyReflow flags
 #define VERIFY_REFLOW_ON                    0x01
@@ -795,17 +794,6 @@ public:
   virtual mozilla::dom::Element* GetTouchCaretElement() const = 0;
 
   /**
-   * Will be called when touch caret visibility has changed.
-   * Set the mMayHaveTouchCaret flag to aSet.
-   */
-  virtual void SetMayHaveTouchCaret(bool aSet) = 0;
-
-  /**
-   * Get the mMayHaveTouchCaret flag.
-   */
-  virtual bool MayHaveTouchCaret() = 0;
-
-  /**
    * Get the selection caret, if it exists. AddRefs it.
    */
   virtual already_AddRefed<mozilla::SelectionCarets> GetSelectionCarets() const = 0;
@@ -1242,20 +1230,17 @@ public:
   }
 
   // mouse capturing
-
   static CapturingContentInfo gCaptureInfo;
-
-  static nsRefPtrHashtable<nsUint32HashKey, mozilla::dom::Touch>* gCaptureTouchList;
-  static bool gPreventMouseEvents;
 
   struct PointerCaptureInfo
   {
     nsCOMPtr<nsIContent> mPendingContent;
     nsCOMPtr<nsIContent> mOverrideContent;
     bool                 mReleaseContent;
+    bool                 mPrimaryState;
     
-    explicit PointerCaptureInfo(nsIContent* aPendingContent) :
-      mPendingContent(aPendingContent), mReleaseContent(false)
+    explicit PointerCaptureInfo(nsIContent* aPendingContent, bool aPrimaryState) :
+      mPendingContent(aPendingContent), mReleaseContent(false), mPrimaryState(aPrimaryState)
     {
       MOZ_COUNT_CTOR(PointerCaptureInfo);
     }
@@ -1273,27 +1258,29 @@ public:
   // Keeps a map between pointerId and element that currently capturing pointer
   // with such pointerId. If pointerId is absent in this map then nobody is
   // capturing it. Additionally keep information about pending capturing content.
+  // Additionally keep information about primaryState of pointer event.
   static nsClassHashtable<nsUint32HashKey, PointerCaptureInfo>* gPointerCaptureList;
 
   struct PointerInfo
   {
     bool      mActiveState;
     uint16_t  mPointerType;
-    PointerInfo(bool aActiveState, uint16_t aPointerType) :
-      mActiveState(aActiveState), mPointerType(aPointerType) {}
+    bool      mPrimaryState;
+    PointerInfo(bool aActiveState, uint16_t aPointerType, bool aPrimaryState) :
+      mActiveState(aActiveState), mPointerType(aPointerType), mPrimaryState(aPrimaryState) {}
   };
-  // Keeps information about pointers such as pointerId, activeState, pointerType
+  // Keeps information about pointers such as pointerId, activeState, pointerType, primaryState
   static nsClassHashtable<nsUint32HashKey, PointerInfo>* gActivePointersIds;
 
   static void DispatchGotOrLostPointerCaptureEvent(bool aIsGotCapture,
                                                    uint32_t aPointerId,
                                                    uint16_t aPointerType,
+                                                   bool aIsPrimary,
                                                    nsIContent* aCaptureTarget);
   static void SetPointerCapturingContent(uint32_t aPointerId, nsIContent* aContent);
   static void ReleasePointerCapturingContent(uint32_t aPointerId, nsIContent* aContent);
   static nsIContent* GetPointerCapturingContent(uint32_t aPointerId);
-  static uint16_t GetPointerType(uint32_t aPointerId);
-  
+
   // CheckPointerCaptureState checks cases, when got/lostpointercapture events should be fired.
   // Function returns true, if any of events was fired; false, if no one event was fired.
   static bool CheckPointerCaptureState(uint32_t aPointerId);
@@ -1301,6 +1288,12 @@ public:
   // GetPointerInfo returns true if pointer with aPointerId is situated in device, false otherwise.
   // aActiveState is additional information, which shows state of pointer like button state for mouse.
   static bool GetPointerInfo(uint32_t aPointerId, bool& aActiveState);
+
+  // GetPointerType returns pointer type like mouse, pen or touch for pointer event with pointerId
+  static uint16_t GetPointerType(uint32_t aPointerId);
+
+  // GetPointerPrimaryState returns state of attribute isPrimary for pointer event with pointerId
+  static bool GetPointerPrimaryState(uint32_t aPointerId);
 
   /**
    * When capturing content is set, it traps all mouse events and retargets
@@ -1387,11 +1380,22 @@ public:
    *
    * The resolution defaults to 1.0.
    */
-  virtual nsresult SetResolution(float aXResolution, float aYResolution) = 0;
-  gfxSize GetResolution() { return gfxSize(mXResolution, mYResolution); }
-  float GetXResolution() { return mXResolution; }
-  float GetYResolution() { return mYResolution; }
-  virtual gfxSize GetCumulativeResolution() = 0;
+  virtual nsresult SetResolution(float aResolution) = 0;
+  float GetResolution() { return mResolution; }
+  virtual float GetCumulativeResolution() = 0;
+
+  /**
+   * Similar to SetResolution() but also increases the scale of the content
+   * by the same amount.
+   */
+  virtual nsresult SetResolutionAndScaleTo(float aResolution) = 0;
+
+  /**
+   * Return whether we are scaling to the set resolution.
+   * This is initially false; it's set to true by a call to
+   * SetResolutionAndScaleTo(), and set to false by a call to SetResolution().
+   */
+  virtual bool ScaleToResolution() const = 0;
 
   /**
    * Returns whether we are in a DrawWindow() call that used the
@@ -1434,7 +1438,8 @@ public:
   virtual nsresult HandleEvent(nsIFrame* aFrame,
                                mozilla::WidgetGUIEvent* aEvent,
                                bool aDontRetargetEvents,
-                               nsEventStatus* aEventStatus) = 0;
+                               nsEventStatus* aEventStatus,
+                               nsIContent** aTargetContent = nullptr) = 0;
   virtual bool ShouldIgnoreInvalidation() = 0;
   /**
    * Notify that we're going to call Paint with PAINT_LAYERS
@@ -1544,6 +1549,8 @@ public:
 
   // Whether we should assume all images are visible.
   virtual bool AssumeAllImagesVisible() = 0;
+
+  virtual void FireResizeEvent() = 0;
 
   /**
    * Refresh observer management.
@@ -1656,6 +1663,8 @@ public:
   bool HasPendingReflow() const
     { return mReflowScheduled || mReflowContinueTimer; }
 
+  void SyncWindowProperties(nsView* aView);
+
 protected:
   friend class nsRefreshDriver;
 
@@ -1665,18 +1674,21 @@ protected:
 
   // These are the same Document and PresContext owned by the DocViewer.
   // we must share ownership.
-  nsIDocument*              mDocument;      // [STRONG]
-  nsPresContext*            mPresContext;   // [STRONG]
+  nsCOMPtr<nsIDocument>     mDocument;
+  nsRefPtr<nsPresContext>   mPresContext;
   nsStyleSet*               mStyleSet;      // [OWNS]
   nsCSSFrameConstructor*    mFrameConstructor; // [OWNS]
   nsViewManager*           mViewManager;   // [WEAK] docViewer owns it so I don't have to
   nsPresArena               mFrameArena;
-  nsFrameSelection*         mSelection;
+  nsRefPtr<nsFrameSelection> mSelection;
   // Pointer into mFrameConstructor - this is purely so that FrameManager() and
   // GetRootFrame() can be inlined:
   nsFrameManagerBase*       mFrameManager;
   mozilla::WeakPtr<nsDocShell>                 mForwardingContainer;
-  nsRefreshDriver*          mHiddenInvalidationObserverRefreshDriver;
+  nsRefreshDriver* MOZ_UNSAFE_REF("These two objects hold weak references "
+                                  "to each other, and the validity of this "
+                                  "member is ensured by the logic in nsIPresShell.")
+                            mHiddenInvalidationObserverRefreshDriver;
 #ifdef ACCESSIBILITY
   mozilla::a11y::DocAccessible* mDocAccessible;
 #endif
@@ -1711,9 +1723,8 @@ protected:
   nscolor                   mCanvasBackgroundColor;
 
   // Used to force allocation and rendering of proportionally more or
-  // less pixels in the given dimension.
-  float                     mXResolution;
-  float                     mYResolution;
+  // less pixels in both dimensions.
+  float                     mResolution;
 
   int16_t                   mSelectionFlags;
 

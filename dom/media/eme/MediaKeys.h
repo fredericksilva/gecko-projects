@@ -42,8 +42,8 @@ CopyArrayBufferViewOrArrayBufferData(const ArrayBufferViewOrArrayBuffer& aBuffer
 
 // This class is used on the main thread only.
 // Note: it's addref/release is not (and can't be) thread safe!
-class MediaKeys MOZ_FINAL : public nsISupports,
-                            public nsWrapperCache
+class MediaKeys final : public nsISupports,
+                        public nsWrapperCache
 {
   ~MediaKeys();
 
@@ -53,9 +53,11 @@ public:
 
   MediaKeys(nsPIDOMWindow* aParentWindow, const nsAString& aKeySystem);
 
+  already_AddRefed<Promise> Init(ErrorResult& aRv);
+
   nsPIDOMWindow* GetParentObject() const;
 
-  virtual JSObject* WrapObject(JSContext* aCx) MOZ_OVERRIDE;
+  virtual JSObject* WrapObject(JSContext* aCx, JS::Handle<JSObject*> aGivenProto) override;
 
   nsresult Bind(HTMLMediaElement* aElement);
 
@@ -63,37 +65,32 @@ public:
   void GetKeySystem(nsString& retval) const;
 
   // JavaScript: MediaKeys.createSession()
-  already_AddRefed<MediaKeySession> CreateSession(SessionType aSessionType,
+  already_AddRefed<MediaKeySession> CreateSession(JSContext* aCx,
+                                                  SessionType aSessionType,
                                                   ErrorResult& aRv);
 
   // JavaScript: MediaKeys.SetServerCertificate()
   already_AddRefed<Promise> SetServerCertificate(const ArrayBufferViewOrArrayBuffer& aServerCertificate,
                                                  ErrorResult& aRv);
 
-  // JavaScript: MediaKeys.create()
-  static
-  already_AddRefed<Promise> Create(const GlobalObject& aGlobal,
-                                   const nsAString& aKeySystem,
-                                   ErrorResult& aRv);
-
-  // JavaScript: MediaKeys.IsTypeSupported()
-  static IsTypeSupportedResult IsTypeSupported(const GlobalObject& aGlobal,
-                                               const nsAString& aKeySystem,
-                                               const Optional<nsAString>& aInitDataType,
-                                               const Optional<nsAString>& aContentType,
-                                               const Optional<nsAString>& aCapability);
-
   already_AddRefed<MediaKeySession> GetSession(const nsAString& aSessionId);
 
-  // Called once a Create() operation succeeds.
-  void OnCDMCreated(PromiseId aId, const nsACString& aNodeId);
-  // Called when GenerateRequest or Load have been called on a MediaKeySession
-  // and we are waiting for its initialisation to finish.
-  void OnSessionPending(PromiseId aId, MediaKeySession* aSession);
-  // Called once a CreateSession succeeds.
-  void OnSessionCreated(PromiseId aId, const nsAString& aSessionId);
+  // Removes and returns MediaKeySession from the set of sessions awaiting
+  // their sessionId to be assigned.
+  already_AddRefed<MediaKeySession> GetPendingSession(uint32_t aToken);
+
+  // Called once a Init() operation succeeds.
+  void OnCDMCreated(PromiseId aId,
+                    const nsACString& aNodeId, const uint32_t aPluginId);
+
+  // Called once the CDM generates a sessionId while servicing a
+  // MediaKeySession.generateRequest() or MediaKeySession.load() call,
+  // once the sessionId of a MediaKeySession is known.
+  void OnSessionIdReady(MediaKeySession* aSession);
+
   // Called once a LoadSession succeeds.
   void OnSessionLoaded(PromiseId aId, bool aSuccess);
+
   // Called once a session has closed.
   void OnSessionClosed(MediaKeySession* aSession);
 
@@ -115,25 +112,16 @@ public:
 
   void Shutdown();
 
+  // Called by CDMProxy when CDM crashes or shuts down. It is different from
+  // Shutdown which is called from the script/dom side.
+  void Terminated();
+
   // Returns true if this MediaKeys has been bound to a media element.
   bool IsBoundToMediaElement() const;
 
-  // Return NS_OK if the principals are the same as when the MediaKeys
-  // was created, failure otherwise.
-  nsresult CheckPrincipals();
-
-  // Returns a pointer to the bound media element's owner doc.
-  // If we're not bound, this returns null.
-  nsIDocument* GetOwnerDoc() const;
-
 private:
 
-  static bool IsTypeSupported(const nsAString& aKeySystem,
-                              const Optional<nsAString>& aInitDataType = Optional<nsAString>(),
-                              const Optional<nsAString>& aContentType = Optional<nsAString>());
-
   bool IsInPrivateBrowsing();
-  already_AddRefed<Promise> Init(ErrorResult& aRv);
 
   // Removes promise from mPromises, and returns it.
   already_AddRefed<Promise> RetrievePromise(PromiseId aId);

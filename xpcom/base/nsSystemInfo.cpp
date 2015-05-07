@@ -14,6 +14,7 @@
 #include "mozilla/arm.h"
 
 #ifdef XP_WIN
+#include <time.h>
 #include <windows.h>
 #include <winioctl.h>
 #include "base/scoped_handle_win.h"
@@ -21,6 +22,7 @@
 #include "nsDirectoryServiceDefs.h"
 #include "nsDirectoryServiceUtils.h"
 #include "nsIObserverService.h"
+#include "nsWindowsHelpers.h"
 #endif
 
 #ifdef MOZ_WIDGET_GTK
@@ -29,7 +31,6 @@
 
 #ifdef MOZ_WIDGET_ANDROID
 #include "AndroidBridge.h"
-using namespace mozilla::widget::android;
 #endif
 
 #ifdef MOZ_WIDGET_GONK
@@ -45,7 +46,7 @@ NS_EXPORT int android_sdk_version;
 #endif
 
 #if defined(XP_LINUX) && defined(MOZ_SANDBOX)
-#include "mozilla/Sandbox.h"
+#include "mozilla/SandboxInfo.h"
 #endif
 
 // Slot for NS_InitXPCOM2 to pass information to nsSystemInfo::Init.
@@ -131,6 +132,46 @@ GetHDDInfo(const char* aSpecialDirName, nsAutoCString& aModel,
   free(deviceOutput);
   return NS_OK;
 }
+
+nsresult GetInstallYear(uint32_t& aYear)
+{
+  HKEY hKey;
+  LONG status = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                              NS_LITERAL_STRING(
+                              "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion"
+                              ).get(),
+                              0, KEY_READ | KEY_WOW64_64KEY, &hKey);
+
+  if (status != ERROR_SUCCESS) {
+    return NS_ERROR_UNEXPECTED;
+  }
+
+  nsAutoRegKey key(hKey);
+
+  DWORD type = 0;
+  time_t raw_time = 0;
+  DWORD time_size = sizeof(time_t);
+
+  status = RegQueryValueExW(hKey, NS_LITERAL_STRING("InstallDate").get(),
+                            nullptr, &type, (LPBYTE)&raw_time, &time_size);
+
+  if (status != ERROR_SUCCESS) {
+    return NS_ERROR_UNEXPECTED;
+  }
+
+  if (type != REG_DWORD) {
+    return NS_ERROR_UNEXPECTED;
+  }
+
+  tm time;
+  if (localtime_s(&time, &raw_time) != 0) {
+    return NS_ERROR_UNEXPECTED;
+  }
+
+  aYear = 1900UL + time.tm_year;
+  return NS_OK;
+}
+
 } // anonymous namespace
 #endif // defined(XP_WIN)
 
@@ -195,22 +236,9 @@ nsSystemInfo::Init()
     }
   }
 
-#if defined(XP_WIN) && defined(MOZ_METRO)
-  // Create "hasWindowsTouchInterface" property.
-  nsAutoString version;
-  rv = GetPropertyAsAString(NS_LITERAL_STRING("version"), version);
-  NS_ENSURE_SUCCESS(rv, rv);
-  double versionDouble = version.ToDouble(&rv);
-  NS_ENSURE_SUCCESS(rv, rv);
-
-  rv = SetPropertyAsBool(NS_ConvertASCIItoUTF16("hasWindowsTouchInterface"),
-                         versionDouble >= 6.2);
-  NS_ENSURE_SUCCESS(rv, rv);
-#else
   rv = SetPropertyAsBool(NS_ConvertASCIItoUTF16("hasWindowsTouchInterface"),
                          false);
   NS_ENSURE_SUCCESS(rv, rv);
-#endif
 
   // Additional informations not available through PR_GetSystemInfo.
   SetInt32Property(NS_LITERAL_STRING("pagesize"), PR_GetPageSize());
@@ -266,6 +294,14 @@ nsSystemInfo::Init()
                                hddRevision);
     NS_ENSURE_SUCCESS(rv, rv);
   }
+
+  uint32_t installYear = 0;
+  if (NS_SUCCEEDED(GetInstallYear(installYear))) {
+    rv = SetPropertyAsUint32(NS_LITERAL_STRING("installYear"), installYear);
+    if (NS_WARN_IF(NS_FAILED(rv))) {
+      return rv;
+    }
+  }
 #endif
 
 #if defined(MOZ_WIDGET_GTK)
@@ -308,7 +344,7 @@ nsSystemInfo::Init()
           "android/os/Build", "HARDWARE", str)) {
       SetPropertyAsAString(NS_LITERAL_STRING("hardware"), str);
     }
-    bool isTablet = mozilla::widget::android::GeckoAppShell::IsTablet();
+    bool isTablet = mozilla::widget::GeckoAppShell::IsTablet();
     SetPropertyAsBool(NS_LITERAL_STRING("tablet"), isTablet);
     // NSPR "version" is the kernel version. For Android we want the Android version.
     // Rename SDK version to version and put the kernel version into kernel_version.
@@ -357,20 +393,25 @@ nsSystemInfo::Init()
 #endif
 
 #if defined(XP_LINUX) && defined(MOZ_SANDBOX)
-  SandboxFeatureFlags sandboxFlags = GetSandboxFeatureFlags();
-  SetPropertyAsBool(NS_LITERAL_STRING("hasSeccompBPF"),
-                    sandboxFlags & kSandboxFeatureSeccompBPF);
+  SandboxInfo sandInfo = SandboxInfo::Get();
 
-  SandboxStatus sandboxContent = ContentProcessSandboxStatus();
-  if (sandboxContent != kSandboxingDisabled) {
+  SetPropertyAsBool(NS_LITERAL_STRING("hasSeccompBPF"),
+                    sandInfo.Test(SandboxInfo::kHasSeccompBPF));
+  SetPropertyAsBool(NS_LITERAL_STRING("hasSeccompTSync"),
+                    sandInfo.Test(SandboxInfo::kHasSeccompTSync));
+  SetPropertyAsBool(NS_LITERAL_STRING("hasUserNamespaces"),
+                    sandInfo.Test(SandboxInfo::kHasUserNamespaces));
+  SetPropertyAsBool(NS_LITERAL_STRING("hasPrivilegedUserNamespaces"),
+                    sandInfo.Test(SandboxInfo::kHasPrivilegedUserNamespaces));
+
+  if (sandInfo.Test(SandboxInfo::kEnabledForContent)) {
     SetPropertyAsBool(NS_LITERAL_STRING("canSandboxContent"),
-                      sandboxContent != kSandboxingWouldFail);
+                      sandInfo.CanSandboxContent());
   }
 
-  SandboxStatus sandboxMedia = MediaPluginSandboxStatus();
-  if (sandboxMedia != kSandboxingDisabled) {
+  if (sandInfo.Test(SandboxInfo::kEnabledForMedia)) {
     SetPropertyAsBool(NS_LITERAL_STRING("canSandboxMedia"),
-                      sandboxMedia != kSandboxingWouldFail);
+                      sandInfo.CanSandboxMedia());
   }
 #endif // XP_LINUX && MOZ_SANDBOX
 

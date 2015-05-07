@@ -31,9 +31,9 @@ function test() {
 }
 
 function checkInitialSource() {
-  isnot(gSources.selectedValue.indexOf(".js"), -1,
+  isnot(gSources.selectedItem.attachment.source.url.indexOf(".js"), -1,
     "The debugger should not show the minified js file.");
-  is(gSources.selectedValue.indexOf(".min.js"), -1,
+  is(gSources.selectedItem.attachment.source.url.indexOf(".min.js"), -1,
     "The debugger should show the original js file.");
   is(gEditor.getText().split("\n").length, 46,
     "The debugger's editor should have the original source displayed, " +
@@ -42,12 +42,14 @@ function checkInitialSource() {
 
 function testSetBreakpoint() {
   let deferred = promise.defer();
+  let sourceForm = getSourceForm(gSources, JS_URL);
+  let source = gDebugger.gThreadClient.source(sourceForm);
 
-  gDebugger.gThreadClient.setBreakpoint({ url: JS_URL, line: 30, column: 21 }, aResponse => {
+  source.setBreakpoint({ line: 30 }, aResponse => {
     ok(!aResponse.error,
       "Should be able to set a breakpoint in a js file.");
     ok(!aResponse.actualLocation,
-      "Should be able to set a breakpoint on line 30 and column 10.");
+      "Should be able to set a breakpoint on line 30.");
 
     gDebugger.gClient.addOneTimeListener("resumed", () => {
       waitForCaretAndScopes(gPanel, 30).then(() => {

@@ -11,6 +11,8 @@ var loop = loop || {};
 loop.contacts = (function(_, mozL10n) {
   "use strict";
 
+  var sharedMixins = loop.shared.mixins;
+
   const Button = loop.shared.views.Button;
   const ButtonGroup = loop.shared.views.ButtonGroup;
   const CALL_TYPES = loop.shared.utils.CALL_TYPES;
@@ -81,7 +83,73 @@ loop.contacts = (function(_, mozL10n) {
     contact[field][0].value = value;
   };
 
-  const ContactDropdown = React.createClass({displayName: 'ContactDropdown',
+  const GravatarPromo = React.createClass({displayName: "GravatarPromo",
+    mixins: [sharedMixins.WindowCloseMixin],
+
+    propTypes: {
+      handleUse: React.PropTypes.func.isRequired
+    },
+
+    getInitialState: function() {
+      return {
+        showMe: navigator.mozLoop.getLoopPref("contacts.gravatars.promo") &&
+          !navigator.mozLoop.getLoopPref("contacts.gravatars.show")
+      };
+    },
+
+    handleCloseButtonClick: function() {
+      navigator.mozLoop.setLoopPref("contacts.gravatars.promo", false);
+      this.setState({ showMe: false });
+    },
+
+    handleLinkClick: function(event) {
+      if (!event.target || !event.target.href) {
+        return;
+      }
+
+      event.preventDefault();
+      navigator.mozLoop.openURL(event.target.href);
+      this.closeWindow();
+    },
+
+    handleUseButtonClick: function() {
+      navigator.mozLoop.setLoopPref("contacts.gravatars.promo", false);
+      navigator.mozLoop.setLoopPref("contacts.gravatars.show", true);
+      this.setState({ showMe: false });
+      this.props.handleUse();
+    },
+
+    render: function() {
+      if (!this.state.showMe) {
+        return null;
+      }
+
+      let privacyUrl = navigator.mozLoop.getLoopPref("legal.privacy_url");
+      let message = mozL10n.get("gravatars_promo_message", {
+        "learn_more": React.renderToStaticMarkup(
+          React.createElement("a", {href: privacyUrl, target: "_blank"}, 
+            mozL10n.get("gravatars_promo_message_learnmore")
+          )
+        )
+      });
+      return (
+        React.createElement("div", {className: "contacts-gravatar-promo"}, 
+          React.createElement(Button, {additionalClass: "button-close", onClick: this.handleCloseButtonClick}), 
+          React.createElement("p", {dangerouslySetInnerHTML: {__html: message}, 
+             onClick: this.handleLinkClick}), 
+          React.createElement(ButtonGroup, null, 
+            React.createElement(Button, {caption: mozL10n.get("gravatars_promo_button_nothanks"), 
+                    onClick: this.handleCloseButtonClick}), 
+            React.createElement(Button, {caption: mozL10n.get("gravatars_promo_button_use"), 
+                    additionalClass: "button-accept", 
+                    onClick: this.handleUseButtonClick})
+          )
+        )
+      );
+    }
+  });
+
+  const ContactDropdown = React.createClass({displayName: "ContactDropdown",
     propTypes: {
       handleAction: React.PropTypes.func.isRequired,
       canEdit: React.PropTypes.bool
@@ -89,7 +157,7 @@ loop.contacts = (function(_, mozL10n) {
 
     getInitialState: function () {
       return {
-        openDirUp: false,
+        openDirUp: false
       };
     },
 
@@ -107,7 +175,7 @@ loop.contacts = (function(_, mozL10n) {
       if (menuNodeRect.top + menuNodeRect.height >=
           listNodeRect.top + listNodeRect.height) {
         this.setState({
-          openDirUp: true,
+          openDirUp: true
         });
       }
     },
@@ -124,47 +192,47 @@ loop.contacts = (function(_, mozL10n) {
                                           : "block_contact_menu_button";
 
       return (
-        React.DOM.ul({className: cx({ "dropdown-menu": true,
+        React.createElement("ul", {className: cx({ "dropdown-menu": true,
                             "dropdown-menu-up": this.state.openDirUp })}, 
-          React.DOM.li({className: cx({ "dropdown-menu-item": true,
+          React.createElement("li", {className: cx({ "dropdown-menu-item": true,
                               "disabled": this.props.blocked }), 
               onClick: this.onItemClick, 
-              'data-action': "video-call"}, 
-            React.DOM.i({className: "icon icon-video-call"}), 
+              "data-action": "video-call"}, 
+            React.createElement("i", {className: "icon icon-video-call"}), 
             mozL10n.get("video_call_menu_button")
           ), 
-          React.DOM.li({className: cx({ "dropdown-menu-item": true,
+          React.createElement("li", {className: cx({ "dropdown-menu-item": true,
                               "disabled": this.props.blocked }), 
-              onClick: this.onItemClick, 'data-action': "audio-call"}, 
-            React.DOM.i({className: "icon icon-audio-call"}), 
+              onClick: this.onItemClick, "data-action": "audio-call"}, 
+            React.createElement("i", {className: "icon icon-audio-call"}), 
             mozL10n.get("audio_call_menu_button")
           ), 
-          React.DOM.li({className: cx({ "dropdown-menu-item": true,
+          React.createElement("li", {className: cx({ "dropdown-menu-item": true,
                               "disabled": !this.props.canEdit }), 
-              onClick: this.onItemClick, 'data-action': "edit"}, 
-            React.DOM.i({className: "icon icon-edit"}), 
+              onClick: this.onItemClick, "data-action": "edit"}, 
+            React.createElement("i", {className: "icon icon-edit"}), 
             mozL10n.get("edit_contact_menu_button")
           ), 
-          React.DOM.li({className: "dropdown-menu-item", 
-              onClick: this.onItemClick, 'data-action': blockAction}, 
-            React.DOM.i({className: "icon icon-" + blockAction}), 
+          React.createElement("li", {className: "dropdown-menu-item", 
+              onClick: this.onItemClick, "data-action": blockAction}, 
+            React.createElement("i", {className: "icon icon-" + blockAction}), 
             mozL10n.get(blockLabel)
           ), 
-          React.DOM.li({className: cx({ "dropdown-menu-item": true,
+          React.createElement("li", {className: cx({ "dropdown-menu-item": true,
                               "disabled": !this.props.canEdit }), 
-              onClick: this.onItemClick, 'data-action': "remove"}, 
-            React.DOM.i({className: "icon icon-remove"}), 
-            mozL10n.get("remove_contact_menu_button")
+              onClick: this.onItemClick, "data-action": "remove"}, 
+            React.createElement("i", {className: "icon icon-remove"}), 
+            mozL10n.get("remove_contact_menu_button2")
           )
         )
       );
     }
   });
 
-  const ContactDetail = React.createClass({displayName: 'ContactDetail',
+  const ContactDetail = React.createClass({displayName: "ContactDetail",
     getInitialState: function() {
       return {
-        showMenu: false,
+        showMenu: false
       };
     },
 
@@ -231,23 +299,25 @@ loop.contacts = (function(_, mozL10n) {
       });
 
       return (
-        React.DOM.li({className: contactCSSClass, onMouseLeave: this.hideDropdownMenu}, 
-          React.DOM.div({className: "avatar"}), 
-          React.DOM.div({className: "details"}, 
-            React.DOM.div({className: "username"}, React.DOM.strong(null, names.firstName), " ", names.lastName, 
-              React.DOM.i({className: cx({"icon icon-google": this.props.contact.category[0] == "google"})}), 
-              React.DOM.i({className: cx({"icon icon-blocked": this.props.contact.blocked})})
-            ), 
-            React.DOM.div({className: "email"}, email.value)
+        React.createElement("li", {className: contactCSSClass, onMouseLeave: this.hideDropdownMenu}, 
+          React.createElement("div", {className: "avatar"}, 
+            React.createElement("img", {src: navigator.mozLoop.getUserAvatar(email.value)})
           ), 
-          React.DOM.div({className: "icons"}, 
-            React.DOM.i({className: "icon icon-video", 
+          React.createElement("div", {className: "details"}, 
+            React.createElement("div", {className: "username"}, React.createElement("strong", null, names.firstName), " ", names.lastName, 
+              React.createElement("i", {className: cx({"icon icon-google": this.props.contact.category[0] == "google"})}), 
+              React.createElement("i", {className: cx({"icon icon-blocked": this.props.contact.blocked})})
+            ), 
+            React.createElement("div", {className: "email"}, email.value)
+          ), 
+          React.createElement("div", {className: "icons"}, 
+            React.createElement("i", {className: "icon icon-video", 
                onClick: this.handleAction.bind(null, "video-call")}), 
-            React.DOM.i({className: "icon icon-caret-down", 
+            React.createElement("i", {className: "icon icon-caret-down", 
                onClick: this.showDropdownMenu})
           ), 
           this.state.showMenu
-            ? ContactDropdown({handleAction: this.handleAction, 
+            ? React.createElement(ContactDropdown, {handleAction: this.handleAction, 
                                canEdit: this.canEdit(), 
                                blocked: this.props.contact.blocked})
             : null
@@ -257,8 +327,16 @@ loop.contacts = (function(_, mozL10n) {
     }
   });
 
-  const ContactsList = React.createClass({displayName: 'ContactsList',
-    mixins: [React.addons.LinkedStateMixin],
+  const ContactsList = React.createClass({displayName: "ContactsList",
+    mixins: [
+      React.addons.LinkedStateMixin,
+      loop.shared.mixins.WindowCloseMixin
+    ],
+
+    propTypes: {
+      notifications: React.PropTypes.instanceOf(
+        loop.shared.models.NotificationCollection).isRequired
+    },
 
     /**
      * Contacts collection object
@@ -273,7 +351,7 @@ loop.contacts = (function(_, mozL10n) {
     getInitialState: function() {
       return {
         importBusy: false,
-        filter: "",
+        filter: ""
       };
     },
 
@@ -386,10 +464,15 @@ loop.contacts = (function(_, mozL10n) {
         service: "google"
       }, (err, stats) => {
         this.setState({ importBusy: false });
-        // TODO: bug 1076764 - proper error and success reporting.
         if (err) {
-          throw err;
+          console.error("Contact import error", err);
+          this.props.notifications.errorL10n("import_contacts_failure_message");
+          return;
         }
+        this.props.notifications.successL10n("import_contacts_success_message", {
+          num: stats.success,
+          total: stats.success
+        });
       });
     },
 
@@ -403,25 +486,25 @@ loop.contacts = (function(_, mozL10n) {
           this.props.startForm("contacts_edit", contact);
           break;
         case "remove":
-          navigator.mozLoop.confirm(
-            mozL10n.get("confirm_delete_contact_alert"),
-            mozL10n.get("confirm_delete_contact_remove_button"),
-            mozL10n.get("confirm_delete_contact_cancel_button"),
-            (err, result) => {
+          navigator.mozLoop.confirm({
+            message: mozL10n.get("confirm_delete_contact_alert"),
+            okButton: mozL10n.get("confirm_delete_contact_remove_button"),
+            cancelButton: mozL10n.get("confirm_delete_contact_cancel_button")
+          }, (err, result) => {
+            if (err) {
+              throw err;
+            }
+
+            if (!result) {
+              return;
+            }
+
+            navigator.mozLoop.contacts.remove(contact._guid, err => {
               if (err) {
                 throw err;
               }
-
-              if (!result) {
-                return;
-              }
-
-              navigator.mozLoop.contacts.remove(contact._guid, err => {
-                if (err) {
-                  throw err;
-                }
-              });
             });
+          });
           break;
         case "block":
         case "unblock":
@@ -435,17 +518,25 @@ loop.contacts = (function(_, mozL10n) {
         case "video-call":
           if (!contact.blocked) {
             navigator.mozLoop.calls.startDirectCall(contact, CALL_TYPES.AUDIO_VIDEO);
+            this.closeWindow();
           }
           break;
         case "audio-call":
           if (!contact.blocked) {
             navigator.mozLoop.calls.startDirectCall(contact, CALL_TYPES.AUDIO_ONLY);
+            this.closeWindow();
           }
           break;
         default:
           console.error("Unrecognized action: " + actionName);
           break;
       }
+    },
+
+    handleUseGravatar: function() {
+      // We got permission to use Gravatar icons now, so we need to redraw the
+      // list entirely to show them.
+      this.refresh();
     },
 
     sortContacts: function(contact1, contact2) {
@@ -462,8 +553,10 @@ loop.contacts = (function(_, mozL10n) {
       let cx = React.addons.classSet;
 
       let viewForItem = item => {
-        return ContactDetail({key: item._guid, contact: item, 
-                              handleContactAction: this.handleContactAction})
+        return (
+          React.createElement(ContactDetail, {key: item._guid, contact: item, 
+                         handleContactAction: this.handleContactAction})
+        );
       };
 
       let shownContacts = _.groupBy(this.contacts, function(contact) {
@@ -476,8 +569,8 @@ loop.contacts = (function(_, mozL10n) {
         let filter = this.state.filter.trim().toLocaleLowerCase();
         if (filter) {
           let filterFn = contact => {
-            return contact.name[0].toLocaleLowerCase().contains(filter) ||
-                   getPreferred(contact, "email").value.toLocaleLowerCase().contains(filter);
+            return contact.name[0].toLocaleLowerCase().includes(filter) ||
+                   getPreferred(contact, "email").value.toLocaleLowerCase().includes(filter);
           };
           if (shownContacts.available) {
             shownContacts.available = shownContacts.available.filter(filterFn);
@@ -489,33 +582,34 @@ loop.contacts = (function(_, mozL10n) {
       }
 
       return (
-        React.DOM.div(null, 
-          React.DOM.div({className: "content-area"}, 
-            ButtonGroup(null, 
-              Button({caption: this.state.importBusy
+        React.createElement("div", null, 
+          React.createElement("div", {className: "content-area"}, 
+            React.createElement(ButtonGroup, null, 
+              React.createElement(Button, {caption: this.state.importBusy
                                ? mozL10n.get("importing_contacts_progress_button")
-                               : mozL10n.get("import_contacts_button"), 
+                               : mozL10n.get("import_contacts_button2"), 
                       disabled: this.state.importBusy, 
                       onClick: this.handleImportButtonClick}, 
-                React.DOM.div({className: cx({"contact-import-spinner": true,
+                React.createElement("div", {className: cx({"contact-import-spinner": true,
                                     spinner: true,
                                     busy: this.state.importBusy})})
               ), 
-              Button({caption: mozL10n.get("new_contact_button"), 
+              React.createElement(Button, {caption: mozL10n.get("new_contact_button"), 
                       onClick: this.handleAddContactButtonClick})
             ), 
             showFilter ?
-            React.DOM.input({className: "contact-filter", 
+            React.createElement("input", {className: "contact-filter", 
                    placeholder: mozL10n.get("contacts_search_placesholder"), 
                    valueLink: this.linkState("filter")})
-            : null
+            : null, 
+            React.createElement(GravatarPromo, {handleUse: this.handleUseGravatar})
           ), 
-          React.DOM.ul({className: "contact-list"}, 
+          React.createElement("ul", {className: "contact-list"}, 
             shownContacts.available ?
               shownContacts.available.sort(this.sortContacts).map(viewForItem) :
               null, 
             shownContacts.blocked && shownContacts.blocked.length > 0 ?
-              React.DOM.div({className: "contact-separator"}, mozL10n.get("contacts_blocked_contacts")) :
+              React.createElement("div", {className: "contact-separator"}, mozL10n.get("contacts_blocked_contacts")) :
               null, 
             shownContacts.blocked ?
               shownContacts.blocked.sort(this.sortContacts).map(viewForItem) :
@@ -526,7 +620,7 @@ loop.contacts = (function(_, mozL10n) {
     }
   });
 
-  const ContactDetailsForm = React.createClass({displayName: 'ContactDetailsForm',
+  const ContactDetailsForm = React.createClass({displayName: "ContactDetailsForm",
     mixins: [React.addons.LinkedStateMixin],
 
     propTypes: {
@@ -539,7 +633,7 @@ loop.contacts = (function(_, mozL10n) {
         pristine: true,
         name: "",
         email: "",
-        tel: "",
+        tel: ""
       };
     },
 
@@ -557,7 +651,7 @@ loop.contacts = (function(_, mozL10n) {
     handleAcceptButtonClick: function() {
       // Allow validity error indicators to be displayed.
       this.setState({
-        pristine: false,
+        pristine: false
       });
 
       let emailInput = this.refs.email.getDOMNode();
@@ -583,7 +677,7 @@ loop.contacts = (function(_, mozL10n) {
             }
           });
           this.setState({
-            contact: null,
+            contact: null
           });
           break;
         case "add":
@@ -623,27 +717,27 @@ loop.contacts = (function(_, mozL10n) {
       let phoneOrEmailRequired = !this.state.email && !this.state.tel;
 
       return (
-        React.DOM.div({className: "content-area contact-form"}, 
-          React.DOM.header(null, this.props.mode == "add"
+        React.createElement("div", {className: "content-area contact-form"}, 
+          React.createElement("header", null, this.props.mode == "add"
                    ? mozL10n.get("add_contact_button")
                    : mozL10n.get("edit_contact_title")), 
-          React.DOM.label(null, mozL10n.get("edit_contact_name_label")), 
-          React.DOM.input({ref: "name", required: true, pattern: "\\s*\\S.*", type: "text", 
+          React.createElement("label", null, mozL10n.get("edit_contact_name_label")), 
+          React.createElement("input", {ref: "name", required: true, pattern: "\\s*\\S.*", type: "text", 
                  className: cx({pristine: this.state.pristine}), 
                  valueLink: this.linkState("name")}), 
-          React.DOM.label(null, mozL10n.get("edit_contact_email_label")), 
-          React.DOM.input({ref: "email", type: "email", required: phoneOrEmailRequired, 
+          React.createElement("label", null, mozL10n.get("edit_contact_email_label")), 
+          React.createElement("input", {ref: "email", type: "email", required: phoneOrEmailRequired, 
                  className: cx({pristine: this.state.pristine}), 
                  valueLink: this.linkState("email")}), 
-          React.DOM.label(null, mozL10n.get("new_contact_phone_placeholder")), 
-          React.DOM.input({ref: "tel", type: "tel", required: phoneOrEmailRequired, 
+          React.createElement("label", null, mozL10n.get("new_contact_fxos_phone_placeholder")), 
+          React.createElement("input", {ref: "tel", type: "tel", required: phoneOrEmailRequired, 
                  className: cx({pristine: this.state.pristine}), 
                  valueLink: this.linkState("tel")}), 
-          ButtonGroup(null, 
-            Button({additionalClass: "button-cancel", 
+          React.createElement(ButtonGroup, null, 
+            React.createElement(Button, {additionalClass: "button-cancel", 
                     caption: mozL10n.get("cancel_button"), 
                     onClick: this.handleCancelButtonClick}), 
-            Button({additionalClass: "button-accept", 
+            React.createElement(Button, {additionalClass: "button-accept", 
                     caption: this.props.mode == "add"
                              ? mozL10n.get("add_contact_button")
                              : mozL10n.get("edit_contact_done_button"), 
@@ -658,6 +752,6 @@ loop.contacts = (function(_, mozL10n) {
     ContactsList: ContactsList,
     ContactDetailsForm: ContactDetailsForm,
     _getPreferred: getPreferred,
-    _setPreferred: setPreferred,
+    _setPreferred: setPreferred
   };
 })(_, document.mozL10n);

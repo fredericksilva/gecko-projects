@@ -14,6 +14,7 @@
 #include "nsMimeTypes.h"
 #include "nsIRequest.h"
 
+#include "MultipartImage.h"
 #include "RasterImage.h"
 #include "VectorImage.h"
 #include "Image.h"
@@ -29,69 +30,82 @@ namespace image {
 
 /*static*/ void
 ImageFactory::Initialize()
+{ }
+
+static bool
+ShouldDownscaleDuringDecode(const nsCString& aMimeType)
 {
+  return aMimeType.EqualsLiteral(IMAGE_JPEG) ||
+         aMimeType.EqualsLiteral(IMAGE_JPG) ||
+         aMimeType.EqualsLiteral(IMAGE_PJPEG);
 }
 
 static uint32_t
-ComputeImageFlags(ImageURL* uri, bool isMultiPart)
+ComputeImageFlags(ImageURL* uri, const nsCString& aMimeType, bool isMultiPart)
 {
   nsresult rv;
 
   // We default to the static globals.
   bool isDiscardable = gfxPrefs::ImageMemDiscardable();
-  bool doDecodeOnDraw = gfxPrefs::ImageMemDecodeOnDraw();
+  bool doDecodeOnlyOnDraw = gfxPrefs::ImageDecodeOnlyOnDrawEnabled() &&
+                            gfxPrefs::AsyncPanZoomEnabled();
+  bool doDecodeImmediately = gfxPrefs::ImageDecodeImmediatelyEnabled();
+  bool doDownscaleDuringDecode = gfxPrefs::ImageDownscaleDuringDecodeEnabled();
 
-  // We want UI to be as snappy as possible and not to flicker. Disable discarding
-  // and decode-on-draw for chrome URLS.
+  // We want UI to be as snappy as possible and not to flicker. Disable
+  // discarding and decode-only-on-draw for chrome URLS.
   bool isChrome = false;
   rv = uri->SchemeIs("chrome", &isChrome);
-  if (NS_SUCCEEDED(rv) && isChrome)
-    isDiscardable = doDecodeOnDraw = false;
+  if (NS_SUCCEEDED(rv) && isChrome) {
+    isDiscardable = doDecodeOnlyOnDraw = false;
+  }
 
   // We don't want resources like the "loading" icon to be discardable or
-  // decode-on-draw either.
+  // decode-only-on-draw either.
   bool isResource = false;
   rv = uri->SchemeIs("resource", &isResource);
-  if (NS_SUCCEEDED(rv) && isResource)
-    isDiscardable = doDecodeOnDraw = false;
+  if (NS_SUCCEEDED(rv) && isResource) {
+    isDiscardable = doDecodeOnlyOnDraw = false;
+  }
+
+  // Downscale-during-decode and decode-only-on-draw are only enabled for
+  // certain content types.
+  if ((doDownscaleDuringDecode || doDecodeOnlyOnDraw) &&
+      !ShouldDownscaleDuringDecode(aMimeType)) {
+    doDownscaleDuringDecode = false;
+    doDecodeOnlyOnDraw = false;
+  }
+
+  // If we're decoding immediately, disable decode-only-on-draw.
+  if (doDecodeImmediately) {
+    doDecodeOnlyOnDraw = false;
+  }
 
   // For multipart/x-mixed-replace, we basically want a direct channel to the
-  // decoder. Disable both for this case as well.
-  if (isMultiPart)
-    isDiscardable = doDecodeOnDraw = false;
+  // decoder. Disable everything for this case.
+  if (isMultiPart) {
+    isDiscardable = doDecodeOnlyOnDraw = doDownscaleDuringDecode = false;
+  }
 
   // We have all the information we need.
   uint32_t imageFlags = Image::INIT_FLAG_NONE;
-  if (isDiscardable)
+  if (isDiscardable) {
     imageFlags |= Image::INIT_FLAG_DISCARDABLE;
-  if (doDecodeOnDraw)
-    imageFlags |= Image::INIT_FLAG_DECODE_ON_DRAW;
-  if (isMultiPart)
-    imageFlags |= Image::INIT_FLAG_MULTIPART;
+  }
+  if (doDecodeOnlyOnDraw) {
+    imageFlags |= Image::INIT_FLAG_DECODE_ONLY_ON_DRAW;
+  }
+  if (doDecodeImmediately) {
+    imageFlags |= Image::INIT_FLAG_DECODE_IMMEDIATELY;
+  }
+  if (isMultiPart) {
+    imageFlags |= Image::INIT_FLAG_TRANSIENT;
+  }
+  if (doDownscaleDuringDecode) {
+    imageFlags |= Image::INIT_FLAG_DOWNSCALE_DURING_DECODE;
+  }
 
   return imageFlags;
-}
-
-/* static */ bool
-ImageFactory::CanRetargetOnDataAvailable(ImageURL* aURI, bool aIsMultiPart)
-{
-  // We can't retarget OnDataAvailable safely in cases where we aren't storing
-  // source data (and thus need to sync decode in ODA) because allocating frames
-  // off-main-thread is currently not possible and we don't have a workaround in
-  // place yet. (See bug 967985.) For now, we detect those cases and refuse to
-  // retarget. When the problem is fixed, this function can be removed.
-
-  if (aIsMultiPart) {
-    return false;
-  }
-
-  uint32_t imageFlags = ComputeImageFlags(aURI, aIsMultiPart);
-  if (!(imageFlags & Image::INIT_FLAG_DISCARDABLE) &&
-      !(imageFlags & Image::INIT_FLAG_DECODE_ON_DRAW)) {
-    return false;
-  }
-
-  return true;
 }
 
 /* static */ already_AddRefed<Image>
@@ -106,7 +120,7 @@ ImageFactory::CreateImage(nsIRequest* aRequest,
              "Pref observers should have been initialized already");
 
   // Compute the image's initialization flags.
-  uint32_t imageFlags = ComputeImageFlags(aURI, aIsMultiPart);
+  uint32_t imageFlags = ComputeImageFlags(aURI, aMimeType, aIsMultiPart);
 
   // Select the type of image to create based on MIME type.
   if (aMimeType.EqualsLiteral(IMAGE_SVG_XML)) {
@@ -136,8 +150,28 @@ ImageFactory::CreateAnonymousImage(const nsCString& aMimeType)
 
   nsRefPtr<RasterImage> newImage = new RasterImage();
 
+  nsRefPtr<ProgressTracker> newTracker = new ProgressTracker();
+  newTracker->SetImage(newImage);
+  newImage->SetProgressTracker(newTracker);
+
   rv = newImage->Init(aMimeType.get(), Image::INIT_FLAG_NONE);
   NS_ENSURE_SUCCESS(rv, BadImage(newImage));
+
+  return newImage.forget();
+}
+
+/* static */ already_AddRefed<MultipartImage>
+ImageFactory::CreateMultipartImage(Image* aFirstPart,
+                                   ProgressTracker* aProgressTracker)
+{
+  MOZ_ASSERT(aFirstPart);
+  MOZ_ASSERT(aProgressTracker);
+
+  nsRefPtr<MultipartImage> newImage = new MultipartImage(aFirstPart);
+  aProgressTracker->SetImage(newImage);
+  newImage->SetProgressTracker(aProgressTracker);
+
+  newImage->Init();
 
   return newImage.forget();
 }
@@ -145,10 +179,12 @@ ImageFactory::CreateAnonymousImage(const nsCString& aMimeType)
 int32_t
 SaturateToInt32(int64_t val)
 {
-  if (val > INT_MAX)
+  if (val > INT_MAX) {
     return INT_MAX;
-  if (val < INT_MIN)
+  }
+  if (val < INT_MIN) {
     return INT_MIN;
+  }
 
   return static_cast<int32_t>(val);
 }
@@ -191,9 +227,13 @@ ImageFactory::CreateRasterImage(nsIRequest* aRequest,
                                 uint32_t aImageFlags,
                                 uint32_t aInnerWindowId)
 {
+  MOZ_ASSERT(aProgressTracker);
+
   nsresult rv;
 
-  nsRefPtr<RasterImage> newImage = new RasterImage(aProgressTracker, aURI);
+  nsRefPtr<RasterImage> newImage = new RasterImage(aURI);
+  aProgressTracker->SetImage(newImage);
+  newImage->SetProgressTracker(aProgressTracker);
 
   rv = newImage->Init(aMimeType.get(), aImageFlags);
   NS_ENSURE_SUCCESS(rv, BadImage(newImage));
@@ -205,7 +245,8 @@ ImageFactory::CreateRasterImage(nsIRequest* aRequest,
   // Pass anything usable on so that the RasterImage can preallocate
   // its source buffer.
   if (len > 0) {
-    uint32_t sizeHint = std::min<uint32_t>(len, 20000000); // Bound by something reasonable
+    // Bound by something reasonable
+    uint32_t sizeHint = std::min<uint32_t>(len, 20000000);
     rv = newImage->SetSourceSizeHint(sizeHint);
     if (NS_FAILED(rv)) {
       // Flush memory, try to get some back, and try again.
@@ -230,8 +271,8 @@ ImageFactory::CreateRasterImage(nsIRequest* aRequest,
       nsCOMPtr<nsIChannel> chan(do_QueryInterface(aRequest));
       nsCOMPtr<nsIPrincipal> principal;
       if (chan) {
-        nsContentUtils::GetSecurityManager()->GetChannelResultPrincipal(chan,
-                                                                        getter_AddRefs(principal));
+        nsContentUtils::GetSecurityManager()
+          ->GetChannelResultPrincipal(chan, getter_AddRefs(principal));
       }
 
       if ((principal &&
@@ -252,9 +293,13 @@ ImageFactory::CreateVectorImage(nsIRequest* aRequest,
                                 uint32_t aImageFlags,
                                 uint32_t aInnerWindowId)
 {
+  MOZ_ASSERT(aProgressTracker);
+
   nsresult rv;
 
-  nsRefPtr<VectorImage> newImage = new VectorImage(aProgressTracker, aURI);
+  nsRefPtr<VectorImage> newImage = new VectorImage(aURI);
+  aProgressTracker->SetImage(newImage);
+  newImage->SetProgressTracker(aProgressTracker);
 
   rv = newImage->Init(aMimeType.get(), aImageFlags);
   NS_ENSURE_SUCCESS(rv, BadImage(newImage));

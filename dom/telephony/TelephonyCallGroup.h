@@ -13,7 +13,7 @@
 namespace mozilla {
 namespace dom {
 
-class TelephonyCallGroup MOZ_FINAL : public DOMEventTargetHelper
+class TelephonyCallGroup final : public DOMEventTargetHelper
 {
   nsRefPtr<Telephony> mTelephony;
 
@@ -38,28 +38,28 @@ public:
 
   // WrapperCache
   virtual JSObject*
-  WrapObject(JSContext* aCx) MOZ_OVERRIDE;
+  WrapObject(JSContext* aCx, JS::Handle<JSObject*> aGivenProto) override;
 
   // WebIDL interface
   already_AddRefed<CallsList>
   Calls() const;
 
-  void
+  already_AddRefed<Promise>
   Add(TelephonyCall& aCall, ErrorResult& aRv);
 
-  void
+  already_AddRefed<Promise>
   Add(TelephonyCall& aCall, TelephonyCall& aSecondCall, ErrorResult& aRv);
 
-  void
+  already_AddRefed<Promise>
   Remove(TelephonyCall& aCall, ErrorResult& aRv);
 
   already_AddRefed<Promise>
   HangUp(ErrorResult& aRv);
 
-  void
+  already_AddRefed<Promise>
   Hold(ErrorResult& aRv);
 
-  void
+  already_AddRefed<Promise>
   Resume(ErrorResult& aRv);
 
   void
@@ -70,9 +70,7 @@ public:
 
   IMPL_EVENT_HANDLER(statechange)
   IMPL_EVENT_HANDLER(connected)
-  IMPL_EVENT_HANDLER(holding)
   IMPL_EVENT_HANDLER(held)
-  IMPL_EVENT_HANDLER(resuming)
   IMPL_EVENT_HANDLER(callschanged)
   IMPL_EVENT_HANDLER(error)
 
@@ -117,7 +115,10 @@ private:
   DispatchCallEvent(const nsAString& aType,
                     TelephonyCall* aCall);
 
-  bool CanConference(const TelephonyCall& aCall, TelephonyCall* aSecondCall);
+  already_AddRefed<Promise>
+  CreatePromise(ErrorResult& aRv);
+
+  bool CanConference(const TelephonyCall& aCall, const TelephonyCall* aSecondCall);
 };
 
 } // namespace dom

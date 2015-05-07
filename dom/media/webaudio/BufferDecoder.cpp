@@ -37,10 +37,10 @@ BufferDecoder::~BufferDecoder()
 }
 
 void
-BufferDecoder::BeginDecoding(nsIThread* aDecodeThread)
+BufferDecoder::BeginDecoding(MediaTaskQueue* aTaskQueueIdentity)
 {
-  MOZ_ASSERT(!mDecodeThread && aDecodeThread);
-  mDecodeThread = aDecodeThread;
+  MOZ_ASSERT(!mTaskQueueIdentity && aTaskQueueIdentity);
+  mTaskQueueIdentity = aTaskQueueIdentity;
 }
 
 ReentrantMonitor&
@@ -57,17 +57,17 @@ BufferDecoder::IsShutdown() const
 }
 
 bool
-BufferDecoder::OnStateMachineThread() const
+BufferDecoder::OnStateMachineTaskQueue() const
 {
   // BufferDecoder doesn't have the concept of a state machine.
   return true;
 }
 
 bool
-BufferDecoder::OnDecodeThread() const
+BufferDecoder::OnDecodeTaskQueue() const
 {
-  MOZ_ASSERT(mDecodeThread, "Forgot to call BeginDecoding?");
-  return IsCurrentThread(mDecodeThread);
+  MOZ_ASSERT(mTaskQueueIdentity, "Forgot to call BeginDecoding?");
+  return mTaskQueueIdentity->IsCurrentThreadIn();
 }
 
 MediaResource*
@@ -83,7 +83,8 @@ BufferDecoder::NotifyBytesConsumed(int64_t aBytes, int64_t aOffset)
 }
 
 void
-BufferDecoder::NotifyDecodedFrames(uint32_t aParsed, uint32_t aDecoded)
+BufferDecoder::NotifyDecodedFrames(uint32_t aParsed, uint32_t aDecoded,
+                                   uint32_t aDropped)
 {
   // ignore
 }
@@ -140,13 +141,13 @@ BufferDecoder::IsMediaSeekable()
 }
 
 void
-BufferDecoder::MetadataLoaded(nsAutoPtr<MediaInfo> aInfo, nsAutoPtr<MetadataTags> aTags)
+BufferDecoder::MetadataLoaded(nsAutoPtr<MediaInfo> aInfo, nsAutoPtr<MetadataTags> aTags, MediaDecoderEventVisibility aEventVisibility)
 {
   // ignore
 }
 
 void
-BufferDecoder::FirstFrameLoaded(nsAutoPtr<MediaInfo> aInfo)
+BufferDecoder::FirstFrameLoaded(nsAutoPtr<MediaInfo> aInfo, MediaDecoderEventVisibility aEventVisibility)
 {
   // ignore
 }
@@ -165,12 +166,6 @@ BufferDecoder::RemoveMediaTracks()
 
 void
 BufferDecoder::SetMediaEndTime(int64_t aTime)
-{
-  // ignore
-}
-
-void
-BufferDecoder::UpdatePlaybackPosition(int64_t aTime)
 {
   // ignore
 }

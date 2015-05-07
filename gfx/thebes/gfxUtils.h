@@ -14,13 +14,12 @@
 #include "mozilla/RefPtr.h"
 #include "nsColor.h"
 #include "nsPrintfCString.h"
+#include "mozilla/gfx/Rect.h"
 
 class gfxASurface;
 class gfxDrawable;
 class nsIntRegion;
 class nsIPresShell;
-
-struct nsIntRect;
 
 namespace mozilla {
 namespace layers {
@@ -121,11 +120,11 @@ public:
                                       const IntPoint& aToBottomRight);
 
     /**
-     * If aIn can be represented exactly using an nsIntRect (i.e.
+     * If aIn can be represented exactly using an gfx::IntRect (i.e.
      * integer-aligned edges and coordinates in the int32_t range) then we
      * set aOut to that rectangle, otherwise return failure.
     */
-    static bool GfxRectToIntRect(const gfxRect& aIn, nsIntRect* aOut);
+    static bool GfxRectToIntRect(const gfxRect& aIn, mozilla::gfx::IntRect* aOut);
 
     /**
      * Return the smallest power of kScaleResolution (2) greater than or equal to
@@ -163,7 +162,7 @@ public:
      * Clears surface to aColor (which defaults to transparent black).
      */
     static void ClearThebesSurface(gfxASurface* aSurface,
-                                   nsIntRect* aRect = nullptr,
+                                   mozilla::gfx::IntRect* aRect = nullptr,
                                    const gfxRGBA& aColor = gfxRGBA(0.0, 0.0, 0.0, 0.0));
 
     /**
@@ -281,6 +280,9 @@ public:
     static inline void DumpAsDataURI(DrawTarget* aDT) {
         DumpAsDataURI(aDT, stdout);
     }
+    static nsCString GetAsDataURI(SourceSurface* aSourceSurface);
+    static nsCString GetAsDataURI(DrawTarget* aDT);
+    static nsCString GetAsLZ4Base64Str(DataSourceSurface* aSourceSurface);
 
     /**
      * Copy to the clipboard as a PNG encoded Data URL.
@@ -288,13 +290,11 @@ public:
     static void CopyAsDataURI(SourceSurface* aSourceSurface);
     static void CopyAsDataURI(DrawTarget* aDT);
 
-#ifdef MOZ_DUMP_PAINTING
-    static bool DumpPaintList();
+    static bool DumpDisplayList();
 
     static bool sDumpPainting;
     static bool sDumpPaintingToFile;
     static FILE* sDumpPaintFile;
-#endif
 };
 
 namespace mozilla {

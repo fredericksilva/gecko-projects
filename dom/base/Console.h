@@ -1,4 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -12,12 +13,12 @@
 #include "nsDataHashtable.h"
 #include "nsHashKeys.h"
 #include "nsIObserver.h"
-#include "nsITimer.h"
 #include "nsWrapperCache.h"
 #include "nsDOMNavigationTiming.h"
 #include "nsPIDOMWindow.h"
 
 class nsIConsoleAPIStorage;
+class nsIXPConnectJSObjectHolder;
 
 namespace mozilla {
 namespace dom {
@@ -25,17 +26,14 @@ namespace dom {
 class ConsoleCallData;
 struct ConsoleStackEntry;
 
-class Console MOZ_FINAL : public nsITimerCallback
-                        , public nsIObserver
-                        , public nsWrapperCache
+class Console final : public nsIObserver
+                    , public nsWrapperCache
 {
   ~Console();
 
 public:
   NS_DECL_CYCLE_COLLECTING_ISUPPORTS
-  NS_DECL_CYCLE_COLLECTION_SCRIPT_HOLDER_CLASS_AMBIGUOUS(Console,
-                                                         nsITimerCallback)
-  NS_DECL_NSITIMERCALLBACK
+  NS_DECL_CYCLE_COLLECTION_SCRIPT_HOLDER_CLASS(Console)
   NS_DECL_NSIOBSERVER
 
   explicit Console(nsPIDOMWindow* aWindow);
@@ -47,7 +45,7 @@ public:
   }
 
   virtual JSObject*
-  WrapObject(JSContext* aCx) MOZ_OVERRIDE;
+  WrapObject(JSContext* aCx, JS::Handle<JSObject*> aGivenProto) override;
 
   void
   Log(JSContext* aCx, const Sequence<JS::Value>& aData);
@@ -77,6 +75,9 @@ public:
   Dir(JSContext* aCx, const Sequence<JS::Value>& aData);
 
   void
+  Dirxml(JSContext* aCx, const Sequence<JS::Value>& aData);
+
+  void
   Group(JSContext* aCx, const Sequence<JS::Value>& aData);
 
   void
@@ -104,7 +105,7 @@ public:
   Count(JSContext* aCx, const Sequence<JS::Value>& aData);
 
   void
-  __noSuchMethod__();
+  NoopMethod();
 
 private:
   enum MethodName
@@ -118,6 +119,7 @@ private:
     MethodTable,
     MethodTrace,
     MethodDir,
+    MethodDirxml,
     MethodGroup,
     MethodGroupCollapsed,
     MethodGroupEnd,
@@ -130,9 +132,6 @@ private:
   void
   Method(JSContext* aCx, MethodName aName, const nsAString& aString,
          const Sequence<JS::Value>& aData);
-
-  void
-  AppendCallData(ConsoleCallData* aData);
 
   void
   ProcessCallData(ConsoleCallData* aData);
@@ -191,17 +190,16 @@ private:
   IncreaseCounter(JSContext* aCx, const ConsoleStackEntry& aFrame,
                    const nsTArray<JS::Heap<JS::Value>>& aArguments);
 
-  void
-  ClearConsoleData();
-
   bool
   ShouldIncludeStackTrace(MethodName aMethodName);
 
-  nsCOMPtr<nsPIDOMWindow> mWindow;
-  nsCOMPtr<nsITimer> mTimer;
-  nsCOMPtr<nsIConsoleAPIStorage> mStorage;
+  nsIXPConnectJSObjectHolder*
+  GetOrCreateSandbox(JSContext* aCx, nsIPrincipal* aPrincipal);
 
-  LinkedList<ConsoleCallData> mQueuedCalls;
+  nsCOMPtr<nsPIDOMWindow> mWindow;
+  nsCOMPtr<nsIConsoleAPIStorage> mStorage;
+  nsCOMPtr<nsIXPConnectJSObjectHolder> mSandbox;
+
   nsDataHashtable<nsStringHashKey, DOMHighResTimeStamp> mTimerRegistry;
   nsDataHashtable<nsStringHashKey, uint32_t> mCounterRegistry;
 
@@ -209,6 +207,7 @@ private:
   uint64_t mInnerID;
 
   friend class ConsoleCallData;
+  friend class ConsoleRunnable;
   friend class ConsoleCallDataRunnable;
   friend class ConsoleProfileRunnable;
 };

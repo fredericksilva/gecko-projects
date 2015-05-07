@@ -5,37 +5,39 @@
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "Sandbox.h"
+
+#include "LinuxCapabilities.h"
+#include "LinuxSched.h"
+#include "SandboxChroot.h"
+#include "SandboxFilter.h"
 #include "SandboxInternal.h"
 #include "SandboxLogging.h"
+#include "SandboxUtil.h"
 
-#include <unistd.h>
-#include <stdio.h>
-#include <sys/ptrace.h>
-#include <sys/prctl.h>
-#include <sys/syscall.h>
-#include <signal.h>
-#include <string.h>
-#include <linux/futex.h>
-#include <sys/time.h>
 #include <dirent.h>
-#include <stdlib.h>
-#include <pthread.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/futex.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/prctl.h>
+#include <sys/ptrace.h>
+#include <sys/syscall.h>
+#include <sys/time.h>
+#include <unistd.h>
 
 #include "mozilla/Atomics.h"
-#include "mozilla/NullPtr.h"
+#include "mozilla/SandboxInfo.h"
+#include "mozilla/UniquePtr.h"
 #include "mozilla/unused.h"
-
+#include "sandbox/linux/seccomp-bpf/linux_seccomp.h"
 #if defined(ANDROID)
-#include "android_ucontext.h"
+#include "sandbox/linux/services/android_ucontext.h"
 #endif
-
-#include "linux_seccomp.h"
-#include "SandboxFilter.h"
-
-// See definition of SandboxDie, below.
-#include "sandbox/linux/seccomp-bpf/die.h"
+#include "sandbox/linux/services/linux_syscalls.h"
 
 #ifdef MOZ_ASAN
 // Copy libsanitizer declarations to avoid depending on ASAN headers.
@@ -59,7 +61,9 @@ __sanitizer_sandbox_on_notify(__sanitizer_sandbox_arguments *args);
 
 namespace mozilla {
 
+#ifdef ANDROID
 SandboxCrashFunc gSandboxCrashFunc;
+#endif
 
 #ifdef MOZ_GMP_SANDBOX
 // For media plugins, we can start the sandbox before we dlopen the
@@ -69,48 +73,7 @@ static int gMediaPluginFileDesc = -1;
 static const char *gMediaPluginFilePath;
 #endif
 
-struct SandboxFlags {
-  bool isSupported;
-#ifdef MOZ_CONTENT_SANDBOX
-  bool isDisabledForContent;
-#endif
-#ifdef MOZ_GMP_SANDBOX
-  bool isDisabledForGMP;
-#endif
-
-  SandboxFlags() {
-    // Allow simulating the absence of seccomp-bpf support, for testing.
-    if (getenv("MOZ_FAKE_NO_SANDBOX")) {
-      isSupported = false;
-    } else {
-      // Determine whether seccomp-bpf is supported by trying to
-      // enable it with an invalid pointer for the filter.  This will
-      // fail with EFAULT if supported and EINVAL if not, without
-      // changing the process's state.
-      if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, nullptr) != -1) {
-        MOZ_CRASH("prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, nullptr)"
-                  " didn't fail");
-      }
-      isSupported = errno == EFAULT;
-    }
-#ifdef MOZ_CONTENT_SANDBOX
-    isDisabledForContent = getenv("MOZ_DISABLE_CONTENT_SANDBOX");
-#endif
-#ifdef MOZ_GMP_SANDBOX
-    isDisabledForGMP = getenv("MOZ_DISABLE_GMP_SANDBOX");
-#endif
-  }
-};
-
-static const SandboxFlags gSandboxFlags;
-
-SandboxFeatureFlags
-GetSandboxFeatureFlags()
-{
-  return gSandboxFlags.isSupported
-    ? kSandboxFeatureSeccompBPF
-    : static_cast<SandboxFeatureFlags>(0);
-}
+static UniquePtr<SandboxChroot> gChrootHelper;
 
 /**
  * This is the SIGSYS handler function. It is used to report to the user
@@ -319,7 +282,7 @@ BroadcastSetThreadSandbox(SandboxType aType)
   DIR *taskdp;
   struct dirent *de;
   SandboxFilter filter(&sSetSandboxFilter, aType,
-                       getenv("MOZ_SANDBOX_VERBOSE"));
+                       SandboxInfo::Get().Test(SandboxInfo::kVerbose));
 
   static_assert(sizeof(mozilla::Atomic<int>) == sizeof(int),
                 "mozilla::Atomic<int> isn't represented by an int");
@@ -330,6 +293,12 @@ BroadcastSetThreadSandbox(SandboxType aType)
     SANDBOX_LOG_ERROR("opendir /proc/self/task: %s\n", strerror(errno));
     MOZ_CRASH();
   }
+
+  if (gChrootHelper) {
+    gChrootHelper->Invoke();
+    gChrootHelper = nullptr;
+  }
+
   signum = FindFreeSignalNumber();
   if (signum == 0) {
     SANDBOX_LOG_ERROR("No available signal numbers!");
@@ -467,6 +436,86 @@ SetCurrentProcessSandbox(SandboxType aType)
   BroadcastSetThreadSandbox(aType);
 }
 
+void
+SandboxEarlyInit(GeckoProcessType aType, bool aIsNuwa)
+{
+  MOZ_RELEASE_ASSERT(IsSingleThreaded());
+
+  // Which kinds of resource isolation (of those that need to be set
+  // up at this point) can be used by this process?
+  bool canChroot = false;
+  bool canUnshareNet = false;
+  bool canUnshareIPC = false;
+
+  switch (aType) {
+  case GeckoProcessType_Default:
+    MOZ_ASSERT(false, "SandboxEarlyInit in parent process");
+    return;
+#ifdef MOZ_GMP_SANDBOX
+  case GeckoProcessType_GMPlugin:
+    canUnshareNet = true;
+    canUnshareIPC = true;
+    canChroot = true;
+    break;
+#endif
+    // In the future, content processes will be able to use some of
+    // these.
+  default:
+    // Other cases intentionally left blank.
+    break;
+  }
+
+  // If there's nothing to do, then we're done.
+  if (!canChroot && !canUnshareNet && !canUnshareIPC) {
+    return;
+  }
+
+  // If capabilities can't be gained, then nothing can be done.
+  const SandboxInfo info = SandboxInfo::Get();
+  if (!info.Test(SandboxInfo::kHasUserNamespaces)) {
+    return;
+  }
+
+  // The failure cases for the various unshares, and setting up the
+  // chroot helper, don't strictly need to be fatal -- but they also
+  // shouldn't fail on any reasonable system, so let's take the small
+  // risk of breakage over the small risk of quietly providing less
+  // security than we expect.  (Unlike in SandboxInfo, this is in the
+  // child process, so crashing here isn't as severe a response to the
+  // unexpected.)
+  if (!UnshareUserNamespace()) {
+    SANDBOX_LOG_ERROR("unshare(CLONE_NEWUSER): %s", strerror(errno));
+    // If CanCreateUserNamespace (SandboxInfo.cpp) returns true, then
+    // the unshare shouldn't have failed.
+    MOZ_CRASH("unshare(CLONE_NEWUSER)");
+  }
+  // No early returns after this point!  We need to drop the
+  // capabilities that were gained by unsharing the user namesapce.
+
+  if (canUnshareIPC && syscall(__NR_unshare, CLONE_NEWIPC) != 0) {
+    SANDBOX_LOG_ERROR("unshare(CLONE_NEWIPC): %s", strerror(errno));
+    MOZ_CRASH("unshare(CLONE_NEWIPC)");
+  }
+
+  if (canUnshareNet && syscall(__NR_unshare, CLONE_NEWNET) != 0) {
+    SANDBOX_LOG_ERROR("unshare(CLONE_NEWNET): %s", strerror(errno));
+    MOZ_CRASH("unshare(CLONE_NEWNET)");
+  }
+
+  if (canChroot) {
+    gChrootHelper = MakeUnique<SandboxChroot>();
+    if (!gChrootHelper->Prepare()) {
+      SANDBOX_LOG_ERROR("failed to set up chroot helper");
+      MOZ_CRASH("SandboxChroot::Prepare");
+    }
+  }
+
+  if (!LinuxCapabilities().SetCurrent()) {
+    SANDBOX_LOG_ERROR("dropping capabilities: %s", strerror(errno));
+    MOZ_CRASH("can't drop capabilities");
+  }
+}
+
 #ifdef MOZ_CONTENT_SANDBOX
 /**
  * Starts the seccomp sandbox for a content process.  Should be called
@@ -477,18 +526,11 @@ SetCurrentProcessSandbox(SandboxType aType)
 void
 SetContentProcessSandbox()
 {
-  if (gSandboxFlags.isDisabledForContent) {
+  if (!SandboxInfo::Get().Test(SandboxInfo::kEnabledForContent)) {
     return;
   }
 
   SetCurrentProcessSandbox(kSandboxContentProcess);
-}
-
-SandboxStatus
-ContentProcessSandboxStatus()
-{
-  return gSandboxFlags.isDisabledForContent ? kSandboxingDisabled :
-    gSandboxFlags.isSupported ? kSandboxingSupported : kSandboxingWouldFail;
 }
 #endif // MOZ_CONTENT_SANDBOX
 
@@ -507,7 +549,7 @@ ContentProcessSandboxStatus()
 void
 SetMediaPluginSandbox(const char *aFilePath)
 {
-  if (gSandboxFlags.isDisabledForGMP) {
+  if (!SandboxInfo::Get().Test(SandboxInfo::kEnabledForMedia)) {
     return;
   }
 
@@ -522,13 +564,6 @@ SetMediaPluginSandbox(const char *aFilePath)
   }
   // Finally, start the sandbox.
   SetCurrentProcessSandbox(kSandboxMediaPlugin);
-}
-
-SandboxStatus
-MediaPluginSandboxStatus()
-{
-  return gSandboxFlags.isDisabledForGMP ? kSandboxingDisabled :
-    gSandboxFlags.isSupported ? kSandboxingSupported : kSandboxingWouldFail;
 }
 #endif // MOZ_GMP_SANDBOX
 

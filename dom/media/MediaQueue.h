@@ -18,7 +18,7 @@ namespace mozilla {
 template <class T>
 class MediaQueueDeallocator : public nsDequeFunctor {
   virtual void* operator() (void* aObject) {
-    delete static_cast<T*>(aObject);
+    nsRefPtr<T> releaseMe = dont_AddRef(static_cast<T*>(aObject));
     return nullptr;
   }
 };
@@ -44,22 +44,24 @@ template <class T> class MediaQueue : private nsDeque {
   inline void Push(T* aItem) {
     ReentrantMonitorAutoEnter mon(mReentrantMonitor);
     MOZ_ASSERT(aItem);
+    NS_ADDREF(aItem);
     nsDeque::Push(aItem);
   }
 
   inline void PushFront(T* aItem) {
     ReentrantMonitorAutoEnter mon(mReentrantMonitor);
     MOZ_ASSERT(aItem);
+    NS_ADDREF(aItem);
     nsDeque::PushFront(aItem);
   }
 
-  inline T* PopFront() {
+  inline already_AddRefed<T> PopFront() {
     ReentrantMonitorAutoEnter mon(mReentrantMonitor);
-    T* rv = static_cast<T*>(nsDeque::PopFront());
+    nsRefPtr<T> rv = dont_AddRef(static_cast<T*>(nsDeque::PopFront()));
     if (rv) {
       NotifyPopListeners();
     }
-    return rv;
+    return rv.forget();
   }
 
   inline T* Peek() {
@@ -80,8 +82,7 @@ template <class T> class MediaQueue : private nsDeque {
   void Reset() {
     ReentrantMonitorAutoEnter mon(mReentrantMonitor);
     while (GetSize() > 0) {
-      T* x = PopFront();
-      delete x;
+      nsRefPtr<T> x = PopFront();
     }
     mEndOfStream = false;
   }
@@ -108,12 +109,12 @@ template <class T> class MediaQueue : private nsDeque {
   // Returns the approximate number of microseconds of items in the queue.
   int64_t Duration() {
     ReentrantMonitorAutoEnter mon(mReentrantMonitor);
-    if (GetSize() < 2) {
+    if (GetSize() == 0) {
       return 0;
     }
     T* last = Peek();
     T* first = PeekFront();
-    return last->mTime - first->mTime;
+    return last->GetEndTime() - first->mTime;
   }
 
   void LockedForEach(nsDequeFunctor& aFunctor) const {
@@ -123,7 +124,7 @@ template <class T> class MediaQueue : private nsDeque {
 
   // Extracts elements from the queue into aResult, in order.
   // Elements whose start time is before aTime are ignored.
-  void GetElementsAfter(int64_t aTime, nsTArray<T*>* aResult) {
+  void GetElementsAfter(int64_t aTime, nsTArray<nsRefPtr<T>>* aResult) {
     ReentrantMonitorAutoEnter mon(mReentrantMonitor);
     if (!GetSize())
       return;
@@ -136,7 +137,8 @@ template <class T> class MediaQueue : private nsDeque {
     // Elements less than i have a end time before aTime. It's also possible
     // that the element at i has a end time before aTime, but that's OK.
     for (; i < GetSize(); ++i) {
-      aResult->AppendElement(static_cast<T*>(ObjectAt(i)));
+      nsRefPtr<T> elem = static_cast<T*>(ObjectAt(i));
+      aResult->AppendElement(elem);
     }
   }
 
@@ -155,18 +157,18 @@ template <class T> class MediaQueue : private nsDeque {
     mPopListeners.Clear();
   }
 
-  void AddPopListener(nsIRunnable* aRunnable, MediaTaskQueue* aTaskQueue) {
+  void AddPopListener(nsIRunnable* aRunnable, MediaTaskQueue* aTarget) {
     ReentrantMonitorAutoEnter mon(mReentrantMonitor);
-    mPopListeners.AppendElement(Listener(aRunnable, aTaskQueue));
+    mPopListeners.AppendElement(Listener(aRunnable, aTarget));
   }
 
 private:
   mutable ReentrantMonitor mReentrantMonitor;
 
   struct Listener {
-    Listener(nsIRunnable* aRunnable, MediaTaskQueue* aTaskQueue)
+    Listener(nsIRunnable* aRunnable, MediaTaskQueue* aTarget)
       : mRunnable(aRunnable)
-      , mTarget(aTaskQueue)
+      , mTarget(aTarget)
     {
     }
     Listener(const Listener& aOther)
@@ -174,7 +176,7 @@ private:
       , mTarget(aOther.mTarget)
     {
     }
-    RefPtr<nsIRunnable> mRunnable;
+    nsCOMPtr<nsIRunnable> mRunnable;
     RefPtr<MediaTaskQueue> mTarget;
   };
 
@@ -183,7 +185,8 @@ private:
   void NotifyPopListeners() {
     for (uint32_t i = 0; i < mPopListeners.Length(); i++) {
       Listener& l = mPopListeners[i];
-      l.mTarget->Dispatch(l.mRunnable);
+      nsCOMPtr<nsIRunnable> r = l.mRunnable;
+      l.mTarget->Dispatch(r.forget());
     }
   }
 

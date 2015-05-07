@@ -28,6 +28,8 @@
 #include "nsHashKeys.h"
 #include "nsCCUncollectableMarker.h"
 #include "nsNameSpaceManager.h"
+#include "nsDocument.h"
+#include "nsNullPrincipal.h"
 
 using namespace mozilla;
 using mozilla::dom::NodeInfo;
@@ -153,11 +155,6 @@ NS_IMPL_CYCLE_COLLECTION_CLASS(nsNodeInfoManager)
 
 NS_IMPL_CYCLE_COLLECTION_UNLINK_0(nsNodeInfoManager)
 NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN(nsNodeInfoManager)
-  if (tmp->mDocument &&
-      nsCCUncollectableMarker::InGeneration(cb,
-                                            tmp->mDocument->GetMarkedCCGeneration())) {
-    return NS_SUCCESS_INTERRUPTED_TRAVERSE;
-  }
   if (tmp->mNonDocumentNodeInfos) {
     NS_IMPL_CYCLE_COLLECTION_TRAVERSE_RAWPTR(mDocument)
   }
@@ -167,6 +164,24 @@ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_END
 NS_IMPL_CYCLE_COLLECTION_ROOT_NATIVE(nsNodeInfoManager, AddRef)
 NS_IMPL_CYCLE_COLLECTION_UNROOT_NATIVE(nsNodeInfoManager, Release)
 
+NS_IMPL_CYCLE_COLLECTION_CAN_SKIP_BEGIN(nsNodeInfoManager)
+  if (tmp->mDocument) {
+    return NS_CYCLE_COLLECTION_PARTICIPANT(nsDocument)->CanSkip(tmp->mDocument, aRemovingAllowed);
+  }
+NS_IMPL_CYCLE_COLLECTION_CAN_SKIP_END
+
+NS_IMPL_CYCLE_COLLECTION_CAN_SKIP_IN_CC_BEGIN(nsNodeInfoManager)
+  if (tmp->mDocument) {
+    return NS_CYCLE_COLLECTION_PARTICIPANT(nsDocument)->CanSkipInCC(tmp->mDocument);
+  }
+NS_IMPL_CYCLE_COLLECTION_CAN_SKIP_IN_CC_END
+
+NS_IMPL_CYCLE_COLLECTION_CAN_SKIP_THIS_BEGIN(nsNodeInfoManager)
+  if (tmp->mDocument) {
+    return NS_CYCLE_COLLECTION_PARTICIPANT(nsDocument)->CanSkipThis(tmp->mDocument);
+  }
+NS_IMPL_CYCLE_COLLECTION_CAN_SKIP_THIS_END
+
 nsresult
 nsNodeInfoManager::Init(nsIDocument *aDocument)
 {
@@ -174,9 +189,9 @@ nsNodeInfoManager::Init(nsIDocument *aDocument)
 
   NS_PRECONDITION(!mPrincipal,
                   "Being inited when we already have a principal?");
-  nsresult rv;
-  mPrincipal = do_CreateInstance("@mozilla.org/nullprincipal;1", &rv);
-  NS_ENSURE_TRUE(mPrincipal, rv);
+
+  mPrincipal = nsNullPrincipal::Create();
+  NS_ENSURE_TRUE(mPrincipal, NS_ERROR_FAILURE);
 
   if (aDocument) {
     mBindingManager = new nsBindingManager(aDocument);

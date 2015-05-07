@@ -7,18 +7,26 @@
 EXPORTS += [
     'MP4Decoder.h',
     'MP4Reader.h',
+    'MP4Stream.h',
     'PlatformDecoderModule.h',
+    'SharedDecoderManager.h',
+    'wrappers/H264Converter.h'
 ]
 
 UNIFIED_SOURCES += [
     'BlankDecoderModule.cpp',
     'MP4Decoder.cpp',
+    'MP4Stream.cpp',
     'PlatformDecoderModule.cpp',
+    'SharedDecoderManager.cpp',
+    'wrappers/H264Converter.cpp'
 ]
 
 SOURCES += [
     'MP4Reader.cpp',
 ]
+
+DIRS += ['gmp']
 
 if CONFIG['MOZ_WMF']:
     DIRS += [ 'wmf' ];
@@ -51,7 +59,6 @@ if CONFIG['MOZ_APPLEMEDIA']:
       'apple/AppleATDecoder.cpp',
       'apple/AppleCMLinker.cpp',
       'apple/AppleDecoderModule.cpp',
-      'apple/AppleUtils.cpp',
       'apple/AppleVDADecoder.cpp',
       'apple/AppleVDALinker.cpp',
       'apple/AppleVTDecoder.cpp',

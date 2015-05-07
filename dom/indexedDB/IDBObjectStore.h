@@ -1,5 +1,5 @@
 /* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=2 et sw=2 tw=80: */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -27,26 +27,26 @@ class ErrorResult;
 namespace dom {
 
 class DOMStringList;
-class nsIContentParent;
 template <typename> class Sequence;
 
 namespace indexedDB {
 
-class FileManager;
-class IDBKeyRange;
+class IDBCursor;
 class IDBRequest;
 class IDBTransaction;
 class IndexUpdateInfo;
 class Key;
 class KeyPath;
 class ObjectStoreSpec;
-struct StructuredCloneFile;
 struct StructuredCloneReadInfo;
 
-class IDBObjectStore MOZ_FINAL
+class IDBObjectStore final
   : public nsISupports
   , public nsWrapperCache
 {
+  // For AddOrPut() and DeleteInternal().
+  friend class IDBCursor; 
+
   static const JSClass sDummyPropJSClass;
 
   nsRefPtr<IDBTransaction> mTransaction;
@@ -160,7 +160,7 @@ public:
   {
     AssertIsOnOwningThread();
 
-    return AddOrPut(aCx, aValue, aKey, false, aRv);
+    return AddOrPut(aCx, aValue, aKey, false, /* aFromCursor */ false, aRv);
   }
 
   already_AddRefed<IDBRequest>
@@ -171,11 +171,18 @@ public:
   {
     AssertIsOnOwningThread();
 
-    return AddOrPut(aCx, aValue, aKey, true, aRv);
+    return AddOrPut(aCx, aValue, aKey, true, /* aFromCursor */ false, aRv);
   }
 
   already_AddRefed<IDBRequest>
-  Delete(JSContext* aCx, JS::Handle<JS::Value> aKey, ErrorResult& aRv);
+  Delete(JSContext* aCx,
+         JS::Handle<JS::Value> aKey,
+         ErrorResult& aRv)
+  {
+    AssertIsOnOwningThread();
+
+    return DeleteInternal(aCx, aKey, /* aFromCursor */ false, aRv);
+  }
 
   already_AddRefed<IDBRequest>
   Get(JSContext* aCx, JS::Handle<JS::Value> aKey, ErrorResult& aRv);
@@ -184,15 +191,13 @@ public:
   Clear(ErrorResult& aRv);
 
   already_AddRefed<IDBIndex>
-  CreateIndex(JSContext* aCx,
-              const nsAString& aName,
+  CreateIndex(const nsAString& aName,
               const nsAString& aKeyPath,
               const IDBIndexParameters& aOptionalParameters,
               ErrorResult& aRv);
 
   already_AddRefed<IDBIndex>
-  CreateIndex(JSContext* aCx,
-              const nsAString& aName,
+  CreateIndex(const nsAString& aName,
               const Sequence<nsString>& aKeyPath,
               const IDBIndexParameters& aOptionalParameters,
               ErrorResult& aRv);
@@ -268,7 +273,7 @@ public:
 
   // nsWrapperCache
   virtual JSObject*
-  WrapObject(JSContext* aCx) MOZ_OVERRIDE;
+  WrapObject(JSContext* aCx, JS::Handle<JSObject*> aGivenProto) override;
 
 private:
   IDBObjectStore(IDBTransaction* aTransaction, const ObjectStoreSpec* aSpec);
@@ -288,7 +293,14 @@ private:
            JS::Handle<JS::Value> aValue,
            JS::Handle<JS::Value> aKey,
            bool aOverwrite,
+           bool aFromCursor,
            ErrorResult& aRv);
+
+  already_AddRefed<IDBRequest>
+  DeleteInternal(JSContext* aCx,
+                 JS::Handle<JS::Value> aKey,
+                 bool aFromCursor,
+                 ErrorResult& aRv);
 
   already_AddRefed<IDBRequest>
   GetAllInternal(bool aKeysOnly,
@@ -298,8 +310,7 @@ private:
                  ErrorResult& aRv);
 
   already_AddRefed<IDBIndex>
-  CreateIndexInternal(JSContext* aCx,
-                      const nsAString& aName,
+  CreateIndexInternal(const nsAString& aName,
                       const KeyPath& aKeyPath,
                       const IDBIndexParameters& aOptionalParameters,
                       ErrorResult& aRv);

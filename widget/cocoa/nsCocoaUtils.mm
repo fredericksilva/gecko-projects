@@ -396,7 +396,7 @@ nsresult nsCocoaUtils::CreateCGImageFromSurface(SourceSurface* aSurface,
   // Create a CGImageRef with the bits from the image, taking into account
   // the alpha ordering and endianness of the machine so we don't have to
   // touch the bits ourselves.
-  CGDataProviderRef dataProvider = ::CGDataProviderCreateWithData(dataSurface.forget().drop(),
+  CGDataProviderRef dataProvider = ::CGDataProviderCreateWithData(dataSurface.forget().take(),
                                                                   map.mData,
                                                                   map.mStride * height,
                                                                   data_ss_release_callback);
@@ -484,8 +484,7 @@ nsresult nsCocoaUtils::CreateNSImageFromImageContainer(imgIContainer *aImage, ui
                           ceil(height * scaleFactor));
 
     RefPtr<DrawTarget> drawTarget = gfxPlatform::GetPlatform()->
-      CreateOffscreenContentDrawTarget(ToIntSize(scaledSize),
-                                       SurfaceFormat::B8G8R8A8);
+      CreateOffscreenContentDrawTarget(scaledSize, SurfaceFormat::B8G8R8A8);
     if (!drawTarget) {
       NS_ERROR("Failed to create DrawTarget");
       return NS_ERROR_FAILURE;
@@ -604,16 +603,6 @@ void
 nsCocoaUtils::InitNPCocoaEvent(NPCocoaEvent* aNPCocoaEvent)
 {
   memset(aNPCocoaEvent, 0, sizeof(NPCocoaEvent));
-}
-
-// static
-void
-nsCocoaUtils::InitPluginEvent(WidgetPluginEvent &aPluginEvent,
-                              NPCocoaEvent &aCocoaEvent)
-{
-  aPluginEvent.time = PR_IntervalNow();
-  aPluginEvent.mPluginEvent.Copy(aCocoaEvent);
-  aPluginEvent.retargetToFocusedDocument = false;
 }
 
 // static

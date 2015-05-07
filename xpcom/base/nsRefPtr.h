@@ -7,7 +7,8 @@
 #ifndef nsRefPtr_h
 #define nsRefPtr_h
 
-#include "AlreadyAddRefed.h"
+#include "mozilla/AlreadyAddRefed.h"
+#include "mozilla/Attributes.h"
 #include "nsDebug.h"
 #include "nsISupportsUtils.h"
 
@@ -16,6 +17,12 @@
 // template <class T> class nsRefPtrGetterAddRefs;
 
 class nsCOMPtr_helper;
+
+namespace mozilla {
+namespace dom {
+template<class T> class OwningNonNull;
+} // namespace dom
+} // namespace mozilla
 
 template <class T>
 class nsRefPtr
@@ -48,7 +55,7 @@ private:
   }
 
 private:
-  T* mRawPtr;
+  T* MOZ_OWNING_REF mRawPtr;
 
 public:
   typedef T element_type;
@@ -107,7 +114,18 @@ public:
   {
   }
 
+  template <typename I>
+  nsRefPtr(nsRefPtr<I>&& aSmartPtr)
+    : mRawPtr(aSmartPtr.forget().take())
+    // construct from |Move(nsRefPtr<SomeSubclassOfT>)|.
+  {
+  }
+
   MOZ_IMPLICIT nsRefPtr(const nsCOMPtr_helper& aHelper);
+
+  // Defined in OwningNonNull.h
+  template<class U>
+  MOZ_IMPLICIT nsRefPtr(const mozilla::dom::OwningNonNull<U>& aOther);
 
   // Assignment operators
 
@@ -154,6 +172,11 @@ public:
     aRefPtr.mRawPtr = nullptr;
     return *this;
   }
+
+  // Defined in OwningNonNull.h
+  template<class U>
+  nsRefPtr<T>&
+  operator=(const mozilla::dom::OwningNonNull<U>& aOther);
 
   // Other pointer operators
 
@@ -222,7 +245,7 @@ public:
   }
 
   T*
-  operator->() const
+  operator->() const MOZ_NO_ADDREF_RELEASE_ON_RETURN
   {
     NS_PRECONDITION(mRawPtr != 0,
                     "You can't dereference a NULL nsRefPtr with operator->().");

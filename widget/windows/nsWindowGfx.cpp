@@ -7,10 +7,6 @@
  * nsWindowGfx - Painting and aceleration.
  */
 
-// XXX Future: this should really be a stand alone class stored as
-// a member of nsWindow with getters and setters for things like render
-// mode and methods for handling paint.
-
 /**************************************************************
  **************************************************************
  **
@@ -21,6 +17,7 @@
  **************************************************************
  **************************************************************/
 
+#include "mozilla/dom/ContentParent.h"
 #include "mozilla/plugins/PluginInstanceParent.h"
 using mozilla::plugins::PluginInstanceParent;
 
@@ -44,12 +41,6 @@ using mozilla::plugins::PluginInstanceParent;
 #include "nsDebug.h"
 #include "nsIXULRuntime.h"
 
-#ifdef MOZ_ENABLE_D3D9_LAYER
-#include "LayerManagerD3D9.h"
-#endif
-#ifdef MOZ_ENABLE_D3D10_LAYER
-#include "LayerManagerD3D10.h"
-#endif
 #include "mozilla/layers/CompositorParent.h"
 #include "ClientLayerManager.h"
 
@@ -65,6 +56,7 @@ using namespace mozilla;
 using namespace mozilla::gfx;
 using namespace mozilla::layers;
 using namespace mozilla::widget;
+using namespace mozilla::plugins;
 
 /**************************************************************
  **************************************************************
@@ -187,17 +179,17 @@ bool nsWindow::OnPaint(HDC aDC, uint32_t aNestingLevel)
   if (mozilla::ipc::MessageChannel::IsSpinLoopActive() && mPainting)
     return false;
 
+  if (gfxWindowsPlatform::GetPlatform()->DidRenderingDeviceReset()) {
+    gfxWindowsPlatform::GetPlatform()->UpdateRenderMode();
+    EnumAllWindows(ClearCompositor);
+    return false;
+  }
+
   // After we CallUpdateWindow to the child, occasionally a WM_PAINT message
   // is posted to the parent event loop with an empty update rect. Do a
   // dummy paint so that Windows stops dispatching WM_PAINT in an inifinite
   // loop. See bug 543788.
   if (IsPlugin()) {
-    // XXX Ignore for now when we're running with full blown e10s
-    if (mozilla::BrowserTabsRemoteAutostart()) {
-      printf_stderr("nsWindow::OnPaint() bailing on paint!\n");
-      ValidateRect(mWnd, nullptr);
-      return true;
-    }
     RECT updateRect;
     if (!GetUpdateRect(mWnd, &updateRect, FALSE) ||
         (updateRect.left == updateRect.right &&
@@ -205,6 +197,13 @@ bool nsWindow::OnPaint(HDC aDC, uint32_t aNestingLevel)
       PAINTSTRUCT ps;
       BeginPaint(mWnd, &ps);
       EndPaint(mWnd, &ps);
+      return true;
+    }
+
+    if (mWindowType == eWindowType_plugin_ipc_chrome) {
+      // Fire off an async request to the plugin to paint its window
+      mozilla::dom::ContentParent::SendAsyncUpdate(this);
+      ValidateRect(mWnd, nullptr);
       return true;
     }
 
@@ -379,7 +378,10 @@ bool nsWindow::OnPaint(HDC aDC, uint32_t aNestingLevel)
             gfxPlatform::GetPlatform()->CreateDrawTargetForSurface(targetSurface,
                                                                    IntSize(paintRect.right - paintRect.left,
                                                                    paintRect.bottom - paintRect.top));
-          nsRefPtr<gfxContext> thebesContext = new gfxContext(dt);
+          if (!dt) {
+            gfxWarning() << "nsWindow::OnPaint failed in CreateDrawTargetForSurface";
+            return false;
+          }
 
           // don't need to double buffer with anything but GDI
           BufferMode doubleBuffering = mozilla::layers::BufferMode::BUFFER_NONE;
@@ -396,15 +398,16 @@ bool nsWindow::OnPaint(HDC aDC, uint32_t aNestingLevel)
               case eTransparencyTransparent:
                 // If we're rendering with translucency, we're going to be
                 // rendering the whole window; make sure we clear it first
-                thebesContext->SetOperator(gfxContext::OPERATOR_CLEAR);
-                thebesContext->Paint();
-                thebesContext->SetOperator(gfxContext::OPERATOR_OVER);
+                dt->ClearRect(Rect(0.f, 0.f,
+                                   dt->GetSize().width, dt->GetSize().height));
                 break;
             }
 #else
             doubleBuffering = mozilla::layers::BufferMode::BUFFERED;
 #endif
           }
+
+          nsRefPtr<gfxContext> thebesContext = new gfxContext(dt);
 
           {
             AutoLayerManagerSetup
@@ -515,39 +518,7 @@ bool nsWindow::OnPaint(HDC aDC, uint32_t aNestingLevel)
           }
         }
         break;
-#ifdef MOZ_ENABLE_D3D9_LAYER
-      case LayersBackend::LAYERS_D3D9:
-        {
-          nsRefPtr<LayerManagerD3D9> layerManagerD3D9 =
-            static_cast<mozilla::layers::LayerManagerD3D9*>(GetLayerManager());
-          layerManagerD3D9->SetClippingRegion(region);
-          result = listener->PaintWindow(this, region);
-          if (layerManagerD3D9->DeviceWasRemoved()) {
-            mLayerManager->Destroy();
-            mLayerManager = nullptr;
-            // When our device was removed, we should have gfxWindowsPlatform
-            // check if its render mode is up to date!
-            gfxWindowsPlatform::GetPlatform()->UpdateRenderMode();
-            Invalidate();
-          }
-        }
-        break;
-#endif
-#ifdef MOZ_ENABLE_D3D10_LAYER
-      case LayersBackend::LAYERS_D3D10:
-        {
-          gfxWindowsPlatform::GetPlatform()->UpdateRenderMode();
-          LayerManagerD3D10 *layerManagerD3D10 = static_cast<mozilla::layers::LayerManagerD3D10*>(GetLayerManager());
-          if (layerManagerD3D10->device() != gfxWindowsPlatform::GetPlatform()->GetD3D10Device()) {
-            Invalidate();
-          } else {
-            result = listener->PaintWindow(this, region);
-          }
-        }
-        break;
-#endif
       case LayersBackend::LAYERS_CLIENT:
-        gfxWindowsPlatform::GetPlatform()->UpdateRenderMode();
         result = listener->PaintWindow(this, region);
         break;
       default:
@@ -649,6 +620,10 @@ nsresult nsWindowGfx::CreateIcon(imgIContainer *aContainer,
                                        dataSurface->GetSize(),
                                        map.mStride,
                                        SurfaceFormat::B8G8R8A8);
+    if (!dt) {
+      gfxWarning() << "nsWindowGfx::CreatesIcon failed in CreateDrawTargetForData";
+      return NS_ERROR_OUT_OF_MEMORY;
+    }
     dt->DrawSurface(surface,
                     Rect(0, 0, iconSize.width, iconSize.height),
                     Rect(0, 0, frameSize.width, frameSize.height),

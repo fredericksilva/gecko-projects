@@ -21,7 +21,6 @@
 #include <stagefright/foundation/AMessage.h>
 #include <stagefright/foundation/AString.h>
 #include <stagefright/foundation/ALooper.h>
-#include "mp4_demuxer/AnnexB.h"
 #include "GonkNativeWindow.h"
 #include "GonkNativeWindowClient.h"
 #include "mozilla/layers/GrallocTextureClient.h"
@@ -29,9 +28,8 @@
 
 #define READ_OUTPUT_BUFFER_TIMEOUT_US  3000
 
-#define LOG_TAG "GonkVideoDecoderManager"
 #include <android/log.h>
-#define ALOG(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
+#define GVDM_LOG(...) __android_log_print(ANDROID_LOG_DEBUG, "GonkVideoDecoderManager", __VA_ARGS__)
 
 #ifdef PR_LOGGING
 PRLogModuleInfo* GetDemuxerLog();
@@ -44,32 +42,27 @@ using namespace android;
 typedef android::MediaCodecProxy MediaCodecProxy;
 
 namespace mozilla {
-enum {
-  kNotifyCodecReserved = 'core',
-  kNotifyCodecCanceled = 'coca',
-};
 
 GonkVideoDecoderManager::GonkVideoDecoderManager(
-                           mozilla::layers::ImageContainer* aImageContainer,
-		           const mp4_demuxer::VideoDecoderConfig& aConfig)
+  mozilla::layers::ImageContainer* aImageContainer,
+  const VideoInfo& aConfig)
   : mImageContainer(aImageContainer)
-  , mConfig(aConfig)
   , mReaderCallback(nullptr)
+  , mLastDecodedTime(0)
   , mColorConverterBufferSize(0)
   , mNativeWindow(nullptr)
   , mPendingVideoBuffersLock("GonkVideoDecoderManager::mPendingVideoBuffersLock")
+  , mMonitor("GonkVideoDecoderManager")
 {
-  NS_ASSERTION(!NS_IsMainThread(), "Should not be on main thread.");
-  MOZ_ASSERT(mImageContainer);
   MOZ_COUNT_CTOR(GonkVideoDecoderManager);
-  mVideoWidth  = aConfig.display_width;
-  mVideoHeight = aConfig.display_height;
-  mDisplayWidth = aConfig.display_width;
-  mDisplayHeight = aConfig.display_height;
-  mInfo.mVideo.mHasVideo = true;
-  nsIntSize displaySize(mDisplayWidth, mDisplayHeight);
-  mInfo.mVideo.mDisplay = displaySize;
+  mMimeType = aConfig.mMimeType;
+  mVideoWidth  = aConfig.mDisplay.width;
+  mVideoHeight = aConfig.mDisplay.height;
+  mDisplayWidth = aConfig.mDisplay.width;
+  mDisplayHeight = aConfig.mDisplay.height;
+  mInfo.mVideo = aConfig;
 
+  mCodecSpecificData = aConfig.mCodecSpecificConfig;
   nsIntRect pictureRect(0, 0, mVideoWidth, mVideoHeight);
   nsIntSize frameSize(mVideoWidth, mVideoHeight);
   mPicture = pictureRect;
@@ -93,7 +86,7 @@ GonkVideoDecoderManager::Init(MediaDataDecoderCallback* aCallback)
   // that our video frame creation code doesn't overflow.
   nsIntSize frameSize(mVideoWidth, mVideoHeight);
   if (!IsValidVideoRegion(frameSize, pictureRect, displaySize)) {
-    ALOG("It is not a valid region");
+    GVDM_LOG("It is not a valid region");
     return nullptr;
   }
 
@@ -112,7 +105,8 @@ GonkVideoDecoderManager::Init(MediaDataDecoderCallback* aCallback)
   if (mLooper->start() != OK || mManagerLooper->start() != OK ) {
     return nullptr;
   }
-  mDecoder = MediaCodecProxy::CreateByType(mLooper, "video/avc", false, true, mVideoListener);
+  mDecoder = MediaCodecProxy::CreateByType(mLooper, mMimeType.get(), false, mVideoListener);
+  mDecoder->AskMediaCodecAndWait();
   uint32_t capability = MediaCodecProxy::kEmptyCapability;
   if (mDecoder->getCapability(&capability) == OK && (capability &
       MediaCodecProxy::kCanExposeGraphicBuffer)) {
@@ -123,21 +117,75 @@ GonkVideoDecoderManager::Init(MediaDataDecoderCallback* aCallback)
 }
 
 nsresult
+GonkVideoDecoderManager::Input(MediaRawData* aSample)
+{
+  MonitorAutoLock mon(mMonitor);
+  nsRefPtr<MediaRawData> sample;
+
+  if (!aSample) {
+    // It means EOS with empty sample.
+    sample = new MediaRawData();
+  } else {
+    sample = aSample;
+  }
+
+  mQueueSample.AppendElement(sample);
+
+  status_t rv;
+  while (mQueueSample.Length()) {
+    nsRefPtr<MediaRawData> data = mQueueSample.ElementAt(0);
+    {
+      MonitorAutoUnlock mon_unlock(mMonitor);
+      rv = mDecoder->Input(reinterpret_cast<const uint8_t*>(data->mData),
+                           data->mSize,
+                           data->mTime,
+                           0);
+    }
+    if (rv == OK) {
+      mQueueSample.RemoveElementAt(0);
+    } else if (rv == -EAGAIN || rv == -ETIMEDOUT) {
+      // In most cases, EAGAIN or ETIMEOUT are safe because OMX can't fill
+      // buffer on time.
+      return NS_OK;
+    } else {
+      return NS_ERROR_UNEXPECTED;
+    }
+  }
+
+  return NS_OK;
+}
+
+bool
+GonkVideoDecoderManager::HasQueuedSample()
+{
+    MonitorAutoLock mon(mMonitor);
+    return mQueueSample.Length();
+}
+
+nsresult
 GonkVideoDecoderManager::CreateVideoData(int64_t aStreamOffset, VideoData **v)
 {
   *v = nullptr;
+  nsRefPtr<VideoData> data;
   int64_t timeUs;
   int32_t keyFrame;
 
   if (mVideoBuffer == nullptr) {
-    ALOG("Video Buffer is not valid!");
+    GVDM_LOG("Video Buffer is not valid!");
     return NS_ERROR_UNEXPECTED;
   }
 
   if (!mVideoBuffer->meta_data()->findInt64(kKeyTime, &timeUs)) {
-    ALOG("Decoder did not return frame time");
+    GVDM_LOG("Decoder did not return frame time");
     return NS_ERROR_UNEXPECTED;
   }
+
+  if (mLastDecodedTime > timeUs) {
+    ReleaseVideoBuffer();
+    GVDM_LOG("Output decoded sample time is revert. time=%lld", timeUs);
+    return NS_ERROR_NOT_AVAILABLE;
+  }
+  mLastDecodedTime = timeUs;
 
   if (mVideoBuffer->range_length() == 0) {
     // Some decoders may return spurious empty buffers that we just want to ignore
@@ -150,7 +198,7 @@ GonkVideoDecoderManager::CreateVideoData(int64_t aStreamOffset, VideoData **v)
     keyFrame = 0;
   }
 
-  gfx::IntRect picture = ToIntRect(mPicture);
+  gfx::IntRect picture = mPicture;
   if (mFrameInfo.mWidth != mInitialFrame.width ||
       mFrameInfo.mHeight != mInitialFrame.height) {
 
@@ -174,19 +222,19 @@ GonkVideoDecoderManager::CreateVideoData(int64_t aStreamOffset, VideoData **v)
     grallocClient->SetMediaBuffer(mVideoBuffer);
     textureClient->SetRecycleCallback(GonkVideoDecoderManager::RecycleCallback, this);
 
-    *v = VideoData::Create(mInfo.mVideo,
-                          mImageContainer,
-                          aStreamOffset,
-                          timeUs,
-                          1, // We don't know the duration.
-                          textureClient,
-                          keyFrame,
-                          -1,
-                          picture);
-
+    data = VideoData::Create(mInfo.mVideo,
+                             mImageContainer,
+                             aStreamOffset,
+                             timeUs,
+                             1, // No way to pass sample duration from muxer to
+                                // OMX codec, so we hardcode the duration here.
+                             textureClient,
+                             keyFrame,
+                             -1,
+                             picture);
   } else {
     if (!mVideoBuffer->data()) {
-      ALOG("No data in Video Buffer!");
+      GVDM_LOG("No data in Video Buffer!");
       return NS_ERROR_UNEXPECTED;
     }
     uint8_t *yuv420p_buffer = (uint8_t *)mVideoBuffer->data();
@@ -204,7 +252,7 @@ GonkVideoDecoderManager::CreateVideoData(int64_t aStreamOffset, VideoData **v)
       if (mColorConverter.convertDecoderOutputToI420(mVideoBuffer->data(),
           mFrameInfo.mWidth, mFrameInfo.mHeight, crop, yuv420p_buffer) != OK) {
           ReleaseVideoBuffer();
-          ALOG("Color conversion failed!");
+          GVDM_LOG("Color conversion failed!");
           return NS_ERROR_UNEXPECTED;
       }
         stride = mFrameInfo.mWidth;
@@ -242,7 +290,7 @@ GonkVideoDecoderManager::CreateVideoData(int64_t aStreamOffset, VideoData **v)
     b.mPlanes[2].mOffset = 0;
     b.mPlanes[2].mSkip = 0;
 
-    *v = VideoData::Create(
+    data = VideoData::Create(
         mInfo.mVideo,
         mImageContainer,
         pos,
@@ -254,6 +302,8 @@ GonkVideoDecoderManager::CreateVideoData(int64_t aStreamOffset, VideoData **v)
         picture);
     ReleaseVideoBuffer();
   }
+
+  data.forget(v);
   return NS_OK;
 }
 
@@ -280,7 +330,7 @@ GonkVideoDecoderManager::SetVideoFormat()
         !codecFormat->findInt32("slice-height", &slice_height) ||
         !codecFormat->findInt32("color-format", &color_format) ||
         !codecFormat->findRect("crop", &crop_left, &crop_top, &crop_right, &crop_bottom)) {
-      ALOG("Failed to find values");
+      GVDM_LOG("Failed to find values");
       return false;
     }
     mFrameInfo.mWidth = width;
@@ -291,24 +341,41 @@ GonkVideoDecoderManager::SetVideoFormat()
 
     nsIntSize displaySize(width, height);
     if (!IsValidVideoRegion(mInitialFrame, mPicture, displaySize)) {
-      ALOG("It is not a valid region");
+      GVDM_LOG("It is not a valid region");
       return false;
     }
     return true;
   }
-  ALOG("Fail to get output format");
+  GVDM_LOG("Fail to get output format");
   return false;
+}
+
+nsresult
+GonkVideoDecoderManager::Flush()
+{
+  {
+    MonitorAutoLock mon(mMonitor);
+    mQueueSample.Clear();
+  }
+
+ mLastDecodedTime = 0;
+
+  if (mDecoder->flush() != OK) {
+    return NS_ERROR_FAILURE;
+  }
+
+  return NS_OK;
 }
 
 // Blocks until decoded sample is produced by the deoder.
 nsresult
 GonkVideoDecoderManager::Output(int64_t aStreamOffset,
-                                nsAutoPtr<MediaData>& aOutData)
+                                nsRefPtr<MediaData>& aOutData)
 {
   aOutData = nullptr;
   status_t err;
   if (mDecoder == nullptr) {
-    ALOG("Decoder is not inited");
+    GVDM_LOG("Decoder is not inited");
     return NS_ERROR_UNEXPECTED;
   }
   err = mDecoder->Output(&mVideoBuffer, READ_OUTPUT_BUFFER_TIMEOUT_US);
@@ -316,13 +383,13 @@ GonkVideoDecoderManager::Output(int64_t aStreamOffset,
   switch (err) {
     case OK:
     {
-      VideoData* data = nullptr;
-      nsresult rv = CreateVideoData(aStreamOffset, &data);
+      nsRefPtr<VideoData> data;
+      nsresult rv = CreateVideoData(aStreamOffset, getter_AddRefs(data));
       if (rv == NS_ERROR_NOT_AVAILABLE) {
-	// Decoder outputs a empty video buffer, try again
+        // Decoder outputs a empty video buffer, try again
         return NS_ERROR_NOT_AVAILABLE;
       } else if (rv != NS_OK || data == nullptr) {
-        ALOG("Failed to create VideoData");
+        GVDM_LOG("Failed to create VideoData");
         return NS_ERROR_UNEXPECTED;
       }
       aOutData = data;
@@ -331,7 +398,7 @@ GonkVideoDecoderManager::Output(int64_t aStreamOffset,
     case android::INFO_FORMAT_CHANGED:
     {
       // If the format changed, update our cached info.
-      ALOG("Decoder format changed");
+      GVDM_LOG("Decoder format changed");
       if (!SetVideoFormat()) {
         return NS_ERROR_UNEXPECTED;
       }
@@ -342,23 +409,25 @@ GonkVideoDecoderManager::Output(int64_t aStreamOffset,
       if (mDecoder->UpdateOutputBuffers()) {
         return Output(aStreamOffset, aOutData);
       }
+      GVDM_LOG("Fails to update output buffers!");
       return NS_ERROR_FAILURE;
     }
     case -EAGAIN:
     {
+//      GVDM_LOG("Need to try again!");
       return NS_ERROR_NOT_AVAILABLE;
     }
     case android::ERROR_END_OF_STREAM:
     {
-      ALOG("Got the EOS frame!");
-      VideoData* data = nullptr;
-      nsresult rv = CreateVideoData(aStreamOffset, &data);
+      GVDM_LOG("Got the EOS frame!");
+      nsRefPtr<VideoData> data;
+      nsresult rv = CreateVideoData(aStreamOffset, getter_AddRefs(data));
       if (rv == NS_ERROR_NOT_AVAILABLE) {
-	// For EOS, no need to do any thing.
+        // For EOS, no need to do any thing.
         return NS_ERROR_ABORT;
       }
       if (rv != NS_OK || data == nullptr) {
-        ALOG("Failed to create video data");
+        GVDM_LOG("Failed to create video data");
         return NS_ERROR_UNEXPECTED;
       }
       aOutData = data;
@@ -366,12 +435,12 @@ GonkVideoDecoderManager::Output(int64_t aStreamOffset,
     }
     case -ETIMEDOUT:
     {
-      ALOG("Timeout. can try again next time");
+      GVDM_LOG("Timeout. can try again next time");
       return NS_ERROR_UNEXPECTED;
     }
     default:
     {
-      ALOG("Decoder failed, err=%d", err);
+      GVDM_LOG("Decoder failed, err=%d", err);
       return NS_ERROR_UNEXPECTED;
     }
   }
@@ -386,50 +455,33 @@ void GonkVideoDecoderManager::ReleaseVideoBuffer() {
   }
 }
 
-nsresult
-GonkVideoDecoderManager::Input(mp4_demuxer::MP4Sample* aSample)
-{
-  if (mDecoder == nullptr) {
-    ALOG("Decoder is not inited");
-    return NS_ERROR_UNEXPECTED;
-  }
-  status_t rv;
-  if (aSample != nullptr) {
-    // We must prepare samples in AVC Annex B.
-    mp4_demuxer::AnnexB::ConvertSample(aSample, mConfig.annex_b);
-    // Forward sample data to the decoder.
-
-    const uint8_t* data = reinterpret_cast<const uint8_t*>(aSample->data);
-    uint32_t length = aSample->size;
-    rv = mDecoder->Input(data, length, aSample->composition_timestamp, 0);
-  }
-  else {
-    // Inputted data is null, so it is going to notify decoder EOS
-    rv = mDecoder->Input(nullptr, 0, 0ll, 0);
-  }
-  return (rv == OK) ? NS_OK : NS_ERROR_FAILURE;
-}
-
 void
 GonkVideoDecoderManager::codecReserved()
 {
+  GVDM_LOG("codecReserved");
   sp<AMessage> format = new AMessage;
   sp<Surface> surface;
-
+  status_t rv = OK;
   // Fixed values
-  format->setString("mime", "video/avc");
+  GVDM_LOG("Configure video mime type: %s, widht:%d, height:%d", mMimeType.get(), mVideoWidth, mVideoHeight);
+  format->setString("mime", mMimeType.get());
   format->setInt32("width", mVideoWidth);
   format->setInt32("height", mVideoHeight);
   if (mNativeWindow != nullptr) {
     surface = new Surface(mNativeWindow->getBufferQueue());
   }
-  status_t err = mDecoder->configure(format, surface, nullptr, 0);
+  mDecoder->configure(format, surface, nullptr, 0);
   mDecoder->Prepare();
 
-  if (mHandler != nullptr) {
-    // post kNotifyCodecReserved to Looper thread.
-    sp<AMessage> notify = new AMessage(kNotifyCodecReserved, mHandler->id());
-    notify->post();
+  if (mMimeType.EqualsLiteral("video/mp4v-es")) {
+    rv = mDecoder->Input(mCodecSpecificData->Elements(),
+                         mCodecSpecificData->Length(), 0,
+                         android::MediaCodec::BUFFER_FLAG_CODECCONFIG);
+  }
+
+  if (rv != OK) {
+    GVDM_LOG("Failed to configure codec!!!!");
+    mReaderCallback->Error();
   }
 }
 
@@ -437,12 +489,6 @@ void
 GonkVideoDecoderManager::codecCanceled()
 {
   mDecoder = nullptr;
-  if (mHandler != nullptr) {
-    // post kNotifyCodecCanceled to Looper thread.
-    sp<AMessage> notify = new AMessage(kNotifyCodecCanceled, mHandler->id());
-    notify->post();
-  }
-
 }
 
 // Called on GonkVideoDecoderManager::mManagerLooper thread.
@@ -450,23 +496,9 @@ void
 GonkVideoDecoderManager::onMessageReceived(const sp<AMessage> &aMessage)
 {
   switch (aMessage->what()) {
-    case kNotifyCodecReserved:
-    {
-      // Our decode may have acquired the hardware resource that it needs
-      // to start. Notify the state machine to resume loading metadata.
-      mReaderCallback->NotifyResourcesStatusChanged();
-      break;
-    }
-
-    case kNotifyCodecCanceled:
-    {
-      mReaderCallback->ReleaseMediaResources();
-      break;
-    }
-
     case kNotifyPostReleaseBuffer:
     {
-      ReleaseAllPendingVideoBuffersLocked();
+      ReleaseAllPendingVideoBuffers();
       break;
     }
 
@@ -561,7 +593,7 @@ void GonkVideoDecoderManager::PostReleaseVideoBuffer(
 
 }
 
-void GonkVideoDecoderManager::ReleaseAllPendingVideoBuffersLocked()
+void GonkVideoDecoderManager::ReleaseAllPendingVideoBuffers()
 {
   Vector<android::MediaBuffer*> releasingVideoBuffers;
   {

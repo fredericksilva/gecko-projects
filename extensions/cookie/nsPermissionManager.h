@@ -28,9 +28,9 @@ class mozIStorageAsyncStatement;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-class nsPermissionManager MOZ_FINAL : public nsIPermissionManager,
-                                      public nsIObserver,
-                                      public nsSupportsWeakReference
+class nsPermissionManager final : public nsIPermissionManager,
+                                  public nsIObserver,
+                                  public nsSupportsWeakReference
 {
 public:
   class PermissionEntry
@@ -103,7 +103,7 @@ public:
 
   private:
     // Default ctor shouldn't be used.
-    PermissionKey() MOZ_DELETE;
+    PermissionKey() = delete;
 
     // Dtor shouldn't be used outside of the class.
     ~PermissionKey() {};
@@ -283,7 +283,7 @@ private:
     bool                      browserOnly;
     nsCOMArray<nsIPermission> permissions;
 
-    GetPermissionsForAppStruct() MOZ_DELETE;
+    GetPermissionsForAppStruct() = delete;
     GetPermissionsForAppStruct(uint32_t aAppId, bool aBrowserOnly)
       : appId(aAppId)
       , browserOnly(aBrowserOnly)
@@ -311,6 +311,12 @@ private:
    */
   nsresult
   RemoveAllModifiedSince(int64_t aModificationTime);
+
+  /**
+   * Retrieve permissions from chrome process.
+   */
+  nsresult
+  FetchPermissions();
 
   nsCOMPtr<nsIObserverService> mObserverService;
   nsCOMPtr<nsIIDNService>      mIDNService;

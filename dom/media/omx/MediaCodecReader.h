@@ -22,6 +22,10 @@
 #include "I420ColorConverterHelper.h"
 #include "MediaCodecProxy.h"
 #include "MediaOmxCommonReader.h"
+#include "mozilla/layers/FenceUtils.h"
+#if MOZ_WIDGET_GONK && ANDROID_VERSION >= 17
+#include <ui/Fence.h>
+#endif
 
 namespace android {
 struct ALooper;
@@ -37,7 +41,7 @@ class GonkNativeWindow;
 
 namespace mozilla {
 
-class MediaTaskQueue;
+class FlushableMediaTaskQueue;
 class MP3FrameParser;
 
 namespace layers {
@@ -47,6 +51,7 @@ class TextureClient;
 class MediaCodecReader : public MediaOmxCommonReader
 {
   typedef mozilla::layers::TextureClient TextureClient;
+  typedef mozilla::layers::FenceHandle FenceHandle;
 
 public:
   MediaCodecReader(AbstractMediaDecoder* aDecoder);
@@ -60,7 +65,7 @@ public:
   virtual bool IsWaitingMediaResources();
 
   // True when this reader need to become dormant state
-  virtual bool IsDormantNeeded();
+  virtual bool IsDormantNeeded() { return true;}
 
   // Release media resources they should be released in dormant state
   virtual void ReleaseMediaResources();
@@ -68,7 +73,7 @@ public:
   // Destroys the decoding state. The reader cannot be made usable again.
   // This is different from ReleaseMediaResources() as Shutdown() is
   // irreversible, whereas ReleaseMediaResources() is reversible.
-  virtual void Shutdown();
+  virtual nsRefPtr<ShutdownPromise> Shutdown();
 
   // Used to retrieve some special information that can only be retrieved after
   // all contents have been continuously parsed. (ex. total duration of some
@@ -76,19 +81,20 @@ public:
   virtual void NotifyDataArrived(const char* aBuffer, uint32_t aLength, int64_t aOffset);
 
   // Flush the MediaTaskQueue, flush MediaCodec and raise the mDiscontinuity.
-  virtual nsresult ResetDecode() MOZ_OVERRIDE;
+  virtual nsresult ResetDecode() override;
 
   // Disptach a DecodeVideoFrameTask to decode video data.
-  virtual void RequestVideoData(bool aSkipToNextKeyframe,
-                                int64_t aTimeThreshold) MOZ_OVERRIDE;
+  virtual nsRefPtr<VideoDataPromise>
+  RequestVideoData(bool aSkipToNextKeyframe,
+                   int64_t aTimeThreshold) override;
 
   // Disptach a DecodeAduioDataTask to decode video data.
-  virtual void RequestAudioData() MOZ_OVERRIDE;
+  virtual nsRefPtr<AudioDataPromise> RequestAudioData() override;
 
   virtual bool HasAudio();
   virtual bool HasVideo();
 
-  virtual void PreReadMetadata() MOZ_OVERRIDE;
+  virtual void PreReadMetadata() override;
   // Read header data for all bitstreams in the file. Fills aInfo with
   // the data required to present the media, and optionally fills *aTags
   // with tag metadata from the file.
@@ -99,14 +105,14 @@ public:
   // Moves the decode head to aTime microseconds. aStartTime and aEndTime
   // denote the start and end times of the media in usecs, and aCurrentTime
   // is the current playback position in microseconds.
-  virtual void Seek(int64_t aTime,
-                    int64_t aStartTime,
-                    int64_t aEndTime,
-                    int64_t aCurrentTime);
+  virtual nsRefPtr<SeekPromise>
+  Seek(int64_t aTime, int64_t aEndTime) override;
 
-  virtual bool IsMediaSeekable() MOZ_OVERRIDE;
+  virtual bool IsMediaSeekable() override;
 
   virtual android::sp<android::MediaSource> GetAudioOffloadTrack();
+
+  virtual bool IsAsync() const override { return true; }
 
 protected:
   struct TrackInputCopier
@@ -137,13 +143,15 @@ protected:
     android::Vector<android::sp<android::ABuffer> > mInputBuffers;
     android::Vector<android::sp<android::ABuffer> > mOutputBuffers;
     android::sp<android::GonkNativeWindow> mNativeWindow;
+#if ANDROID_VERSION >= 21
+    android::sp<android::IGraphicBufferProducer> mGraphicBufferProducer;
+#endif
 
     // pipeline copier
     nsAutoPtr<TrackInputCopier> mInputCopier;
 
-    // media parameters
-    Mutex mDurationLock; // mDurationUs might be read or updated from multiple
-                         // threads.
+    // Protected by mTrackMonitor.
+    // mDurationUs might be read or updated from multiple threads.
     int64_t mDurationUs;
 
     // playback parameters
@@ -156,12 +164,13 @@ protected:
     int64_t mSeekTimeUs;
     bool mFlushed; // meaningless when mSeekTimeUs is invalid.
     bool mDiscontinuity;
-    nsRefPtr<MediaTaskQueue> mTaskQueue;
+    nsRefPtr<FlushableMediaTaskQueue> mTaskQueue;
+    Monitor mTrackMonitor;
 
   private:
     // Forbidden
-    Track(const Track &rhs) MOZ_DELETE;
-    const Track &operator=(const Track&) MOZ_DELETE;
+    Track(const Track &rhs) = delete;
+    const Track &operator=(const Track&) = delete;
   };
 
   // Receive a message from MessageHandler.
@@ -170,8 +179,8 @@ protected:
 
   // Receive a notify from ResourceListener.
   // Called on Binder thread.
-  virtual void codecReserved(Track& aTrack);
-  virtual void codecCanceled(Track& aTrack);
+  virtual void VideoCodecReserved();
+  virtual void VideoCodecCanceled();
 
   virtual bool CreateExtractor();
 
@@ -185,25 +194,6 @@ protected:
   bool mIsWaitingResources;
 
 private:
-  // An intermediary class that can be managed by android::sp<T>.
-  // Redirect onMessageReceived() to MediaCodecReader.
-  class MessageHandler : public android::AHandler
-  {
-  public:
-    MessageHandler(MediaCodecReader* aReader);
-    ~MessageHandler();
-
-    virtual void onMessageReceived(const android::sp<android::AMessage>& aMessage);
-
-  private:
-    // Forbidden
-    MessageHandler() MOZ_DELETE;
-    MessageHandler(const MessageHandler& rhs) MOZ_DELETE;
-    const MessageHandler& operator=(const MessageHandler& rhs) MOZ_DELETE;
-
-    MediaCodecReader *mReader;
-  };
-  friend class MessageHandler;
 
   // An intermediary class that can be managed by android::sp<T>.
   // Redirect codecReserved() and codecCanceled() to MediaCodecReader.
@@ -218,9 +208,9 @@ private:
 
   private:
     // Forbidden
-    VideoResourceListener() MOZ_DELETE;
-    VideoResourceListener(const VideoResourceListener& rhs) MOZ_DELETE;
-    const VideoResourceListener& operator=(const VideoResourceListener& rhs) MOZ_DELETE;
+    VideoResourceListener() = delete;
+    VideoResourceListener(const VideoResourceListener& rhs) = delete;
+    const VideoResourceListener& operator=(const VideoResourceListener& rhs) = delete;
 
     MediaCodecReader* mReader;
   };
@@ -235,11 +225,13 @@ private:
   struct AudioTrack : public Track
   {
     AudioTrack();
+    // Protected by mTrackMonitor.
+    MediaPromiseHolder<AudioDataPromise> mAudioPromise;
 
   private:
     // Forbidden
-    AudioTrack(const AudioTrack &rhs) MOZ_DELETE;
-    const AudioTrack &operator=(const AudioTrack &rhs) MOZ_DELETE;
+    AudioTrack(const AudioTrack &rhs) = delete;
+    const AudioTrack &operator=(const AudioTrack &rhs) = delete;
   };
 
   struct VideoTrack : public Track
@@ -255,11 +247,14 @@ private:
     nsIntSize mFrameSize;
     nsIntRect mPictureRect;
     gfx::IntRect mRelativePictureRect;
+    // Protected by mTrackMonitor.
+    MediaPromiseHolder<VideoDataPromise> mVideoPromise;
 
+    nsRefPtr<MediaTaskQueue> mReleaseBufferTaskQueue;
   private:
     // Forbidden
-    VideoTrack(const VideoTrack &rhs) MOZ_DELETE;
-    const VideoTrack &operator=(const VideoTrack &rhs) MOZ_DELETE;
+    VideoTrack(const VideoTrack &rhs) = delete;
+    const VideoTrack &operator=(const VideoTrack &rhs) = delete;
   };
 
   struct CodecBufferInfo
@@ -280,15 +275,17 @@ private:
     NS_INLINE_DECL_THREADSAFE_REFCOUNTING(SignalObject)
 
     SignalObject(const char* aName);
-    ~SignalObject();
     void Wait();
     void Signal();
 
+  protected:
+    ~SignalObject();
+
   private:
     // Forbidden
-    SignalObject() MOZ_DELETE;
-    SignalObject(const SignalObject &rhs) MOZ_DELETE;
-    const SignalObject &operator=(const SignalObject &rhs) MOZ_DELETE;
+    SignalObject() = delete;
+    SignalObject(const SignalObject &rhs) = delete;
+    const SignalObject &operator=(const SignalObject &rhs) = delete;
 
     Monitor mMonitor;
     bool mSignaled;
@@ -303,13 +300,13 @@ private:
                             int64_t aOffset,
                             nsRefPtr<SignalObject> aSignal);
 
-    NS_IMETHOD Run() MOZ_OVERRIDE;
+    NS_IMETHOD Run() override;
 
   private:
     // Forbidden
-    ParseCachedDataRunnable() MOZ_DELETE;
-    ParseCachedDataRunnable(const ParseCachedDataRunnable &rhs) MOZ_DELETE;
-    const ParseCachedDataRunnable &operator=(const ParseCachedDataRunnable &rhs) MOZ_DELETE;
+    ParseCachedDataRunnable() = delete;
+    ParseCachedDataRunnable(const ParseCachedDataRunnable &rhs) = delete;
+    const ParseCachedDataRunnable &operator=(const ParseCachedDataRunnable &rhs) = delete;
 
     nsRefPtr<MediaCodecReader> mReader;
     nsAutoArrayPtr<const char> mBuffer;
@@ -325,53 +322,22 @@ private:
     ProcessCachedDataTask(nsRefPtr<MediaCodecReader> aReader,
                           int64_t aOffset);
 
-    void Run() MOZ_OVERRIDE;
+    void Run() override;
 
   private:
     // Forbidden
-    ProcessCachedDataTask() MOZ_DELETE;
-    ProcessCachedDataTask(const ProcessCachedDataTask &rhs) MOZ_DELETE;
-    const ProcessCachedDataTask &operator=(const ProcessCachedDataTask &rhs) MOZ_DELETE;
+    ProcessCachedDataTask() = delete;
+    ProcessCachedDataTask(const ProcessCachedDataTask &rhs) = delete;
+    const ProcessCachedDataTask &operator=(const ProcessCachedDataTask &rhs) = delete;
 
     nsRefPtr<MediaCodecReader> mReader;
     int64_t mOffset;
   };
   friend class ProcessCachedDataTask;
 
-  // This class is used to keep one reference count of T in it. And this class
-  // can make sure the stored reference count will be released on the dispatched
-  // thread. By using this class properly (ex. passing the pointer into this
-  // runnable first, then releasing the original pointer held by ourselves, and
-  // then dispatching this runnable onto the desired thread), we can avoid
-  // running the destructor of the referenced object on any other threads
-  // unexpectedly before this runnable has been executed.
-  template<class T>
-  class ReferenceKeeperRunnable : public nsRunnable
-  {
-  public:
-    ReferenceKeeperRunnable(nsRefPtr<T> aPointer)
-      : mPointer(aPointer)
-    {
-    }
-
-    NS_IMETHOD Run() MOZ_OVERRIDE
-    {
-      mPointer = nullptr;
-      return NS_OK;
-    }
-
-  private:
-    // Forbidden
-    ReferenceKeeperRunnable() MOZ_DELETE;
-    ReferenceKeeperRunnable(const ReferenceKeeperRunnable &rhs) MOZ_DELETE;
-    const ReferenceKeeperRunnable &operator=(const ReferenceKeeperRunnable &rhs) MOZ_DELETE;
-
-    nsRefPtr<T> mPointer;
-  };
-
   // Forbidden
-  MediaCodecReader() MOZ_DELETE;
-  const MediaCodecReader& operator=(const MediaCodecReader& rhs) MOZ_DELETE;
+  MediaCodecReader() = delete;
+  const MediaCodecReader& operator=(const MediaCodecReader& rhs) = delete;
 
   bool ReallocateResources();
   void ReleaseCriticalResources();
@@ -396,10 +362,10 @@ private:
 
   bool CreateTaskQueues();
   void ShutdownTaskQueues();
-  bool DecodeVideoFrameTask(int64_t aTimeThreshold);
-  bool DecodeVideoFrameSync(int64_t aTimeThreshold);
-  bool DecodeAudioDataTask();
-  bool DecodeAudioDataSync();
+  void DecodeVideoFrameTask(int64_t aTimeThreshold);
+  void DecodeVideoFrameSync(int64_t aTimeThreshold);
+  void DecodeAudioDataTask();
+  void DecodeAudioDataSync();
   void DispatchVideoTask(int64_t aTimeThreshold);
   void DispatchAudioTask();
   inline bool CheckVideoResources() {
@@ -438,6 +404,7 @@ private:
   static void TextureClientRecycleCallback(TextureClient* aClient,
                                            void* aClosure);
   void TextureClientRecycleCallback(TextureClient* aClient);
+  void WaitFenceAndReleaseOutputBuffer();
 
   void ReleaseRecycledTextureClients();
   static PLDHashOperator ReleaseTextureClient(TextureClient* aClient,
@@ -448,7 +415,6 @@ private:
 
   void ReleaseAllTextureClients();
 
-  android::sp<MessageHandler> mHandler;
   android::sp<VideoResourceListener> mVideoListener;
 
   android::sp<android::ALooper> mLooper;
@@ -473,6 +439,26 @@ private:
   int64_t mNextParserPosition;
   int64_t mParsedDataLength;
   nsAutoPtr<MP3FrameParser> mMP3FrameParser;
+#if MOZ_WIDGET_GONK && ANDROID_VERSION >= 17
+  // mReleaseIndex corresponding to a graphic buffer, and the mReleaseFence is
+  // the graohic buffer's fence. We must wait for the fence signaled by
+  // compositor, otherwise we will see the flicker because the HW decoder and
+  // compositor use the buffer concurrently.
+  struct ReleaseItem {
+    ReleaseItem(size_t aIndex, const android::sp<android::Fence>& aFence)
+    : mReleaseIndex(aIndex)
+    , mReleaseFence(aFence) {}
+    size_t mReleaseIndex;
+    android::sp<android::Fence> mReleaseFence;
+  };
+#else
+  struct ReleaseItem {
+    ReleaseItem(size_t aIndex)
+    : mReleaseIndex(aIndex) {}
+    size_t mReleaseIndex;
+  };
+#endif
+  nsTArray<ReleaseItem> mPendingReleaseItems;
 };
 
 } // namespace mozilla

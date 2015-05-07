@@ -19,17 +19,18 @@ loop.webapp = (function($, _, OT, mozL10n) {
   var sharedModels = loop.shared.models;
   var sharedViews = loop.shared.views;
   var sharedUtils = loop.shared.utils;
+  var WEBSOCKET_REASONS = loop.shared.utils.WEBSOCKET_REASONS;
 
   var multiplexGum = loop.standaloneMedia.multiplexGum;
 
   /**
    * Homepage view.
    */
-  var HomeView = React.createClass({displayName: 'HomeView',
+  var HomeView = React.createClass({displayName: "HomeView",
     render: function() {
       multiplexGum.reset();
       return (
-        React.DOM.p(null, mozL10n.get("welcome", {clientShortname: mozL10n.get("clientShortname2")}))
+        React.createElement("p", null, mozL10n.get("welcome", {clientShortname: mozL10n.get("clientShortname2")}))
       );
     }
   });
@@ -37,20 +38,20 @@ loop.webapp = (function($, _, OT, mozL10n) {
   /**
    * Unsupported Browsers view.
    */
-  var UnsupportedBrowserView = React.createClass({displayName: 'UnsupportedBrowserView',
+  var UnsupportedBrowserView = React.createClass({displayName: "UnsupportedBrowserView",
+    propTypes: {
+      isFirefox: React.PropTypes.bool.isRequired
+    },
+
     render: function() {
-      var useLatestFF = mozL10n.get("use_latest_firefox", {
-        "firefoxBrandNameLink": React.renderComponentToStaticMarkup(
-          React.DOM.a({target: "_blank", href: loop.config.brandWebsiteUrl}, 
-            mozL10n.get("brandShortname")
-          )
-        )
-      });
       return (
-        React.DOM.div(null, 
-          React.DOM.h2(null, mozL10n.get("incompatible_browser")), 
-          React.DOM.p(null, mozL10n.get("powered_by_webrtc", {clientShortname: mozL10n.get("clientShortname2")})), 
-          React.DOM.p({dangerouslySetInnerHTML: {__html: useLatestFF}})
+        React.createElement("div", {className: "highlight-issue-box"}, 
+          React.createElement("div", {className: "info-panel"}, 
+            React.createElement("div", {className: "firefox-logo"}), 
+            React.createElement("h1", null, mozL10n.get("incompatible_browser_heading")), 
+            React.createElement("h4", null, mozL10n.get("incompatible_browser_message"))
+          ), 
+          React.createElement(PromoteFirefoxView, {isFirefox: this.props.isFirefox})
         )
       );
     }
@@ -59,13 +60,29 @@ loop.webapp = (function($, _, OT, mozL10n) {
   /**
    * Unsupported Device view.
    */
-  var UnsupportedDeviceView = React.createClass({displayName: 'UnsupportedDeviceView',
+  var UnsupportedDeviceView = React.createClass({displayName: "UnsupportedDeviceView",
+    propTypes: {
+      platform: React.PropTypes.string.isRequired
+    },
+
     render: function() {
+      var unsupportedDeviceParams = {
+        clientShortname: mozL10n.get("clientShortname2"),
+        platform: mozL10n.get("unsupported_platform_" + this.props.platform)
+      };
+      var unsupportedLearnMoreText = mozL10n.get("unsupported_platform_learn_more_link",
+        {clientShortname: mozL10n.get("clientShortname2")});
+
       return (
-        React.DOM.div(null, 
-          React.DOM.h2(null, mozL10n.get("incompatible_device")), 
-          React.DOM.p(null, mozL10n.get("sorry_device_unsupported", {clientShortname: mozL10n.get("clientShortname2")})), 
-          React.DOM.p(null, mozL10n.get("use_firefox_windows_mac_linux", {brandShortname: mozL10n.get("brandShortname")}))
+        React.createElement("div", {className: "highlight-issue-box"}, 
+          React.createElement("div", {className: "info-panel"}, 
+            React.createElement("div", {className: "firefox-logo"}), 
+            React.createElement("h1", null, mozL10n.get("unsupported_platform_heading")), 
+            React.createElement("h4", null, mozL10n.get("unsupported_platform_message", unsupportedDeviceParams))
+          ), 
+          React.createElement("p", null, 
+            React.createElement("a", {className: "btn btn-large btn-accept btn-unsupported-device", 
+               href: loop.config.unsupportedPlatformUrl}, unsupportedLearnMoreText))
         )
       );
     }
@@ -74,21 +91,21 @@ loop.webapp = (function($, _, OT, mozL10n) {
   /**
    * Firefox promotion interstitial. Will display only to non-Firefox users.
    */
-  var PromoteFirefoxView = React.createClass({displayName: 'PromoteFirefoxView',
+  var PromoteFirefoxView = React.createClass({displayName: "PromoteFirefoxView",
     propTypes: {
-      helper: React.PropTypes.object.isRequired
+      isFirefox: React.PropTypes.bool.isRequired
     },
 
     render: function() {
-      if (this.props.helper.isFirefox(navigator.userAgent)) {
-        return React.DOM.div(null);
+      if (this.props.isFirefox) {
+        return React.createElement("div", null);
       }
       return (
-        React.DOM.div({className: "promote-firefox"}, 
-          React.DOM.h3(null, mozL10n.get("promote_firefox_hello_heading", {brandShortname: mozL10n.get("brandShortname")})), 
-          React.DOM.p(null, 
-            React.DOM.a({className: "btn btn-large btn-accept", 
-               href: loop.config.brandWebsiteUrl}, 
+        React.createElement("div", {className: "promote-firefox"}, 
+          React.createElement("h3", null, mozL10n.get("promote_firefox_hello_heading", {brandShortname: mozL10n.get("brandShortname")})), 
+          React.createElement("p", null, 
+            React.createElement("a", {className: "btn btn-large btn-accept", 
+               href: loop.config.downloadFirefoxUrl}, 
               mozL10n.get("get_firefox_button", {
                 brandShortname: mozL10n.get("brandShortname")
               })
@@ -102,61 +119,40 @@ loop.webapp = (function($, _, OT, mozL10n) {
   /**
    * Expired call URL view.
    */
-  var CallUrlExpiredView = React.createClass({displayName: 'CallUrlExpiredView',
+  var CallUrlExpiredView = React.createClass({displayName: "CallUrlExpiredView",
     propTypes: {
-      helper: React.PropTypes.object.isRequired
+      isFirefox: React.PropTypes.bool.isRequired
     },
 
     render: function() {
       return (
-        React.DOM.div({className: "expired-url-info"}, 
-          React.DOM.div({className: "info-panel"}, 
-            React.DOM.div({className: "firefox-logo"}), 
-            React.DOM.h1(null, mozL10n.get("call_url_unavailable_notification_heading")), 
-            React.DOM.h4(null, mozL10n.get("call_url_unavailable_notification_message2"))
+        React.createElement("div", {className: "highlight-issue-box"}, 
+          React.createElement("div", {className: "info-panel"}, 
+            React.createElement("div", {className: "firefox-logo"}), 
+            React.createElement("h1", null, mozL10n.get("call_url_unavailable_notification_heading")), 
+            React.createElement("h4", null, mozL10n.get("call_url_unavailable_notification_message2"))
           ), 
-          PromoteFirefoxView({helper: this.props.helper})
+          React.createElement(PromoteFirefoxView, {isFirefox: this.props.isFirefox})
         )
       );
     }
   });
 
-  var ConversationBranding = React.createClass({displayName: 'ConversationBranding',
+  var ConversationBranding = React.createClass({displayName: "ConversationBranding",
     render: function() {
       return (
-        React.DOM.h1({className: "standalone-header-title"}, 
-          React.DOM.strong(null, mozL10n.get("clientShortname2"))
+        React.createElement("h1", {className: "standalone-header-title"}, 
+          React.createElement("strong", null, mozL10n.get("clientShortname2"))
         )
       );
-    }
-  });
-
-  /**
-   * The Firefox Marketplace exposes a web page that contains a postMesssage
-   * based API that wraps a small set of functionality from the WebApps API
-   * that allow us to request the installation of apps given their manifest
-   * URL. We will be embedding the content of this web page within an hidden
-   * iframe in case that we need to request the installation of the FxOS Loop
-   * client.
-   */
-  var FxOSHiddenMarketplace = React.createClass({displayName: 'FxOSHiddenMarketplace',
-    render: function() {
-      return React.DOM.iframe({id: "marketplace", src: this.props.marketplaceSrc, hidden: true});
-    },
-
-    componentDidUpdate: function() {
-      // This happens only once when we change the 'src' property of the iframe.
-      if (this.props.onMarketplaceMessage) {
-        // The reason for listening on the global window instead of on the
-        // iframe content window is because the Marketplace is doing a
-        // window.top.postMessage.
-        window.addEventListener("message", this.props.onMarketplaceMessage);
-      }
     }
   });
 
   var FxOSConversationModel = Backbone.Model.extend({
-    setupOutgoingCall: function() {
+    setupOutgoingCall: function(selectedCallType) {
+      if (selectedCallType) {
+        this.set("selectedCallType", selectedCallType);
+      }
       // The FxOS Loop client exposes a "loop-call" activity. If we get the
       // activity onerror callback it means that there is no "loop-call"
       // activity handler available and so no FxOS Loop client installed.
@@ -166,7 +162,7 @@ loop.webapp = (function($, _, OT, mozL10n) {
           type: "loop/token",
           token: this.get("loopToken"),
           callerId: this.get("callerId"),
-          callType: this.get("callType")
+          video: this.get("selectedCallType") === "audio-video"
         }
       });
 
@@ -220,7 +216,7 @@ loop.webapp = (function($, _, OT, mozL10n) {
     }
   });
 
-  var ConversationHeader = React.createClass({displayName: 'ConversationHeader',
+  var ConversationHeader = React.createClass({displayName: "ConversationHeader",
     render: function() {
       var cx = React.addons.classSet;
       var conversationUrl = location.href;
@@ -237,15 +233,15 @@ loop.webapp = (function($, _, OT, mozL10n) {
       });
 
       return (
-        React.DOM.header({className: "standalone-header header-box container-box"}, 
-          ConversationBranding(null), 
-          React.DOM.div({className: "loop-logo", 
+        React.createElement("header", {className: "standalone-header header-box container-box"}, 
+          React.createElement(ConversationBranding, null), 
+          React.createElement("div", {className: "loop-logo", 
                title: mozL10n.get("client_alttext",
                                   {clientShortname: mozL10n.get("clientShortname2")})}), 
-          React.DOM.h3({className: "call-url"}, 
+          React.createElement("h3", {className: "call-url"}, 
             conversationUrl
           ), 
-          React.DOM.h4({className: urlCreationDateClasses}, 
+          React.createElement("h4", {className: urlCreationDateClasses}, 
             callUrlCreationDateString
           )
         )
@@ -253,19 +249,97 @@ loop.webapp = (function($, _, OT, mozL10n) {
     }
   });
 
-  var ConversationFooter = React.createClass({displayName: 'ConversationFooter',
+  var ConversationFooter = React.createClass({displayName: "ConversationFooter",
     render: function() {
       return (
-        React.DOM.div({className: "standalone-footer container-box"}, 
-          React.DOM.div({title: mozL10n.get("vendor_alttext",
+        React.createElement("div", {className: "standalone-footer container-box"}, 
+          React.createElement("div", {title: mozL10n.get("vendor_alttext",
                                   {vendorShortname: mozL10n.get("vendorShortname")}), 
-               className: "footer-logo"})
+               className: "footer-logo"}), 
+          React.createElement("div", {className: "footer-external-links"}, 
+            React.createElement("a", {target: "_blank", href: loop.config.generalSupportUrl}, 
+              mozL10n.get("support_link")
+            )
+          )
         )
       );
     }
   });
 
-  var PendingConversationView = React.createClass({displayName: 'PendingConversationView',
+  /**
+   * A view for when conversations are pending, displays any messages
+   * and an option cancel button.
+   */
+  var PendingConversationView = React.createClass({displayName: "PendingConversationView",
+    propTypes: {
+      callState: React.PropTypes.string.isRequired,
+      // If not supplied, the cancel button is not displayed.
+      cancelCallback: React.PropTypes.func
+    },
+
+    render: function() {
+      var cancelButtonClasses = React.addons.classSet({
+        btn: true,
+        "btn-large": true,
+        "btn-cancel": true,
+        hide: !this.props.cancelCallback
+      });
+
+      return (
+        React.createElement("div", {className: "container"}, 
+          React.createElement("div", {className: "container-box"}, 
+            React.createElement("header", {className: "pending-header header-box"}, 
+              React.createElement(ConversationBranding, null)
+            ), 
+
+            React.createElement("div", {id: "cameraPreview"}), 
+
+            React.createElement("div", {id: "messages"}), 
+
+            React.createElement("p", {className: "standalone-btn-label"}, 
+              this.props.callState
+            ), 
+
+            React.createElement("div", {className: "btn-pending-cancel-group btn-group"}, 
+              React.createElement("div", {className: "flex-padding-1"}), 
+              React.createElement("button", {className: cancelButtonClasses, 
+                      onClick: this.props.cancelCallback}, 
+                React.createElement("span", {className: "standalone-call-btn-text"}, 
+                  mozL10n.get("initiate_call_cancel_button")
+                )
+              ), 
+              React.createElement("div", {className: "flex-padding-1"})
+            )
+          ), 
+          React.createElement(ConversationFooter, null)
+        )
+      );
+    }
+  });
+
+  /**
+   * View displayed whilst the get user media prompt is being displayed. Indicates
+   * to the user to accept the prompt.
+   */
+  var GumPromptConversationView = React.createClass({displayName: "GumPromptConversationView",
+    render: function() {
+      var callState = mozL10n.get("call_progress_getting_media_description", {
+        clientShortname: mozL10n.get("clientShortname2")
+      });
+      document.title = mozL10n.get("standalone_title_with_status", {
+        clientShortname: mozL10n.get("clientShortname2"),
+        currentStatus: mozL10n.get("call_progress_getting_media_title")
+      });
+
+      return React.createElement(PendingConversationView, {callState: callState});
+    }
+  });
+
+  /**
+   * View displayed waiting for a call to be connected. Updates the display
+   * once the websocket shows that the callee is being alerted.
+   */
+  var WaitingConversationView = React.createClass({displayName: "WaitingConversationView",
     mixins: [sharedMixins.AudioMixin],
 
     getInitialState: function() {
@@ -301,39 +375,17 @@ loop.webapp = (function($, _, OT, mozL10n) {
       document.title = mozL10n.get("standalone_title_with_status",
                                    {clientShortname: mozL10n.get("clientShortname2"),
                                     currentStatus: mozL10n.get(callStateStringEntityName)});
+
       return (
-        React.DOM.div({className: "container"}, 
-          React.DOM.div({className: "container-box"}, 
-            React.DOM.header({className: "pending-header header-box"}, 
-              ConversationBranding(null)
-            ), 
-
-            React.DOM.div({id: "cameraPreview"}), 
-
-            React.DOM.div({id: "messages"}), 
-
-            React.DOM.p({className: "standalone-btn-label"}, 
-              callState
-            ), 
-
-            React.DOM.div({className: "btn-pending-cancel-group btn-group"}, 
-              React.DOM.div({className: "flex-padding-1"}), 
-              React.DOM.button({className: "btn btn-large btn-cancel", 
-                      onClick: this._cancelOutgoingCall}, 
-                React.DOM.span({className: "standalone-call-btn-text"}, 
-                  mozL10n.get("initiate_call_cancel_button")
-                )
-              ), 
-              React.DOM.div({className: "flex-padding-1"})
-            )
-          ), 
-          ConversationFooter(null)
+        React.createElement(PendingConversationView, {
+          callState: callState, 
+          cancelCallback: this._cancelOutgoingCall}
         )
       );
     }
   });
 
-  var InitiateCallButton = React.createClass({displayName: 'InitiateCallButton',
+  var InitiateCallButton = React.createClass({displayName: "InitiateCallButton",
     mixins: [sharedMixins.DropdownMenuMixin],
 
     propTypes: {
@@ -357,25 +409,25 @@ loop.webapp = (function($, _, OT, mozL10n) {
         "disabled": this.props.disabled
       });
       return (
-        React.DOM.div({className: "standalone-btn-chevron-menu-group"}, 
-          React.DOM.div({className: "btn-group-chevron"}, 
-            React.DOM.div({className: "btn-group"}, 
-              React.DOM.button({className: "btn btn-large btn-accept", 
+        React.createElement("div", {className: "standalone-btn-chevron-menu-group"}, 
+          React.createElement("div", {className: "btn-group-chevron"}, 
+            React.createElement("div", {className: "btn-group"}, 
+              React.createElement("button", {className: "btn btn-constrained btn-large btn-accept", 
                       onClick: this.props.startCall("audio-video"), 
                       disabled: this.props.disabled, 
                       title: mozL10n.get("initiate_audio_video_call_tooltip2")}, 
-                React.DOM.span({className: "standalone-call-btn-text"}, 
+                React.createElement("span", {className: "standalone-call-btn-text"}, 
                   this.props.caption
                 ), 
-                React.DOM.span({className: "standalone-call-btn-video-icon"})
+                React.createElement("span", {className: "standalone-call-btn-video-icon"})
               ), 
-              React.DOM.div({className: chevronClasses, 
+              React.createElement("div", {className: chevronClasses, 
                    onClick: this.toggleDropdownMenu}
               )
             ), 
-            React.DOM.ul({className: dropdownMenuClasses}, 
-              React.DOM.li(null, 
-                React.DOM.button({className: "start-audio-only-call", 
+            React.createElement("ul", {className: dropdownMenuClasses}, 
+              React.createElement("li", null, 
+                React.createElement("button", {className: "start-audio-only-call", 
                         onClick: this.props.startCall("audio"), 
                         disabled: this.props.disabled}, 
                   mozL10n.get("initiate_audio_call_button2")
@@ -391,7 +443,7 @@ loop.webapp = (function($, _, OT, mozL10n) {
   /**
    * Initiate conversation view.
    */
-  var InitiateConversationView = React.createClass({displayName: 'InitiateConversationView',
+  var InitiateConversationView = React.createClass({displayName: "InitiateConversationView",
     mixins: [Backbone.Events],
 
     propTypes: {
@@ -453,15 +505,8 @@ loop.webapp = (function($, _, OT, mozL10n) {
      */
     startCall: function(callType) {
       return function() {
-        multiplexGum.getPermsAndCacheMedia({audio:true, video:true},
-          function(localStream) {
-            this.props.conversation.setupOutgoingCall(callType);
-            this.setState({disableCallButton: true});
-          }.bind(this),
-          function(errorCode) {
-            multiplexGum.reset();
-          }.bind(this)
-        );
+        this.props.conversation.setupOutgoingCall(callType);
+        this.setState({disableCallButton: true});
       }.bind(this);
     },
 
@@ -494,37 +539,37 @@ loop.webapp = (function($, _, OT, mozL10n) {
       });
 
       return (
-        React.DOM.div({className: "container"}, 
-          React.DOM.div({className: "container-box"}, 
+        React.createElement("div", {className: "container"}, 
+          React.createElement("div", {className: "container-box"}, 
 
-            ConversationHeader({
+            React.createElement(ConversationHeader, {
               urlCreationDateString: this.state.urlCreationDateString}), 
 
-            React.DOM.p({className: "standalone-btn-label"}, 
+            React.createElement("p", {className: "standalone-btn-label"}, 
               this.props.title
             ), 
 
-            React.DOM.div({id: "messages"}), 
+            React.createElement("div", {id: "messages"}), 
 
-            React.DOM.div({className: "btn-group"}, 
-              React.DOM.div({className: "flex-padding-1"}), 
-              InitiateCallButton({
+            React.createElement("div", {className: "btn-group"}, 
+              React.createElement("div", {className: "flex-padding-1"}), 
+              React.createElement(InitiateCallButton, {
                 caption: this.props.callButtonLabel, 
                 disabled: this.state.disableCallButton, 
                 startCall: this.startCall}
               ), 
-              React.DOM.div({className: "flex-padding-1"})
+              React.createElement("div", {className: "flex-padding-1"})
             ), 
 
-            React.DOM.p({className: tosClasses, 
+            React.createElement("p", {className: tosClasses, 
                dangerouslySetInnerHTML: {__html: tosHTML}})
           ), 
 
-          FxOSHiddenMarketplace({
+          React.createElement(loop.fxOSMarketplaceViews.FxOSHiddenMarketplaceView, {
             marketplaceSrc: this.state.marketplaceSrc, 
             onMarketplaceMessage: this.state.onMarketplaceMessage}), 
 
-          ConversationFooter(null)
+          React.createElement(ConversationFooter, null)
         )
       );
     }
@@ -533,12 +578,11 @@ loop.webapp = (function($, _, OT, mozL10n) {
   /**
    * Ended conversation view.
    */
-  var EndedConversationView = React.createClass({displayName: 'EndedConversationView',
+  var EndedConversationView = React.createClass({displayName: "EndedConversationView",
     propTypes: {
       conversation: React.PropTypes.instanceOf(sharedModels.ConversationModel)
                          .isRequired,
       sdk: React.PropTypes.object.isRequired,
-      feedbackApiClient: React.PropTypes.object.isRequired,
       onAfterFeedbackReceived: React.PropTypes.func.isRequired
     },
 
@@ -547,12 +591,11 @@ loop.webapp = (function($, _, OT, mozL10n) {
                                    {clientShortname: mozL10n.get("clientShortname2"),
                                     currentStatus: mozL10n.get("status_conversation_ended")});
       return (
-        React.DOM.div({className: "ended-conversation"}, 
-          sharedViews.FeedbackView({
-            feedbackApiClient: this.props.feedbackApiClient, 
+        React.createElement("div", {className: "ended-conversation"}, 
+          React.createElement(sharedViews.FeedbackView, {
             onAfterFeedbackReceived: this.props.onAfterFeedbackReceived}
           ), 
-          sharedViews.ConversationView({
+          React.createElement(sharedViews.ConversationView, {
             initiate: false, 
             sdk: this.props.sdk, 
             model: this.props.conversation, 
@@ -564,18 +607,19 @@ loop.webapp = (function($, _, OT, mozL10n) {
     }
   });
 
-  var StartConversationView = React.createClass({displayName: 'StartConversationView',
+  var StartConversationView = React.createClass({displayName: "StartConversationView",
     render: function() {
       document.title = mozL10n.get("clientShortname2");
-      return this.transferPropsTo(
-        InitiateConversationView({
-          title: mozL10n.get("initiate_call_button_label2"), 
-          callButtonLabel: mozL10n.get("initiate_audio_video_call_button2")})
+      return (
+        React.createElement(InitiateConversationView, React.__spread({}, 
+          this.props, 
+          {title: mozL10n.get("initiate_call_button_label2"), 
+          callButtonLabel: mozL10n.get("initiate_audio_video_call_button2")}))
       );
     }
   });
 
-  var FailedConversationView = React.createClass({displayName: 'FailedConversationView',
+  var FailedConversationView = React.createClass({displayName: "FailedConversationView",
     mixins: [sharedMixins.AudioMixin],
 
     componentDidMount: function() {
@@ -586,10 +630,11 @@ loop.webapp = (function($, _, OT, mozL10n) {
       document.title = mozL10n.get("standalone_title_with_status",
                                    {clientShortname: mozL10n.get("clientShortname2"),
                                     currentStatus: mozL10n.get("status_error")});
-      return this.transferPropsTo(
-        InitiateConversationView({
-          title: mozL10n.get("call_failed_title"), 
-          callButtonLabel: mozL10n.get("retry_call_button")})
+      return (
+        React.createElement(InitiateConversationView, React.__spread({}, 
+          this.props, 
+          {title: mozL10n.get("call_failed_title"), 
+          callButtonLabel: mozL10n.get("retry_call_button")}))
       );
     }
   });
@@ -600,18 +645,17 @@ loop.webapp = (function($, _, OT, mozL10n) {
    *
    * At the moment, it does more than that, these parts need refactoring out.
    */
-  var OutgoingConversationView = React.createClass({displayName: 'OutgoingConversationView',
+  var OutgoingConversationView = React.createClass({displayName: "OutgoingConversationView",
     propTypes: {
       client: React.PropTypes.instanceOf(loop.StandaloneClient).isRequired,
       conversation: React.PropTypes.oneOfType([
         React.PropTypes.instanceOf(sharedModels.ConversationModel),
         React.PropTypes.instanceOf(FxOSConversationModel)
       ]).isRequired,
-      helper: React.PropTypes.instanceOf(sharedUtils.Helper).isRequired,
+      dispatcher: React.PropTypes.instanceOf(loop.Dispatcher).isRequired,
       notifications: React.PropTypes.instanceOf(sharedModels.NotificationCollection)
                           .isRequired,
-      sdk: React.PropTypes.object.isRequired,
-      feedbackApiClient: React.PropTypes.object.isRequired
+      sdk: React.PropTypes.object.isRequired
     },
 
     getInitialState: function() {
@@ -622,6 +666,7 @@ loop.webapp = (function($, _, OT, mozL10n) {
 
     componentDidMount: function() {
       this.props.conversation.on("call:outgoing", this.startCall, this);
+      this.props.conversation.on("call:outgoing:get-media-privs", this.getMediaPrivs, this);
       this.props.conversation.on("call:outgoing:setup", this.setupOutgoingCall, this);
       this.props.conversation.on("change:publishedStream", this._checkConnected, this);
       this.props.conversation.on("change:subscribedStream", this._checkConnected, this);
@@ -640,9 +685,10 @@ loop.webapp = (function($, _, OT, mozL10n) {
       return nextState.callStatus !== this.state.callStatus;
     },
 
-    callStatusSwitcher: function(status) {
+    resetCallStatus: function() {
+      this.props.dispatcher.dispatch(new sharedActions.FeedbackComplete());
       return function() {
-        this.setState({callStatus: status});
+        this.setState({callStatus: "start"});
       }.bind(this);
     },
 
@@ -653,7 +699,7 @@ loop.webapp = (function($, _, OT, mozL10n) {
       switch (this.state.callStatus) {
         case "start": {
           return (
-            StartConversationView({
+            React.createElement(StartConversationView, {
               conversation: this.props.conversation, 
               notifications: this.props.notifications, 
               client: this.props.client}
@@ -662,22 +708,25 @@ loop.webapp = (function($, _, OT, mozL10n) {
         }
         case "failure": {
           return (
-            FailedConversationView({
+            React.createElement(FailedConversationView, {
               conversation: this.props.conversation, 
               notifications: this.props.notifications, 
               client: this.props.client}
             )
           );
         }
+        case "gumPrompt": {
+          return React.createElement(GumPromptConversationView, null);
+        }
         case "pending": {
-          return PendingConversationView({websocket: this._websocket});
+          return React.createElement(WaitingConversationView, {websocket: this._websocket});
         }
         case "connected": {
           document.title = mozL10n.get("standalone_title_with_status",
                                        {clientShortname: mozL10n.get("clientShortname2"),
                                         currentStatus: mozL10n.get("status_in_conversation")});
           return (
-            sharedViews.ConversationView({
+            React.createElement(sharedViews.ConversationView, {
               initiate: true, 
               sdk: this.props.sdk, 
               model: this.props.conversation, 
@@ -687,21 +736,20 @@ loop.webapp = (function($, _, OT, mozL10n) {
         }
         case "end": {
           return (
-            EndedConversationView({
+            React.createElement(EndedConversationView, {
               sdk: this.props.sdk, 
               conversation: this.props.conversation, 
-              feedbackApiClient: this.props.feedbackApiClient, 
-              onAfterFeedbackReceived: this.callStatusSwitcher("start")}
+              onAfterFeedbackReceived: this.resetCallStatus()}
             )
           );
         }
         case "expired": {
           return (
-            CallUrlExpiredView({helper: this.props.helper})
+            React.createElement(CallUrlExpiredView, null)
           );
         }
         default: {
-          return HomeView(null);
+          return React.createElement(HomeView, null);
         }
       }
     },
@@ -770,6 +818,22 @@ loop.webapp = (function($, _, OT, mozL10n) {
     },
 
     /**
+     * Asks the user for the media privileges, handling the result appropriately.
+     */
+    getMediaPrivs: function() {
+      this.setState({callStatus: "gumPrompt"});
+      multiplexGum.getPermsAndCacheMedia({audio:true, video:true},
+        function(localStream) {
+          this.props.conversation.gotMediaPrivs();
+        }.bind(this),
+        function(errorCode) {
+          multiplexGum.reset();
+          this.setState({callStatus: "failure"});
+        }.bind(this)
+      );
+    },
+
+    /**
      * Actually starts the call.
      */
     startCall: function() {
@@ -794,7 +858,7 @@ loop.webapp = (function($, _, OT, mozL10n) {
       this._websocket = new loop.CallConnectionWebSocket({
         url: this.props.conversation.get("progressURL"),
         websocketToken: this.props.conversation.get("websocketToken"),
-        callId: this.props.conversation.get("callId"),
+        callId: this.props.conversation.get("callId")
       });
       this._websocket.promiseConnect().then(function() {
       }.bind(this), function() {
@@ -848,7 +912,7 @@ loop.webapp = (function($, _, OT, mozL10n) {
     _handleCallTerminated: function(reason) {
       multiplexGum.reset();
 
-      if (reason === "cancel") {
+      if (reason === WEBSOCKET_REASONS.CANCEL) {
         this.setState({callStatus: "start"});
         return;
       }
@@ -861,17 +925,19 @@ loop.webapp = (function($, _, OT, mozL10n) {
      * Handles ending a call by resetting the view to the start state.
      */
     _endCall: function() {
+      multiplexGum.reset();
+
       if (this.state.callStatus !== "failure") {
         this.setState({callStatus: "end"});
       }
-    },
+    }
   });
 
   /**
    * Webapp Root View. This is the main, single, view that controls the display
    * of the webapp page.
    */
-  var WebappRootView = React.createClass({displayName: 'WebappRootView',
+  var WebappRootView = React.createClass({displayName: "WebappRootView",
 
     mixins: [sharedMixins.UrlHashChangeMixin,
              sharedMixins.DocumentLocationMixin,
@@ -883,17 +949,17 @@ loop.webapp = (function($, _, OT, mozL10n) {
         React.PropTypes.instanceOf(sharedModels.ConversationModel),
         React.PropTypes.instanceOf(FxOSConversationModel)
       ]).isRequired,
-      helper: React.PropTypes.instanceOf(sharedUtils.Helper).isRequired,
       notifications: React.PropTypes.instanceOf(sharedModels.NotificationCollection)
                           .isRequired,
       sdk: React.PropTypes.object.isRequired,
-      feedbackApiClient: React.PropTypes.object.isRequired,
 
       // XXX New types for flux style
       standaloneAppStore: React.PropTypes.instanceOf(
         loop.store.StandaloneAppStore).isRequired,
-      activeRoomStore: React.PropTypes.instanceOf(
-        loop.store.ActiveRoomStore).isRequired,
+      activeRoomStore: React.PropTypes.oneOfType([
+        React.PropTypes.instanceOf(loop.store.ActiveRoomStore),
+        React.PropTypes.instanceOf(loop.store.FxOSActiveRoomStore)
+      ]).isRequired,
       dispatcher: React.PropTypes.instanceOf(loop.Dispatcher).isRequired
     },
 
@@ -918,34 +984,33 @@ loop.webapp = (function($, _, OT, mozL10n) {
     render: function() {
       switch (this.state.windowType) {
         case "unsupportedDevice": {
-          return UnsupportedDeviceView(null);
+          return React.createElement(UnsupportedDeviceView, {platform: this.state.unsupportedPlatform});
         }
         case "unsupportedBrowser": {
-          return UnsupportedBrowserView(null);
+          return React.createElement(UnsupportedBrowserView, {isFirefox: this.state.isFirefox});
         }
         case "outgoing": {
           return (
-            OutgoingConversationView({
+            React.createElement(OutgoingConversationView, {
                client: this.props.client, 
+               dispatcher: this.props.dispatcher, 
                conversation: this.props.conversation, 
-               helper: this.props.helper, 
                notifications: this.props.notifications, 
-               sdk: this.props.sdk, 
-               feedbackApiClient: this.props.feedbackApiClient}
+               sdk: this.props.sdk}
             )
           );
         }
         case "room": {
           return (
-            loop.standaloneRoomViews.StandaloneRoomView({
+            React.createElement(loop.standaloneRoomViews.StandaloneRoomView, {
               activeRoomStore: this.props.activeRoomStore, 
               dispatcher: this.props.dispatcher, 
-              helper: this.props.helper}
+              isFirefox: this.state.isFirefox}
             )
           );
         }
         case "home": {
-          return HomeView(null);
+          return React.createElement(HomeView, null);
         }
         default: {
           // The state hasn't been initialised yet, so don't display
@@ -960,21 +1025,12 @@ loop.webapp = (function($, _, OT, mozL10n) {
    * App initialization.
    */
   function init() {
-    var helper = new sharedUtils.Helper();
     var standaloneMozLoop = new loop.StandaloneMozLoop({
       baseServerUrl: loop.config.serverUrl
     });
 
     // Older non-flux based items.
     var notifications = new sharedModels.NotificationCollection();
-    var conversation
-    if (helper.isFirefoxOS(navigator.userAgent)) {
-      conversation = new FxOSConversationModel();
-    } else {
-      conversation = new sharedModels.ConversationModel({}, {
-        sdk: OT
-      });
-    }
 
     var feedbackApiClient = new loop.FeedbackAPIClient(
       loop.config.feedbackApiUrl, {
@@ -992,30 +1048,65 @@ loop.webapp = (function($, _, OT, mozL10n) {
       dispatcher: dispatcher,
       sdk: OT
     });
+    var conversation;
+    var activeRoomStore;
+    if (sharedUtils.isFirefoxOS(navigator.userAgent)) {
+      if (loop.config.fxosApp) {
+        conversation = new FxOSConversationModel();
+        if (loop.config.fxosApp.rooms) {
+          activeRoomStore = new loop.store.FxOSActiveRoomStore(dispatcher, {
+          mozLoop: standaloneMozLoop
+          });
+        }
+      }
+    }
 
+    conversation = conversation ||
+      new sharedModels.ConversationModel({}, {
+        sdk: OT
+    });
+    activeRoomStore = activeRoomStore ||
+      new loop.store.ActiveRoomStore(dispatcher, {
+        mozLoop: standaloneMozLoop,
+        sdkDriver: sdkDriver
+    });
+
+    var feedbackClient = new loop.FeedbackAPIClient(
+      loop.config.feedbackApiUrl, {
+      product: loop.config.feedbackProductName,
+      user_agent: navigator.userAgent,
+      url: document.location.origin
+    });
+
+    // Stores
     var standaloneAppStore = new loop.store.StandaloneAppStore({
       conversation: conversation,
       dispatcher: dispatcher,
-      helper: helper,
       sdk: OT
     });
-    var activeRoomStore = new loop.store.ActiveRoomStore({
-      dispatcher: dispatcher,
-      mozLoop: standaloneMozLoop,
-      sdkDriver: sdkDriver
+    var feedbackStore = new loop.store.FeedbackStore(dispatcher, {
+      feedbackClient: feedbackClient
+    });
+    var standaloneMetricsStore = new loop.store.StandaloneMetricsStore(dispatcher, {
+      activeRoomStore: activeRoomStore
+    });
+
+    loop.store.StoreMixin.register({
+      feedbackStore: feedbackStore,
+      // This isn't used in any views, but is saved here to ensure it
+      // is kept alive.
+      standaloneMetricsStore: standaloneMetricsStore
     });
 
     window.addEventListener("unload", function() {
       dispatcher.dispatch(new sharedActions.WindowUnload());
     });
 
-    React.renderComponent(WebappRootView({
+    React.render(React.createElement(WebappRootView, {
       client: client, 
       conversation: conversation, 
-      helper: helper, 
       notifications: notifications, 
       sdk: OT, 
-      feedbackApiClient: feedbackApiClient, 
       standaloneAppStore: standaloneAppStore, 
       activeRoomStore: activeRoomStore, 
       dispatcher: dispatcher}
@@ -1026,16 +1117,19 @@ loop.webapp = (function($, _, OT, mozL10n) {
     document.documentElement.dir = mozL10n.language.direction;
     document.title = mozL10n.get("clientShortname2");
 
+    var locationData = sharedUtils.locationData();
+
     dispatcher.dispatch(new sharedActions.ExtractTokenInfo({
-      // We pass the hash or the pathname - the hash was used for the original
-      // urls, the pathname for later ones.
-      windowPath: helper.locationData().hash || helper.locationData().pathname
+      windowPath: locationData.pathname,
+      windowHash: locationData.hash
     }));
   }
 
   return {
     CallUrlExpiredView: CallUrlExpiredView,
     PendingConversationView: PendingConversationView,
+    GumPromptConversationView: GumPromptConversationView,
+    WaitingConversationView: WaitingConversationView,
     StartConversationView: StartConversationView,
     FailedConversationView: FailedConversationView,
     OutgoingConversationView: OutgoingConversationView,

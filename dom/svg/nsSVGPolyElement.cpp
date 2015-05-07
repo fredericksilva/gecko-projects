@@ -1,4 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -119,3 +120,38 @@ nsSVGPolyElement::GetMarkPoints(nsTArray<nsSVGMark> *aMarks)
   aMarks->LastElement().angle = prevAngle;
   aMarks->LastElement().type = nsSVGMark::eEnd;
 }
+
+bool
+nsSVGPolyElement::GetGeometryBounds(
+  Rect* aBounds, const StrokeOptions& aStrokeOptions, const Matrix& aTransform)
+{
+  const SVGPointList &points = mPoints.GetAnimValue();
+
+  if (!points.Length()) {
+    // Rendering of the element is disabled
+    aBounds->SetEmpty();
+    return true;
+  }
+
+  if (aStrokeOptions.mLineWidth > 0) {
+    // We don't handle stroke-miterlimit etc. yet
+    return false;
+  }
+
+  if (aTransform.IsRectilinear()) {
+    // We can avoid transforming each point and just transform the result.
+    // Important for large point lists.
+    Rect bounds(points[0], Size());
+    for (uint32_t i = 1; i < points.Length(); ++i) {
+      bounds.ExpandToEnclose(points[i]);
+    }
+    *aBounds = aTransform.TransformBounds(bounds);
+  } else {
+    *aBounds = Rect(aTransform * points[0], Size());
+    for (uint32_t i = 1; i < points.Length(); ++i) {
+      aBounds->ExpandToEnclose(aTransform * points[i]);
+    }
+  }
+  return true;
+}
+

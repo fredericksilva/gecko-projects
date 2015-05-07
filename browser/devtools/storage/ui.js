@@ -81,7 +81,7 @@ this.StorageUI = function StorageUI(front, target, panelWin) {
 
   this.front.listStores().then(storageTypes => {
     this.populateStorageTree(storageTypes);
-  });
+  }).then(null, Cu.reportError);
   this.onUpdate = this.onUpdate.bind(this);
   this.front.on("stores-update", this.onUpdate);
 
@@ -275,7 +275,7 @@ StorageUI.prototype = {
       }
       this.populateTable(data, reason);
       this.emit("store-objects-updated");
-    });
+    }, Cu.reportError);
   },
 
   /**
@@ -448,8 +448,8 @@ StorageUI.prototype = {
         let p = separators[j];
         let regex = new RegExp("^([^" + kv + p + "]*" + kv + "+[^" + kv + p +
                                "]*" + p + "*)+$", "g");
-        if (value.match(regex) && value.contains(kv) &&
-            (value.contains(p) || value.split(kv).length == 2)) {
+        if (value.match(regex) && value.includes(kv) &&
+            (value.includes(p) || value.split(kv).length == 2)) {
           return makeObject(kv, p);
         }
       }

@@ -33,6 +33,7 @@ parent:
   // see PNecko.ipdl
 
   SetPriority(uint16_t priority);
+  SetClassOfService(uint32_t cos);
 
   SetCacheTokenCachedCharset(nsCString charset);
 
@@ -106,7 +107,7 @@ child:
 
   OnStopRequest(nsresult channelStatus, ResourceTimingStruct timing);
 
-  OnProgress(uint64_t progress, uint64_t progressMax);
+  OnProgress(int64_t progress, int64_t progressMax);
 
   OnStatus(nsresult status);
 
@@ -137,6 +138,10 @@ child:
   // Child should resume processing the ChannelEventQueue, i.e. diverting any
   // OnDataAvailable and OnStopRequest messages in the queue back to the parent.
   DivertMessages();
+
+  // Report a security message to the console associated with this
+  // channel.
+  ReportSecurityMessage(nsString messageTag, nsString messageCategory);
 
   // Tell child to delete channel (all IPDL deletes must be done from child to
   // avoid races: see bug 591708).

@@ -1,5 +1,5 @@
 /* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=2 et sw=2 tw=80: */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -48,7 +48,7 @@ GenerateRequest(IDBIndex* aIndex)
 
 IDBIndex::IDBIndex(IDBObjectStore* aObjectStore, const IndexMetadata* aMetadata)
   : mObjectStore(aObjectStore)
-  , mCachedKeyPath(JSVAL_VOID)
+  , mCachedKeyPath(JS::UndefinedValue())
   , mMetadata(aMetadata)
   , mId(aMetadata->id())
   , mRooted(false)
@@ -63,7 +63,7 @@ IDBIndex::~IDBIndex()
   AssertIsOnOwningThread();
 
   if (mRooted) {
-    mCachedKeyPath = JSVAL_VOID;
+    mCachedKeyPath.setUndefined();
     mozilla::DropJSObjects(this);
   }
 }
@@ -264,33 +264,36 @@ IDBIndex::GetInternal(bool aKeyOnly,
   nsRefPtr<IDBRequest> request = GenerateRequest(this);
   MOZ_ASSERT(request);
 
-  BackgroundRequestChild* actor = new BackgroundRequestChild(request);
-
-  transaction->StartRequest(actor, params);
-
   if (aKeyOnly) {
-    IDB_PROFILER_MARK("IndexedDB Request %llu: "
-                      "database(%s).transaction(%s).objectStore(%s).index(%s)."
-                      "getKey(%s)",
-                      "IDBRequest[%llu] MT IDBIndex.getKey()",
-                      request->GetSerialNumber(),
-                      IDB_PROFILER_STRING(transaction->Database()),
-                      IDB_PROFILER_STRING(transaction),
-                      IDB_PROFILER_STRING(mObjectStore),
-                      IDB_PROFILER_STRING(this),
-                      IDB_PROFILER_STRING(aKey));
+    IDB_LOG_MARK("IndexedDB %s: Child  Transaction[%lld] Request[%llu]: "
+                   "database(%s).transaction(%s).objectStore(%s).index(%s)."
+                   "getKey(%s)",
+                 "IndexedDB %s: C T[%lld] R[%llu]: IDBIndex.getKey()",
+                 IDB_LOG_ID_STRING(),
+                 transaction->LoggingSerialNumber(),
+                 request->LoggingSerialNumber(),
+                 IDB_LOG_STRINGIFY(transaction->Database()),
+                 IDB_LOG_STRINGIFY(transaction),
+                 IDB_LOG_STRINGIFY(mObjectStore),
+                 IDB_LOG_STRINGIFY(this),
+                 IDB_LOG_STRINGIFY(keyRange));
   } else {
-    IDB_PROFILER_MARK("IndexedDB Request %llu: "
-                      "database(%s).transaction(%s).objectStore(%s).index(%s)."
-                      "get(%s)",
-                      "IDBRequest[%llu] MT IDBIndex.get()",
-                      request->GetSerialNumber(),
-                      IDB_PROFILER_STRING(transaction->Database()),
-                      IDB_PROFILER_STRING(transaction),
-                      IDB_PROFILER_STRING(mObjectStore),
-                      IDB_PROFILER_STRING(this),
-                      IDB_PROFILER_STRING(aKey));
+    IDB_LOG_MARK("IndexedDB %s: Child  Transaction[%lld] Request[%llu]: "
+                   "database(%s).transaction(%s).objectStore(%s).index(%s)."
+                   "get(%s)",
+                 "IndexedDB %s: C T[%lld] R[%llu]: IDBIndex.get()",
+                 IDB_LOG_ID_STRING(),
+                 transaction->LoggingSerialNumber(),
+                 request->LoggingSerialNumber(),
+                 IDB_LOG_STRINGIFY(transaction->Database()),
+                 IDB_LOG_STRINGIFY(transaction),
+                 IDB_LOG_STRINGIFY(mObjectStore),
+                 IDB_LOG_STRINGIFY(this),
+                 IDB_LOG_STRINGIFY(keyRange));
   }
+
+  transaction->StartRequest(request, params);
+
   return request.forget();
 }
 
@@ -340,35 +343,37 @@ IDBIndex::GetAllInternal(bool aKeysOnly,
   nsRefPtr<IDBRequest> request = GenerateRequest(this);
   MOZ_ASSERT(request);
 
-  BackgroundRequestChild* actor = new BackgroundRequestChild(request);
-
-  transaction->StartRequest(actor, params);
-
   if (aKeysOnly) {
-    IDB_PROFILER_MARK("IndexedDB Request %llu: "
-                      "database(%s).transaction(%s).objectStore(%s).index(%s)."
-                      "getAllKeys(%s, %lu)",
-                      "IDBRequest[%llu] MT IDBIndex.getAllKeys()",
-                      request->GetSerialNumber(),
-                      IDB_PROFILER_STRING(transaction->Database()),
-                      IDB_PROFILER_STRING(transaction),
-                      IDB_PROFILER_STRING(mObjectStore),
-                      IDB_PROFILER_STRING(this),
-                      IDB_PROFILER_STRING(aKeyRange),
-                      aLimit);
+    IDB_LOG_MARK("IndexedDB %s: Child  Transaction[%lld] Request[%llu]: "
+                   "database(%s).transaction(%s).objectStore(%s).index(%s)."
+                   "getAllKeys(%s, %s)",
+                 "IndexedDB %s: C T[%lld] R[%llu]: IDBIndex.getAllKeys()",
+                 IDB_LOG_ID_STRING(),
+                 transaction->LoggingSerialNumber(),
+                 request->LoggingSerialNumber(),
+                 IDB_LOG_STRINGIFY(transaction->Database()),
+                 IDB_LOG_STRINGIFY(transaction),
+                 IDB_LOG_STRINGIFY(mObjectStore),
+                 IDB_LOG_STRINGIFY(this),
+                 IDB_LOG_STRINGIFY(keyRange),
+                 IDB_LOG_STRINGIFY(aLimit));
   } else {
-    IDB_PROFILER_MARK("IndexedDB Request %llu: "
-                      "database(%s).transaction(%s).objectStore(%s).index(%s)."
-                      "getAll(%s, %lu)",
-                      "IDBRequest[%llu] MT IDBIndex.getAll()",
-                      request->GetSerialNumber(),
-                      IDB_PROFILER_STRING(transaction->Database()),
-                      IDB_PROFILER_STRING(transaction),
-                      IDB_PROFILER_STRING(mObjectStore),
-                      IDB_PROFILER_STRING(this),
-                      IDB_PROFILER_STRING(aKeyRange),
-                      aLimit);
+    IDB_LOG_MARK("IndexedDB %s: Child  Transaction[%lld] Request[%llu]: "
+                   "database(%s).transaction(%s).objectStore(%s).index(%s)."
+                   "getAll(%s, %s)",
+                 "IndexedDB %s: C T[%lld] R[%llu]: IDBIndex.getAll()",
+                 IDB_LOG_ID_STRING(),
+                 transaction->LoggingSerialNumber(),
+                 request->LoggingSerialNumber(),
+                 IDB_LOG_STRINGIFY(transaction->Database()),
+                 IDB_LOG_STRINGIFY(transaction),
+                 IDB_LOG_STRINGIFY(mObjectStore),
+                 IDB_LOG_STRINGIFY(this),
+                 IDB_LOG_STRINGIFY(keyRange),
+                 IDB_LOG_STRINGIFY(aLimit));
   }
+
+  transaction->StartRequest(request, params);
 
   return request.forget();
 }
@@ -432,6 +437,37 @@ IDBIndex::OpenCursorInternal(bool aKeysOnly,
   nsRefPtr<IDBRequest> request = GenerateRequest(this);
   MOZ_ASSERT(request);
 
+  if (aKeysOnly) {
+    IDB_LOG_MARK("IndexedDB %s: Child  Transaction[%lld] Request[%llu]: "
+                   "database(%s).transaction(%s).objectStore(%s).index(%s)."
+                   "openKeyCursor(%s, %s)",
+                 "IndexedDB %s: C T[%lld] R[%llu]: IDBIndex.openKeyCursor()",
+                 IDB_LOG_ID_STRING(),
+                 transaction->LoggingSerialNumber(),
+                 request->LoggingSerialNumber(),
+                 IDB_LOG_STRINGIFY(transaction->Database()),
+                 IDB_LOG_STRINGIFY(transaction),
+                 IDB_LOG_STRINGIFY(mObjectStore),
+                 IDB_LOG_STRINGIFY(this),
+                 IDB_LOG_STRINGIFY(keyRange),
+                 IDB_LOG_STRINGIFY(direction));
+  } else {
+    IDB_LOG_MARK("IndexedDB %s: Child  Transaction[%lld] Request[%llu]: "
+                   "database(%s).transaction(%s).objectStore(%s).index(%s)."
+                   "openCursor(%s, %s)",
+                 "IndexedDB %s: C T[%lld] R[%llu]: "
+                   "IDBObjectStore.openKeyCursor()",
+                 IDB_LOG_ID_STRING(),
+                 transaction->LoggingSerialNumber(),
+                 request->LoggingSerialNumber(),
+                 IDB_LOG_STRINGIFY(transaction->Database()),
+                 IDB_LOG_STRINGIFY(transaction),
+                 IDB_LOG_STRINGIFY(mObjectStore),
+                 IDB_LOG_STRINGIFY(this),
+                 IDB_LOG_STRINGIFY(keyRange),
+                 IDB_LOG_STRINGIFY(direction));
+  }
+
   BackgroundCursorChild* actor =
     new BackgroundCursorChild(request, this, direction);
 
@@ -474,20 +510,20 @@ IDBIndex::Count(JSContext* aCx,
   nsRefPtr<IDBRequest> request = GenerateRequest(this);
   MOZ_ASSERT(request);
 
-  BackgroundRequestChild* actor = new BackgroundRequestChild(request);
+  IDB_LOG_MARK("IndexedDB %s: Child  Transaction[%lld] Request[%llu]: "
+                 "database(%s).transaction(%s).objectStore(%s).index(%s)."
+                 "count(%s)",
+               "IndexedDB %s: C T[%lld] R[%llu]: IDBObjectStore.count()",
+               IDB_LOG_ID_STRING(),
+               transaction->LoggingSerialNumber(),
+               request->LoggingSerialNumber(),
+               IDB_LOG_STRINGIFY(transaction->Database()),
+               IDB_LOG_STRINGIFY(transaction),
+               IDB_LOG_STRINGIFY(mObjectStore),
+               IDB_LOG_STRINGIFY(this),
+               IDB_LOG_STRINGIFY(keyRange));
 
-  transaction->StartRequest(actor, params);
-
-  IDB_PROFILER_MARK("IndexedDB Request %llu: "
-                    "database(%s).transaction(%s).objectStore(%s).index(%s)."
-                    "count(%s)",
-                    "IDBRequest[%llu] MT IDBObjectStore.count()",
-                    request->GetSerialNumber(),
-                    IDB_PROFILER_STRING(transaction->Database()),
-                    IDB_PROFILER_STRING(transaction),
-                    IDB_PROFILER_STRING(mObjectStore),
-                    IDB_PROFILER_STRING(this),
-                    IDB_PROFILER_STRING(aKey));
+  transaction->StartRequest(request, params);
 
   return request.forget();
 }
@@ -517,7 +553,7 @@ NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN(IDBIndex)
 
   // Don't unlink mObjectStore!
 
-  tmp->mCachedKeyPath = JSVAL_VOID;
+  tmp->mCachedKeyPath.setUndefined();
 
   if (tmp->mRooted) {
     mozilla::DropJSObjects(tmp);
@@ -526,9 +562,9 @@ NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN(IDBIndex)
 NS_IMPL_CYCLE_COLLECTION_UNLINK_END
 
 JSObject*
-IDBIndex::WrapObject(JSContext* aCx)
+IDBIndex::WrapObject(JSContext* aCx, JS::Handle<JSObject*> aGivenProto)
 {
-  return IDBIndexBinding::Wrap(aCx, this);
+  return IDBIndexBinding::Wrap(aCx, this, aGivenProto);
 }
 
 } // namespace indexedDB

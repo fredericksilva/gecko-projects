@@ -7,7 +7,7 @@
 // Test that the rule-view behaves correctly when entering mutliple and/or
 // unfinished properties/values in inplace-editors
 
-let test = asyncTest(function*() {
+add_task(function*() {
   yield addTab("data:text/html;charset=utf-8,test rule view user changes");
   content.document.body.innerHTML = "<h1>Testing Multiple Properties</h1>";
   let {toolbox, inspector, view} = yield openRuleView();
@@ -29,9 +29,11 @@ function* testMultiValues(inspector, ruleEditor, view) {
   is(ruleEditor.propertyList.children.length, 1, "Should have created a property editor.");
 
   // Value is focused, lets add multiple rules here and make sure they get added
+  let onMutation = inspector.once("markupmutation");
   let valueEditor = ruleEditor.propertyList.children[0].querySelector("input");
   valueEditor.value = "height: 10px;color:blue"
   EventUtils.synthesizeKey("VK_RETURN", {}, view.doc.defaultView);
+  yield onMutation;
 
   is(ruleEditor.rule.textProps.length, 2, "Should have added the changed value.");
   is(ruleEditor.propertyList.children.length, 3, "Should have added the changed value editor.");
@@ -44,6 +46,4 @@ function* testMultiValues(inspector, ruleEditor, view) {
 
   is(ruleEditor.rule.textProps[1].name, "color", "Should have correct property name");
   is(ruleEditor.rule.textProps[1].value, "blue", "Should have correct property value");
-
-  yield inspector.once("inspector-updated");
 }

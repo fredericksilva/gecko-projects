@@ -93,6 +93,7 @@ namespace jit {
     _(JSOP_BITNOT)             \
     _(JSOP_NEG)                \
     _(JSOP_NEWARRAY)           \
+    _(JSOP_SPREADCALLARRAY)    \
     _(JSOP_NEWARRAY_COPYONWRITE) \
     _(JSOP_INITELEM_ARRAY)     \
     _(JSOP_NEWOBJECT)          \
@@ -103,27 +104,35 @@ namespace jit {
     _(JSOP_INITELEM_INC)       \
     _(JSOP_MUTATEPROTO)        \
     _(JSOP_INITPROP)           \
+    _(JSOP_INITLOCKEDPROP)     \
+    _(JSOP_INITHIDDENPROP)     \
     _(JSOP_INITPROP_GETTER)    \
     _(JSOP_INITPROP_SETTER)    \
     _(JSOP_ARRAYPUSH)          \
     _(JSOP_GETELEM)            \
     _(JSOP_SETELEM)            \
+    _(JSOP_STRICTSETELEM)      \
     _(JSOP_CALLELEM)           \
     _(JSOP_DELELEM)            \
+    _(JSOP_STRICTDELELEM)      \
     _(JSOP_IN)                 \
     _(JSOP_GETGNAME)           \
     _(JSOP_BINDGNAME)          \
     _(JSOP_SETGNAME)           \
+    _(JSOP_STRICTSETGNAME)     \
     _(JSOP_SETNAME)            \
+    _(JSOP_STRICTSETNAME)      \
     _(JSOP_GETPROP)            \
     _(JSOP_SETPROP)            \
+    _(JSOP_STRICTSETPROP)      \
     _(JSOP_CALLPROP)           \
     _(JSOP_DELPROP)            \
+    _(JSOP_STRICTDELPROP)      \
     _(JSOP_LENGTH)             \
     _(JSOP_GETXPROP)           \
     _(JSOP_GETALIASEDVAR)      \
     _(JSOP_SETALIASEDVAR)      \
-    _(JSOP_NAME)               \
+    _(JSOP_GETNAME)            \
     _(JSOP_BINDNAME)           \
     _(JSOP_DELNAME)            \
     _(JSOP_GETINTRINSIC)       \
@@ -145,14 +154,17 @@ namespace jit {
     _(JSOP_FUNAPPLY)           \
     _(JSOP_NEW)                \
     _(JSOP_EVAL)               \
+    _(JSOP_STRICTEVAL)         \
     _(JSOP_SPREADCALL)         \
     _(JSOP_SPREADNEW)          \
     _(JSOP_SPREADEVAL)         \
+    _(JSOP_STRICTSPREADEVAL)   \
     _(JSOP_IMPLICITTHIS)       \
+    _(JSOP_GIMPLICITTHIS)      \
     _(JSOP_INSTANCEOF)         \
     _(JSOP_TYPEOF)             \
     _(JSOP_TYPEOFEXPR)         \
-    _(JSOP_SETCALL)            \
+    _(JSOP_THROWMSG)           \
     _(JSOP_THROW)              \
     _(JSOP_THROWING)           \
     _(JSOP_TRY)                \
@@ -161,6 +173,7 @@ namespace jit {
     _(JSOP_RETSUB)             \
     _(JSOP_PUSHBLOCKSCOPE)     \
     _(JSOP_POPBLOCKSCOPE)      \
+    _(JSOP_FRESHENBLOCKSCOPE)  \
     _(JSOP_DEBUGLEAVEBLOCK)    \
     _(JSOP_EXCEPTION)          \
     _(JSOP_DEBUGGER)           \
@@ -188,9 +201,7 @@ class BaselineCompiler : public BaselineCompilerSpecific
 {
     FixedList<Label>            labels_;
     NonAssertingLabel           return_;
-#ifdef JSGC_GENERATIONAL
     NonAssertingLabel           postBarrierSlot_;
-#endif
 
     // Native code offset right before the scope chain is initialized.
     CodeOffsetLabel prologueOffset_;
@@ -210,7 +221,7 @@ class BaselineCompiler : public BaselineCompilerSpecific
     // Whether any on stack arguments are modified.
     bool modifiesArguments_;
 
-    Label *labelOf(jsbytecode *pc) {
+    Label* labelOf(jsbytecode* pc) {
         return &labels_[script->pcToOffset(pc)];
     }
 
@@ -222,7 +233,7 @@ class BaselineCompiler : public BaselineCompilerSpecific
     }
 
   public:
-    BaselineCompiler(JSContext *cx, TempAllocator &alloc, JSScript *script);
+    BaselineCompiler(JSContext* cx, TempAllocator& alloc, JSScript* script);
     bool init();
 
     MethodStatus compile();
@@ -230,17 +241,15 @@ class BaselineCompiler : public BaselineCompilerSpecific
   private:
     MethodStatus emitBody();
 
-    void emitInitializeLocals(size_t n, const Value &v);
+    void emitInitializeLocals(size_t n, const Value& v);
     bool emitPrologue();
     bool emitEpilogue();
-#ifdef JSGC_GENERATIONAL
     bool emitOutOfLinePostBarrierSlot();
-#endif
-    bool emitIC(ICStub *stub, ICEntry::Kind kind);
-    bool emitOpIC(ICStub *stub) {
+    bool emitIC(ICStub* stub, ICEntry::Kind kind);
+    bool emitOpIC(ICStub* stub) {
         return emitIC(stub, ICEntry::Kind_Op);
     }
-    bool emitNonOpIC(ICStub *stub) {
+    bool emitNonOpIC(ICStub* stub) {
         return emitIC(stub, ICEntry::Kind_NonOp);
     }
 
@@ -248,15 +257,19 @@ class BaselineCompiler : public BaselineCompilerSpecific
     bool emitInterruptCheck();
     bool emitWarmUpCounterIncrement(bool allowOsr=true);
     bool emitArgumentTypeChecks();
+    void emitIsDebuggeeCheck();
     bool emitDebugPrologue();
     bool emitDebugTrap();
-    bool emitSPSPush();
-    void emitSPSPop();
+    bool emitTraceLoggerEnter();
+    bool emitTraceLoggerExit();
+
+    void emitProfilerEnterFrame();
+    void emitProfilerExitFrame();
 
     bool initScopeChain();
 
-    void storeValue(const StackValue *source, const Address &dest,
-                    const ValueOperand &scratch);
+    void storeValue(const StackValue* source, const Address& dest,
+                    const ValueOperand& scratch);
 
 #define EMIT_OP(op) bool emit_##op();
     OPCODE_LIST(EMIT_OP)
@@ -284,7 +297,7 @@ class BaselineCompiler : public BaselineCompilerSpecific
 
     bool emitFormalArgAccess(uint32_t arg, bool get);
 
-    bool emitUninitializedLexicalCheck(const ValueOperand &val);
+    bool emitUninitializedLexicalCheck(const ValueOperand& val);
 
     bool addPCMappingEntry(bool addIndexEntry);
 

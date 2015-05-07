@@ -17,10 +17,12 @@
 #include <android/log.h>
 #include <string.h>
 
+#include "ImageLayers.h"
 #include "libdisplay/GonkDisplay.h"
-#include "HwcUtils.h"
 #include "HwcComposer2D.h"
+#include "HwcUtils.h"
 #include "LayerScope.h"
+#include "Units.h"
 #include "mozilla/layers/CompositorParent.h"
 #include "mozilla/layers/LayerManagerComposite.h"
 #include "mozilla/layers/PLayerTransaction.h"
@@ -29,18 +31,20 @@
 #include "mozilla/StaticPtr.h"
 #include "cutils/properties.h"
 #include "gfx2DGlue.h"
-#include "GeckoTouchDispatcher.h"
-
-#ifdef MOZ_ENABLE_PROFILER_SPS
-#include "GeckoProfiler.h"
-#include "ProfilerMarkers.h"
-#endif
+#include "gfxPlatform.h"
+#include "VsyncSource.h"
 
 #if ANDROID_VERSION >= 17
-#include "libdisplay/FramebufferSurface.h"
+#include "libdisplay/DisplaySurface.h"
 #include "gfxPrefs.h"
 #include "nsThreadUtils.h"
+#endif
 
+#if ANDROID_VERSION >= 21
+#ifndef HWC_BLIT
+#define HWC_BLIT 0xFF
+#endif
+#elif ANDROID_VERSION >= 17
 #ifndef HWC_BLIT
 #define HWC_BLIT (HWC_FRAMEBUFFER_TARGET + 1)
 #endif
@@ -107,6 +111,8 @@ static StaticRefPtr<HwcComposer2D> sInstance;
 HwcComposer2D::HwcComposer2D()
     : mHwc(nullptr)
     , mList(nullptr)
+    , mDpy(EGL_NO_DISPLAY)
+    , mSur(EGL_NO_SURFACE)
     , mGLContext(nullptr)
     , mMaxLayerCount(0)
     , mColorFill(false)
@@ -114,27 +120,19 @@ HwcComposer2D::HwcComposer2D()
 #if ANDROID_VERSION >= 17
     , mPrevRetireFence(Fence::NO_FENCE)
     , mPrevDisplayFence(Fence::NO_FENCE)
-    , mLastVsyncTime(0)
 #endif
     , mPrepared(false)
     , mHasHWVsync(false)
     , mLock("mozilla.HwcComposer2D.mLock")
 {
-}
-
-HwcComposer2D::~HwcComposer2D() {
-    free(mList);
-}
-
-int
-HwcComposer2D::Init(hwc_display_t dpy, hwc_surface_t sur, gl::GLContext* aGLContext)
-{
-    MOZ_ASSERT(!Initialized());
+#if ANDROID_VERSION >= 17
+    RegisterHwcEventCallback();
+#endif
 
     mHwc = (HwcDevice*)GetGonkDisplay()->GetHWCDevice();
     if (!mHwc) {
-        LOGE("Failed to initialize hwc");
-        return -1;
+        LOGD("no hwc support");
+        return;
     }
 
     nsIntSize screenSize;
@@ -142,7 +140,7 @@ HwcComposer2D::Init(hwc_display_t dpy, hwc_surface_t sur, gl::GLContext* aGLCont
     ANativeWindow *win = GetGonkDisplay()->GetNativeWindow();
     win->query(win, NATIVE_WINDOW_WIDTH, &screenSize.width);
     win->query(win, NATIVE_WINDOW_HEIGHT, &screenSize.height);
-    mScreenRect = nsIntRect(nsIntPoint(0, 0), screenSize);
+    mScreenRect = gfx::IntRect(gfx::IntPoint(0, 0), screenSize);
 
 #if ANDROID_VERSION >= 17
     int supported = 0;
@@ -158,22 +156,16 @@ HwcComposer2D::Init(hwc_display_t dpy, hwc_surface_t sur, gl::GLContext* aGLCont
         mColorFill = false;
         mRBSwapSupport = false;
     }
-
-    if (RegisterHwcEventCallback()) {
-        EnableVsync(true);
-    }
 #else
     char propValue[PROPERTY_VALUE_MAX];
     property_get("ro.display.colorfill", propValue, "0");
     mColorFill = (atoi(propValue) == 1) ? true : false;
     mRBSwapSupport = true;
 #endif
+}
 
-    mDpy = dpy;
-    mSur = sur;
-    mGLContext = aGLContext;
-
-    return 0;
+HwcComposer2D::~HwcComposer2D() {
+    free(mList);
 }
 
 HwcComposer2D*
@@ -186,17 +178,23 @@ HwcComposer2D::GetInstance()
     return sInstance;
 }
 
-void
+bool
 HwcComposer2D::EnableVsync(bool aEnable)
 {
 #if ANDROID_VERSION >= 17
-    if (NS_IsMainThread()) {
-        RunVsyncEventControl(aEnable);
-    } else {
-        nsRefPtr<nsIRunnable> event =
-            NS_NewRunnableMethodWithArg<bool>(this, &HwcComposer2D::RunVsyncEventControl, aEnable);
-        NS_DispatchToMainThread(event);
+    MOZ_ASSERT(NS_IsMainThread());
+    if (!mHasHWVsync) {
+      return false;
     }
+
+    HwcDevice* device = (HwcDevice*)GetGonkDisplay()->GetHWCDevice();
+    if (!device) {
+      return false;
+    }
+
+    return !device->eventControl(device, HWC_DISPLAY_PRIMARY, HWC_EVENT_VSYNC, aEnable) && aEnable;
+#else
+    return false;
 #endif
 }
 
@@ -213,51 +211,29 @@ HwcComposer2D::RegisterHwcEventCallback()
     // Disable Vsync first, and then register callback functions.
     device->eventControl(device, HWC_DISPLAY_PRIMARY, HWC_EVENT_VSYNC, false);
     device->registerProcs(device, &sHWCProcs);
-    mHasHWVsync = true;
 
-    if (!gfxPrefs::HardwareVsyncEnabled()) {
-        device->eventControl(device, HWC_DISPLAY_PRIMARY, HWC_EVENT_VSYNC, false);
-        mHasHWVsync = false;
-    }
-
+// Only support actual hardware vsync on kitkat due to innaccurate timings
+// with JellyBean, and HwcComposer bugs with L. Reenable for L later
+#if ANDROID_VERSION == 19
+    mHasHWVsync = gfxPrefs::HardwareVsyncEnabled();
+#else
+    mHasHWVsync = false;
+#endif
     return mHasHWVsync;
-}
-
-void
-HwcComposer2D::RunVsyncEventControl(bool aEnable)
-{
-    if (mHasHWVsync) {
-        HwcDevice* device = (HwcDevice*)GetGonkDisplay()->GetHWCDevice();
-        if (device && device->eventControl) {
-            device->eventControl(device, HWC_DISPLAY_PRIMARY, HWC_EVENT_VSYNC, aEnable);
-        }
-    }
 }
 
 void
 HwcComposer2D::Vsync(int aDisplay, nsecs_t aVsyncTimestamp)
 {
-    TimeStamp vsyncTime = mozilla::TimeStamp(aVsyncTimestamp);
-    nsecs_t vsyncInterval = aVsyncTimestamp - mLastVsyncTime;
-    if (vsyncInterval < 16000000 || vsyncInterval > 17000000) {
-      LOGE("Non-uniform vsync interval: %lld\n", vsyncInterval);
-    }
-    mLastVsyncTime = aVsyncTimestamp;
-
-#ifdef MOZ_ENABLE_PROFILER_SPS
-    if (profiler_is_active()) {
-        CompositorParent::PostInsertVsyncProfilerMarker(vsyncTime);
-    }
-#endif
-
-    VsyncDispatcher::GetInstance()->NotifyVsync(vsyncTime);
+    TimeStamp vsyncTime = mozilla::TimeStamp::FromSystemTime(aVsyncTimestamp);
+    gfxPlatform::GetPlatform()->GetHardwareVsync()->GetGlobalDisplay().NotifyVsync(vsyncTime);
 }
 
 // Called on the "invalidator" thread (run from HAL).
 void
 HwcComposer2D::Invalidate()
 {
-    if (!Initialized()) {
+    if (!mHwc) {
         LOGE("HwcComposer2D::Invalidate failed!");
         return;
     }
@@ -274,6 +250,14 @@ HwcComposer2D::SetCompositorParent(CompositorParent* aCompositorParent)
 {
     MutexAutoLock lock(mLock);
     mCompositorParent = aCompositorParent;
+}
+
+void
+HwcComposer2D::SetEGLInfo(hwc_display_t aDisplay, hwc_surface_t aSurface, gl::GLContext* aGLContext)
+{
+    mDpy = aDisplay;
+    mSur = aSurface;
+    mGLContext = aGLContext;
 }
 
 bool
@@ -343,16 +327,28 @@ HwcComposer2D::PrepareLayerList(Layer* aLayer,
     }
 
     uint8_t opacity = std::min(0xFF, (int)(aLayer->GetEffectiveOpacity() * 256.0));
+    if (opacity == 0) {
+        LOGD("%s Layer has zero opacity; skipping", aLayer->Name());
+        return true;
+    }
 #if ANDROID_VERSION < 18
     if (opacity < 0xFF) {
-        LOGD("%s Layer has planar semitransparency which is unsupported", aLayer->Name());
+        LOGD("%s Layer has planar semitransparency which is unsupported by hwcomposer", aLayer->Name());
         return false;
     }
 #endif
 
+    if (aLayer->GetMaskLayer()) {
+      LOGD("%s Layer has MaskLayer which is unsupported by hwcomposer", aLayer->Name());
+      return false;
+    }
+
     nsIntRect clip;
+    nsIntRect layerClip = aLayer->GetEffectiveClipRect() ?
+                          ParentLayerIntRect::ToUntyped(*aLayer->GetEffectiveClipRect()) : nsIntRect();
+    nsIntRect* layerClipPtr = aLayer->GetEffectiveClipRect() ? &layerClip : nullptr;
     if (!HwcUtils::CalculateClipRect(aParentTransform,
-                                     aLayer->GetEffectiveClipRect(),
+                                     layerClipPtr,
                                      aClip,
                                      &clip))
     {
@@ -369,14 +365,19 @@ HwcComposer2D::PrepareLayerList(Layer* aLayer,
     //
     // A 2D transform with PreservesAxisAlignedRectangles() has all the attributes
     // above
-    Matrix transform;
-    Matrix4x4 transform3D = aLayer->GetEffectiveTransform();
-
-    if (!transform3D.Is2D(&transform) || !transform.PreservesAxisAlignedRectangles()) {
-        LOGD("Layer has a 3D transform or a non-square angle rotation");
+    Matrix layerTransform;
+    if (!aLayer->GetEffectiveTransform().Is2D(&layerTransform) ||
+        !layerTransform.PreservesAxisAlignedRectangles()) {
+        LOGD("Layer EffectiveTransform has a 3D transform or a non-square angle rotation");
         return false;
     }
 
+    Matrix layerBufferTransform;
+    if (!aLayer->GetEffectiveTransformForBuffer().Is2D(&layerBufferTransform) ||
+        !layerBufferTransform.PreservesAxisAlignedRectangles()) {
+        LOGD("Layer EffectiveTransformForBuffer has a 3D transform or a non-square angle rotation");
+      return false;
+    }
 
     if (ContainerLayer* container = aLayer->AsContainerLayer()) {
         if (container->UseIntermediateSurface()) {
@@ -387,7 +388,7 @@ HwcComposer2D::PrepareLayerList(Layer* aLayer,
         container->SortChildrenBy3DZOrder(children);
 
         for (uint32_t i = 0; i < children.Length(); i++) {
-            if (!PrepareLayerList(children[i], clip, transform)) {
+            if (!PrepareLayerList(children[i], clip, layerTransform)) {
                 return false;
             }
         }
@@ -411,18 +412,27 @@ HwcComposer2D::PrepareLayerList(Layer* aLayer,
     if (fillColor) {
         bufferRect = nsIntRect(visibleRect);
     } else {
+        nsIntRect layerRect;
         if (state.mHasOwnOffset) {
             bufferRect = nsIntRect(state.mOffset.x, state.mOffset.y,
                                    state.mSize.width, state.mSize.height);
+            layerRect = bufferRect;
         } else {
             //Since the buffer doesn't have its own offset, assign the whole
             //surface size as its buffer bounds
             bufferRect = nsIntRect(0, 0, state.mSize.width, state.mSize.height);
+            layerRect = bufferRect;
+            if (aLayer->GetType() == Layer::TYPE_IMAGE) {
+                ImageLayer* imageLayer = static_cast<ImageLayer*>(aLayer);
+                if(imageLayer->GetScaleMode() != ScaleMode::SCALE_NONE) {
+                  layerRect = nsIntRect(0, 0, imageLayer->GetScaleToSize().width, imageLayer->GetScaleToSize().height);
+                }
+            }
         }
         // In some cases the visible rect assigned to the layer can be larger
         // than the layer's surface, e.g., an ImageLayer with a small Image
         // in it.
-        visibleRect.IntersectRect(visibleRect, bufferRect);
+        visibleRect.IntersectRect(visibleRect, layerRect);
     }
 
     // Buffer rotation is not to be confused with the angled rotation done by a transform matrix
@@ -432,12 +442,16 @@ HwcComposer2D::PrepareLayerList(Layer* aLayer,
         return false;
     }
 
+    const bool needsYFlip = state.OriginBottomLeft() ? true
+                                                     : false;
+
     hwc_rect_t sourceCrop, displayFrame;
     if(!HwcUtils::PrepareLayerRects(visibleRect,
-                          transform,
+                          layerTransform,
+                          layerBufferTransform,
                           clip,
                           bufferRect,
-                          state.YFlipped(),
+                          needsYFlip,
                           &(sourceCrop),
                           &(displayFrame)))
     {
@@ -518,7 +532,7 @@ HwcComposer2D::PrepareLayerList(Layer* aLayer,
         // And ignore scaling.
         //
         // Reflection is applied before rotation
-        gfx::Matrix rotation = transform;
+        gfx::Matrix rotation = layerTransform;
         // Compute fuzzy zero like PreservesAxisAlignedRectangles()
         if (fabs(rotation._11) < 1e-6) {
             if (rotation._21 < 0) {
@@ -614,7 +628,10 @@ HwcComposer2D::PrepareLayerList(Layer* aLayer,
             }
         }
 
-        if (state.YFlipped()) {
+        const bool needsYFlip = state.OriginBottomLeft() ? true
+                                                         : false;
+
+        if (needsYFlip) {
            // Invert vertical reflection flag if it was already set
            hwcLayer.transform ^= HWC_TRANSFORM_FLIP_V;
         }
@@ -623,7 +640,8 @@ HwcComposer2D::PrepareLayerList(Layer* aLayer,
             mVisibleRegions.push_back(HwcUtils::RectVector());
             HwcUtils::RectVector* visibleRects = &(mVisibleRegions.back());
             if(!HwcUtils::PrepareVisibleRegion(visibleRegion,
-                                     transform,
+                                     layerTransform,
+                                     layerBufferTransform,
                                      clip,
                                      bufferRect,
                                      visibleRects)) {
@@ -656,10 +674,10 @@ HwcComposer2D::PrepareLayerList(Layer* aLayer,
 bool
 HwcComposer2D::TryHwComposition()
 {
-    FramebufferSurface* fbsurface = (FramebufferSurface*)(GetGonkDisplay()->GetFBSurface());
+    DisplaySurface* dispSurface = (DisplaySurface*)(GetGonkDisplay()->GetDispSurface());
 
-    if (!(fbsurface && fbsurface->lastHandle)) {
-        LOGD("H/W Composition failed. FBSurface not initialized.");
+    if (!(dispSurface && dispSurface->lastHandle)) {
+        LOGD("H/W Composition failed. DispSurface not initialized.");
         return false;
     }
 
@@ -672,7 +690,7 @@ HwcComposer2D::TryHwComposition()
         }
     }
 
-    Prepare(fbsurface->lastHandle, -1);
+    Prepare(dispSurface->lastHandle, -1);
 
     /* Possible composition paths, after hwc prepare:
     1. GPU Composition
@@ -726,53 +744,44 @@ HwcComposer2D::TryHwComposition()
             // GPU or partial OVERLAY Composition
             return false;
         } else if (blitComposite) {
-            // Some EGLSurface implementations require glClear() on blit composition.
-            // See bug 1029856.
-            if (mGLContext) {
-                mGLContext->MakeCurrent();
-                mGLContext->fClearColor(0.0, 0.0, 0.0, 0.0);
-                mGLContext->fClear(LOCAL_GL_COLOR_BUFFER_BIT);
-            }
-            // BLIT Composition, flip FB target
-            GetGonkDisplay()->UpdateFBSurface(mDpy, mSur);
-            FramebufferSurface* fbsurface = (FramebufferSurface*)(GetGonkDisplay()->GetFBSurface());
-            if (!fbsurface) {
-                LOGE("H/W Composition failed. NULL FBSurface.");
+            // BLIT Composition, flip DispSurface target
+            GetGonkDisplay()->UpdateDispSurface(mDpy, mSur);
+            DisplaySurface* dispSurface = (DisplaySurface*)(GetGonkDisplay()->GetDispSurface());
+            if (!dispSurface) {
+                LOGE("H/W Composition failed. NULL DispSurface.");
                 return false;
             }
-            mList->hwLayers[idx].handle = fbsurface->lastHandle;
-            mList->hwLayers[idx].acquireFenceFd = fbsurface->GetPrevFBAcquireFd();
+            mList->hwLayers[idx].handle = dispSurface->lastHandle;
+            mList->hwLayers[idx].acquireFenceFd = dispSurface->GetPrevDispAcquireFd();
         }
     }
 
     // BLIT or full OVERLAY Composition
     Commit();
 
-    GetGonkDisplay()->SetFBReleaseFd(mList->hwLayers[idx].releaseFenceFd);
+    GetGonkDisplay()->SetDispReleaseFd(mList->hwLayers[idx].releaseFenceFd);
     mList->hwLayers[idx].releaseFenceFd = -1;
     return true;
 }
 
 bool
-HwcComposer2D::Render(EGLDisplay dpy, EGLSurface sur)
+HwcComposer2D::Render()
 {
-    if (!mList) {
-        // After boot, HWC list hasn't been created yet
-        return GetGonkDisplay()->SwapBuffers(dpy, sur);
+    // HWC module does not exist or mList is not created yet.
+    if (!mHwc || !mList) {
+        return GetGonkDisplay()->SwapBuffers(mDpy, mSur);
     }
 
-    GetGonkDisplay()->UpdateFBSurface(dpy, sur);
-
-    FramebufferSurface* fbsurface = (FramebufferSurface*)(GetGonkDisplay()->GetFBSurface());
-    if (!fbsurface) {
-        LOGE("H/W Composition failed. FBSurface not initialized.");
+    DisplaySurface* dispSurface = (DisplaySurface*)(GetGonkDisplay()->GetDispSurface());
+    if (!dispSurface) {
+        LOGE("H/W Composition failed. DispSurface not initialized.");
         return false;
     }
 
     if (mPrepared) {
         // No mHwc prepare, if already prepared in current draw cycle
-        mList->hwLayers[mList->numHwLayers - 1].handle = fbsurface->lastHandle;
-        mList->hwLayers[mList->numHwLayers - 1].acquireFenceFd = fbsurface->GetPrevFBAcquireFd();
+        mList->hwLayers[mList->numHwLayers - 1].handle = dispSurface->lastHandle;
+        mList->hwLayers[mList->numHwLayers - 1].acquireFenceFd = dispSurface->GetPrevDispAcquireFd();
     } else {
         mList->flags = HWC_GEOMETRY_CHANGED;
         mList->numHwLayers = 2;
@@ -783,19 +792,19 @@ HwcComposer2D::Render(EGLDisplay dpy, EGLSurface sur)
         mList->hwLayers[0].acquireFenceFd = -1;
         mList->hwLayers[0].releaseFenceFd = -1;
         mList->hwLayers[0].displayFrame = {0, 0, mScreenRect.width, mScreenRect.height};
-        Prepare(fbsurface->lastHandle, fbsurface->GetPrevFBAcquireFd());
+        Prepare(dispSurface->lastHandle, dispSurface->GetPrevDispAcquireFd());
     }
 
     // GPU or partial HWC Composition
     Commit();
 
-    GetGonkDisplay()->SetFBReleaseFd(mList->hwLayers[mList->numHwLayers - 1].releaseFenceFd);
+    GetGonkDisplay()->SetDispReleaseFd(mList->hwLayers[mList->numHwLayers - 1].releaseFenceFd);
     mList->hwLayers[mList->numHwLayers - 1].releaseFenceFd = -1;
     return true;
 }
 
 void
-HwcComposer2D::Prepare(buffer_handle_t fbHandle, int fence)
+HwcComposer2D::Prepare(buffer_handle_t dispHandle, int fence)
 {
     int idx = mList->numHwLayers - 1;
     const hwc_rect_t r = {0, 0, mScreenRect.width, mScreenRect.height};
@@ -809,7 +818,7 @@ HwcComposer2D::Prepare(buffer_handle_t fbHandle, int fence)
     mList->hwLayers[idx].hints = 0;
     mList->hwLayers[idx].flags = 0;
     mList->hwLayers[idx].transform = 0;
-    mList->hwLayers[idx].handle = fbHandle;
+    mList->hwLayers[idx].handle = dispHandle;
     mList->hwLayers[idx].blending = HWC_BLENDING_PREMULT;
     mList->hwLayers[idx].compositionType = HWC_FRAMEBUFFER_TARGET;
     setCrop(&mList->hwLayers[idx], r);
@@ -902,9 +911,9 @@ HwcComposer2D::TryHwComposition()
 }
 
 bool
-HwcComposer2D::Render(EGLDisplay dpy, EGLSurface sur)
+HwcComposer2D::Render()
 {
-    return GetGonkDisplay()->SwapBuffers(dpy, sur);
+    return GetGonkDisplay()->SwapBuffers(mDpy, mSur);
 }
 
 void
@@ -915,10 +924,13 @@ HwcComposer2D::Reset()
 #endif
 
 bool
-HwcComposer2D::TryRender(Layer* aRoot,
-                         bool aGeometryChanged)
+HwcComposer2D::TryRenderWithHwc(Layer* aRoot,
+                                bool aGeometryChanged)
 {
-    MOZ_ASSERT(Initialized());
+    if (!mHwc) {
+        return false;
+    }
+
     if (mList) {
         setHwcGeometry(aGeometryChanged);
         mList->numHwLayers = 0;
@@ -947,7 +959,7 @@ HwcComposer2D::TryRender(Layer* aRoot,
     SendtoLayerScope();
 
     if (!TryHwComposition()) {
-        LOGD("H/W Composition failed");
+        LOGD("Full HWC Composition failed. Fallback to GPU Composition or partial OVERLAY Composition");
         LayerScope::CleanLayer();
         return false;
     }

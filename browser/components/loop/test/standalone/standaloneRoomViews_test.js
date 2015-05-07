@@ -10,55 +10,245 @@ describe("loop.standaloneRoomViews", function() {
   "use strict";
 
   var ROOM_STATES = loop.store.ROOM_STATES;
+  var FEEDBACK_STATES = loop.store.FEEDBACK_STATES;
+  var ROOM_INFO_FAILURES = loop.shared.utils.ROOM_INFO_FAILURES;
   var sharedActions = loop.shared.actions;
+  var sharedUtils = loop.shared.utils;
 
-  var sandbox, dispatcher, activeRoomStore, dispatch;
+  var sandbox, dispatcher, activeRoomStore, feedbackStore, dispatch;
 
   beforeEach(function() {
     sandbox = sinon.sandbox.create();
     dispatcher = new loop.Dispatcher();
     dispatch = sandbox.stub(dispatcher, "dispatch");
-    activeRoomStore = new loop.store.ActiveRoomStore({
-      dispatcher: dispatcher,
+    activeRoomStore = new loop.store.ActiveRoomStore(dispatcher, {
       mozLoop: {},
       sdkDriver: {}
     });
+    feedbackStore = new loop.store.FeedbackStore(dispatcher, {
+      feedbackClient: {}
+    });
+    loop.store.StoreMixin.register({feedbackStore: feedbackStore});
+
+    sandbox.useFakeTimers();
+
+    // Prevents audio request errors in the test console.
+    sandbox.useFakeXMLHttpRequest();
   });
 
   afterEach(function() {
     sandbox.restore();
   });
 
-  describe("standaloneRoomView", function() {
+  describe("StandaloneRoomContextView", function() {
+    beforeEach(function() {
+      sandbox.stub(navigator.mozL10n, "get").returnsArg(0);
+    });
+
+    function mountTestComponent(extraProps) {
+      var props = _.extend({
+        dispatcher: dispatcher,
+        receivingScreenShare: false
+      }, extraProps);
+      return TestUtils.renderIntoDocument(
+        React.createElement(
+          loop.standaloneRoomViews.StandaloneRoomContextView, props));
+    }
+
+    it("should display the room name if no failures are known", function() {
+      var view = mountTestComponent({
+        roomName: "Mike's room",
+        receivingScreenShare: false
+      });
+
+      expect(view.getDOMNode().textContent).eql("Mike's room");
+    });
+
+    it("should log an unsupported browser message if crypto is unsupported", function() {
+      var view = mountTestComponent({
+        roomName: "Mark's room",
+        roomInfoFailure: ROOM_INFO_FAILURES.WEB_CRYPTO_UNSUPPORTED
+      });
+
+      sinon.assert.called(console.error);
+      sinon.assert.calledWithMatch(console.error, sinon.match("unsupported"));
+    });
+
+    it("should display a general error message for any other failure", function() {
+      var view = mountTestComponent({
+        roomName: "Mark's room",
+        roomInfoFailure: ROOM_INFO_FAILURES.NO_DATA
+      });
+
+      sinon.assert.called(console.error);
+      sinon.assert.calledWithMatch(console.error, sinon.match("not_available"));
+    });
+
+    it("should display context information if a url is supplied", function() {
+      var view = mountTestComponent({
+        roomName: "Mike's room",
+        roomContextUrls: [{
+          description: "Mark's super page",
+          location: "http://invalid.com",
+          thumbnail: "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw=="
+        }]
+      });
+
+      expect(view.getDOMNode().querySelector(".standalone-context-url")).not.eql(null);
+    });
+
+    it("should format the url for display", function() {
+      sandbox.stub(sharedUtils, "formatURL").returns({
+          location: "location",
+          hostname: "hostname"
+        });
+
+      var view = mountTestComponent({
+        roomName: "Mike's room",
+        roomContextUrls: [{
+          description: "Mark's super page",
+          location: "http://invalid.com",
+          thumbnail: "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw=="
+        }]
+      });
+
+      expect(view.getDOMNode()
+        .querySelector(".standalone-context-url-description-wrapper > a").textContent)
+        .eql("hostname");
+    });
+
+    it("should not display context information if no urls are supplied", function() {
+      var view = mountTestComponent({
+        roomName: "Mike's room"
+      });
+
+      expect(view.getDOMNode().querySelector(".standalone-context-url")).eql(null);
+    });
+
+    it("should dispatch a RecordClick action when the link is clicked", function() {
+      var view = mountTestComponent({
+        roomName: "Mark's room",
+        roomContextUrls: [{
+          description: "Mark's super page",
+          location: "http://invalid.com",
+          thumbnail: "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw=="
+        }]
+      });
+
+      TestUtils.Simulate.click(view.getDOMNode()
+        .querySelector(".standalone-context-url-description-wrapper > a"));
+
+      sinon.assert.calledOnce(dispatcher.dispatch);
+      sinon.assert.calledWithExactly(dispatcher.dispatch,
+        new sharedActions.RecordClick({
+          linkInfo: "Shared URL"
+        }));
+    });
+  });
+
+  describe("StandaloneRoomHeader", function() {
     function mountTestComponent() {
       return TestUtils.renderIntoDocument(
-        loop.standaloneRoomViews.StandaloneRoomView({
-          dispatcher: dispatcher,
-          activeRoomStore: activeRoomStore,
-          helper: new loop.shared.utils.Helper()
+        React.createElement(
+          loop.standaloneRoomViews.StandaloneRoomHeader, {
+            dispatcher: dispatcher
+          }));
+    }
+
+    it("should dispatch a RecordClick action when the support link is clicked", function() {
+      var view = mountTestComponent();
+
+      TestUtils.Simulate.click(view.getDOMNode().querySelector("a"));
+
+      sinon.assert.calledOnce(dispatcher.dispatch);
+      sinon.assert.calledWithExactly(dispatcher.dispatch,
+        new sharedActions.RecordClick({
+          linkInfo: "Support link click"
         }));
+    });
+  });
+
+  describe("StandaloneRoomView", function() {
+    function mountTestComponent() {
+      return TestUtils.renderIntoDocument(
+        React.createElement(
+          loop.standaloneRoomViews.StandaloneRoomView, {
+            dispatcher: dispatcher,
+            activeRoomStore: activeRoomStore,
+            isFirefox: true
+          }));
+    }
+
+    function expectActionDispatched(view) {
+      sinon.assert.calledOnce(dispatch);
+      sinon.assert.calledWithExactly(dispatch,
+        sinon.match.instanceOf(sharedActions.SetupStreamElements));
+      sinon.assert.calledWithExactly(dispatch, sinon.match(function(value) {
+        return value.getLocalElementFunc() ===
+               view.getDOMNode().querySelector(".local");
+      }));
+      sinon.assert.calledWithExactly(dispatch, sinon.match(function(value) {
+        return value.getRemoteElementFunc() ===
+               view.getDOMNode().querySelector(".remote");
+      }));
     }
 
     describe("#componentWillUpdate", function() {
-      it("dispatch an `SetupStreamElements` action on room joined", function() {
-        activeRoomStore.setStoreState({roomState: ROOM_STATES.READY});
+      it("should dispatch a `SetupStreamElements` action when the MEDIA_WAIT state " +
+        "is entered", function() {
+          activeRoomStore.setStoreState({roomState: ROOM_STATES.READY});
+          var view = mountTestComponent();
+
+          activeRoomStore.setStoreState({roomState: ROOM_STATES.MEDIA_WAIT});
+
+          expectActionDispatched(view);
+        });
+
+      it("should dispatch a `SetupStreamElements` action on MEDIA_WAIT state is " +
+        "re-entered", function() {
+          activeRoomStore.setStoreState({roomState: ROOM_STATES.ENDED});
+          var view = mountTestComponent();
+
+          activeRoomStore.setStoreState({roomState: ROOM_STATES.MEDIA_WAIT});
+
+          expectActionDispatched(view);
+        });
+
+      it("should updateVideoContainer when the JOINED state is entered", function() {
+          activeRoomStore.setStoreState({roomState: ROOM_STATES.READY});
+
+          var view = mountTestComponent();
+
+          sandbox.stub(view, "updateVideoContainer");
+
+          activeRoomStore.setStoreState({roomState: ROOM_STATES.JOINED});
+
+          sinon.assert.calledOnce(view.updateVideoContainer);
+      });
+
+      it("should updateVideoContainer when the JOINED state is re-entered", function() {
+          activeRoomStore.setStoreState({roomState: ROOM_STATES.ENDED});
+
+          var view = mountTestComponent();
+
+          sandbox.stub(view, "updateVideoContainer");
+
+          activeRoomStore.setStoreState({roomState: ROOM_STATES.JOINED});
+
+          sinon.assert.calledOnce(view.updateVideoContainer);
+      });
+
+      it("should reset the video dimensions cache when the gather state is entered", function() {
+        activeRoomStore.setStoreState({roomState: ROOM_STATES.SESSION_CONNECTED});
+
         var view = mountTestComponent();
 
-        sinon.assert.notCalled(dispatch);
+        activeRoomStore.setStoreState({roomState: ROOM_STATES.GATHER});
 
-        activeRoomStore.setStoreState({roomState: ROOM_STATES.JOINED});
-
-        sinon.assert.calledOnce(dispatch);
-        sinon.assert.calledWithExactly(dispatch,
-          sinon.match.instanceOf(sharedActions.SetupStreamElements));
-        sinon.assert.calledWithExactly(dispatch, sinon.match(function(value) {
-          return value.getLocalElementFunc() ===
-                 view.getDOMNode().querySelector(".local");
-        }));
-        sinon.assert.calledWithExactly(dispatch, sinon.match(function(value) {
-          return value.getRemoteElementFunc() ===
-                 view.getDOMNode().querySelector(".remote");
-        }));
+        expect(view._videoDimensionsCache).eql({
+          local: {},
+          remote: {}
+        });
       });
     });
 
@@ -96,6 +286,192 @@ describe("loop.standaloneRoomViews", function() {
       });
     });
 
+    describe("Local Stream Size Position", function() {
+      var view, localElement;
+
+      beforeEach(function() {
+        sandbox.stub(window, "matchMedia").returns({
+          matches: false
+        });
+        view = mountTestComponent();
+        localElement = view._getElement(".local");
+      });
+
+      it("should be a quarter of the width of the main stream", function() {
+        sandbox.stub(view, "getRemoteVideoDimensions").returns({
+          streamWidth: 640,
+          offsetX: 0
+        });
+
+        view.updateLocalCameraPosition({
+          width: 1,
+          height: 0.75
+        });
+
+        expect(localElement.style.width).eql("160px");
+        expect(localElement.style.height).eql("120px");
+      });
+
+      it("should be a quarter of the width reduced for aspect ratio", function() {
+        sandbox.stub(view, "getRemoteVideoDimensions").returns({
+          streamWidth: 640,
+          offsetX: 0
+        });
+
+        view.updateLocalCameraPosition({
+          width: 0.75,
+          height: 1
+        });
+
+        expect(localElement.style.width).eql("120px");
+        expect(localElement.style.height).eql("160px");
+      });
+
+      it("should ensure the height is a minimum of 48px", function() {
+        sandbox.stub(view, "getRemoteVideoDimensions").returns({
+          streamWidth: 180,
+          offsetX: 0
+        });
+
+        view.updateLocalCameraPosition({
+          width: 1,
+          height: 0.75
+        });
+
+        expect(localElement.style.width).eql("64px");
+        expect(localElement.style.height).eql("48px");
+      });
+
+      it("should ensure the width is a minimum of 48px", function() {
+        sandbox.stub(view, "getRemoteVideoDimensions").returns({
+          streamWidth: 180,
+          offsetX: 0
+        });
+
+        view.updateLocalCameraPosition({
+          width: 0.75,
+          height: 1
+        });
+
+        expect(localElement.style.width).eql("48px");
+        expect(localElement.style.height).eql("64px");
+      });
+
+      it("should position the stream to overlap the main stream by a quarter", function() {
+        sandbox.stub(view, "getRemoteVideoDimensions").returns({
+          streamWidth: 640,
+          offsetX: 0
+        });
+
+        view.updateLocalCameraPosition({
+          width: 1,
+          height: 0.75
+        });
+
+        expect(localElement.style.width).eql("160px");
+        expect(localElement.style.left).eql("600px");
+      });
+
+      it("should position the stream to overlap the main stream by a quarter when the aspect ratio is vertical", function() {
+        sandbox.stub(view, "getRemoteVideoDimensions").returns({
+          streamWidth: 640,
+          offsetX: 0
+        });
+
+        view.updateLocalCameraPosition({
+          width: 0.75,
+          height: 1
+        });
+
+        expect(localElement.style.width).eql("120px");
+        expect(localElement.style.left).eql("610px");
+      });
+    });
+
+    describe("Remote Stream Size Position", function() {
+      var view, localElement, remoteElement;
+
+      beforeEach(function() {
+        sandbox.stub(window, "matchMedia").returns({
+          matches: false
+        });
+        view = mountTestComponent();
+
+        localElement = {
+          style: {}
+        };
+        remoteElement = {
+          style: {},
+          removeAttribute: sinon.spy()
+        };
+
+        sandbox.stub(view, "_getElement", function(className) {
+          return className === ".local" ? localElement : remoteElement;
+        });
+
+        view.setState({"receivingScreenShare": true});
+      });
+
+      it("should do nothing if not receiving screenshare", function() {
+        view.setState({"receivingScreenShare": false});
+        remoteElement.style.width = "10px";
+
+        view.updateRemoteCameraPosition({
+          width: 1,
+          height: 0.75
+        });
+
+        expect(remoteElement.style.width).eql("10px");
+      });
+
+      it("should be the same width as the local video", function() {
+        localElement.offsetWidth = 100;
+
+        view.updateRemoteCameraPosition({
+          width: 1,
+          height: 0.75
+        });
+
+        expect(remoteElement.style.width).eql("100px");
+      });
+
+      it("should be the same left edge as the local video", function() {
+        localElement.offsetLeft = 50;
+
+        view.updateRemoteCameraPosition({
+          width: 1,
+          height: 0.75
+        });
+
+        expect(remoteElement.style.left).eql("50px");
+      });
+
+      it("should have a height determined by the aspect ratio", function() {
+        localElement.offsetWidth = 100;
+
+        view.updateRemoteCameraPosition({
+          width: 1,
+          height: 0.75
+        });
+
+        expect(remoteElement.style.height).eql("75px");
+      });
+
+      it("should have the top be set such that the bottom is 10px above the local video", function() {
+        localElement.offsetWidth = 100;
+        localElement.offsetTop = 200;
+
+        view.updateRemoteCameraPosition({
+          width: 1,
+          height: 0.75
+        });
+
+        // 200 (top) - 75 (height) - 10 (spacing) = 115
+        expect(remoteElement.style.top).eql("115px");
+      });
+
+    });
+
     describe("#render", function() {
       var view;
 
@@ -129,6 +505,16 @@ describe("loop.standaloneRoomViews", function() {
           });
       });
 
+      describe("Prompt media message", function() {
+        it("should display a prompt for user media on MEDIA_WAIT",
+          function() {
+            activeRoomStore.setStoreState({roomState: ROOM_STATES.MEDIA_WAIT});
+
+            expect(view.getDOMNode().querySelector(".prompt-media-message"))
+              .not.eql(null);
+          });
+      });
+
       describe("Full room message", function() {
         it("should display a full room message on FULL",
           function() {
@@ -145,6 +531,14 @@ describe("loop.standaloneRoomViews", function() {
             activeRoomStore.setStoreState({roomState: ROOM_STATES.FAILED});
 
             expect(view.getDOMNode().querySelector(".failed-room-message"))
+              .not.eql(null);
+          });
+
+        it("should display a retry button",
+          function() {
+            activeRoomStore.setStoreState({roomState: ROOM_STATES.FAILED});
+
+            expect(view.getDOMNode().querySelector(".btn-info"))
               .not.eql(null);
           });
       });
@@ -231,6 +625,71 @@ describe("loop.standaloneRoomViews", function() {
 
           sinon.assert.calledOnce(dispatch);
           sinon.assert.calledWithExactly(dispatch, new sharedActions.LeaveRoom());
+        });
+      });
+
+      describe("Feedback", function() {
+        beforeEach(function() {
+          activeRoomStore.setStoreState({
+            roomState: ROOM_STATES.ENDED,
+            used: true
+          });
+        });
+
+        it("should display a feedback form when the user leaves the room",
+          function() {
+            expect(view.getDOMNode().querySelector(".faces")).not.eql(null);
+          });
+
+        it("should dispatch a `FeedbackComplete` action after feedback is sent",
+          function() {
+            feedbackStore.setStoreState({feedbackState: FEEDBACK_STATES.SENT});
+
+            sandbox.clock.tick(
+              loop.shared.views.WINDOW_AUTOCLOSE_TIMEOUT_IN_SECONDS * 1000 + 1000);
+
+            sinon.assert.calledOnce(dispatch);
+            sinon.assert.calledWithExactly(dispatch, new sharedActions.FeedbackComplete());
+          });
+
+        it("should NOT display a feedback form if the room has not been used",
+          function() {
+            activeRoomStore.setStoreState({used: false});
+            expect(view.getDOMNode().querySelector(".faces")).eql(null);
+          });
+
+      });
+
+      describe("Mute", function() {
+        it("should render local media as audio-only if video is muted",
+          function() {
+            activeRoomStore.setStoreState({
+              roomState: ROOM_STATES.SESSION_CONNECTED,
+              videoMuted: true
+            });
+
+            expect(view.getDOMNode().querySelector(".local-stream-audio"))
+              .not.eql(null);
+          });
+      });
+
+      describe("Marketplace hidden iframe", function() {
+
+        it("should set src when the store state change",
+           function(done) {
+
+          var marketplace = view.getDOMNode().querySelector("#marketplace");
+          expect(marketplace.src).to.be.equal("");
+
+          activeRoomStore.setStoreState({
+            marketplaceSrc: "http://market/",
+            onMarketplaceMessage: function () {}
+          });
+
+          view.forceUpdate(function() {
+            expect(marketplace.src).to.be.equal("http://market/");
+            done();
+          });
         });
       });
     });

@@ -1,4 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -31,7 +32,7 @@
 #include "nsContentUtils.h"
 #include "mozilla/Preferences.h"
 #include "xpcpublic.h"
-#include "nsCrossSiteListenerProxy.h"
+#include "nsCORSListenerProxy.h"
 #include "nsWrapperCacheInlines.h"
 #include "mozilla/Attributes.h"
 #include "nsError.h"
@@ -62,7 +63,6 @@ EventSource::EventSource(nsPIDOMWindow* aOwnerWindow) :
   mGoingToDispatchAllMessages(false),
   mWithCredentials(false),
   mWaitingForOnStopRequest(false),
-  mInterrupted(false),
   mLastConvertionResult(NS_OK),
   mReadyState(CONNECTING),
   mScriptLine(0),
@@ -202,11 +202,7 @@ EventSource::Init(nsISupports* aOwner,
 
   // The conditional here is historical and not necessarily sane.
   if (JSContext *cx = nsContentUtils::GetCurrentJSContext()) {
-    const char *filename;
-    if (nsJSUtils::GetCallingLocation(cx, &filename, &mScriptLine)) {
-      mScriptFile.AssignASCII(filename);
-    }
-
+    nsJSUtils::GetCallingLocation(cx, mScriptFile, &mScriptLine);
     mInnerWindowID = nsJSUtils::GetCurrentlyRunningCodeInnerWindowID(cx);
   }
 
@@ -270,9 +266,9 @@ EventSource::Init(nsISupports* aOwner,
 }
 
 /* virtual */ JSObject*
-EventSource::WrapObject(JSContext* aCx)
+EventSource::WrapObject(JSContext* aCx, JS::Handle<JSObject*> aGivenProto)
 {
-  return EventSourceBinding::Wrap(aCx, this);
+  return EventSourceBinding::Wrap(aCx, this, aGivenProto);
 }
 
 /* static */ already_AddRefed<EventSource>
@@ -341,21 +337,14 @@ EventSource::OnStartRequest(nsIRequest *aRequest,
   nsCOMPtr<nsIHttpChannel> httpChannel = do_QueryInterface(aRequest, &rv);
   NS_ENSURE_SUCCESS(rv, rv);
 
-  bool requestSucceeded;
-  rv = httpChannel->GetRequestSucceeded(&requestSucceeded);
-  NS_ENSURE_SUCCESS(rv, rv);
-
-  nsAutoCString contentType;
-  rv = httpChannel->GetContentType(contentType);
-  NS_ENSURE_SUCCESS(rv, rv);
-
   nsresult status;
-  aRequest->GetStatus(&status);
+  rv = aRequest->GetStatus(&status);
+  NS_ENSURE_SUCCESS(rv, rv);
 
-  if (NS_FAILED(status) || !requestSucceeded ||
-      !contentType.EqualsLiteral(TEXT_EVENT_STREAM)) {
-    DispatchFailConnection();
-    return NS_ERROR_NOT_AVAILABLE;
+  if (NS_FAILED(status)) {
+    // EventSource::OnStopRequest will evaluate if it shall either reestablish
+    // or fail the connection
+    return NS_ERROR_ABORT;
   }
 
   uint32_t httpStatus;
@@ -363,7 +352,15 @@ EventSource::OnStartRequest(nsIRequest *aRequest,
   NS_ENSURE_SUCCESS(rv, rv);
 
   if (httpStatus != 200) {
-    mInterrupted = true;
+    DispatchFailConnection();
+    return NS_ERROR_ABORT;
+  }
+
+  nsAutoCString contentType;
+  rv = httpChannel->GetContentType(contentType);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  if (!contentType.EqualsLiteral(TEXT_EVENT_STREAM)) {
     DispatchFailConnection();
     return NS_ERROR_ABORT;
   }
@@ -454,19 +451,27 @@ EventSource::OnStopRequest(nsIRequest *aRequest,
     return NS_ERROR_ABORT;
   }
 
-  if (NS_FAILED(aStatusCode)) {
+  // "Network errors that prevents the connection from being established in the
+  //  first place (e.g. DNS errors), must cause the user agent to asynchronously
+  //  reestablish the connection.
+  //
+  //  (...) the cancelation of the fetch algorithm by the user agent (e.g. in
+  //  response to window.stop() or the user canceling the network connection
+  //  manually) must cause the user agent to fail the connection.
+
+  if (NS_FAILED(aStatusCode) &&
+      aStatusCode != NS_ERROR_CONNECTION_REFUSED &&
+      aStatusCode != NS_ERROR_NET_TIMEOUT &&
+      aStatusCode != NS_ERROR_NET_RESET &&
+      aStatusCode != NS_ERROR_NET_INTERRUPT &&
+      aStatusCode != NS_ERROR_PROXY_CONNECTION_REFUSED &&
+      aStatusCode != NS_ERROR_DNS_LOOKUP_QUEUE_FULL) {
     DispatchFailConnection();
-    return aStatusCode;
+    return NS_ERROR_ABORT;
   }
 
-  nsresult rv;
-  nsresult healthOfRequestResult = CheckHealthOfRequestCallback(aRequest);
-  if (NS_SUCCEEDED(healthOfRequestResult) &&
-      mLastConvertionResult == NS_PARTIAL_MORE_INPUT) {
-    // we had an incomplete UTF8 char at the end of the stream
-    rv = ParseCharacter(REPLACEMENT_CHAR);
-    NS_ENSURE_SUCCESS(rv, rv);
-  }
+  nsresult rv = CheckHealthOfRequestCallback(aRequest);
+  NS_ENSURE_SUCCESS(rv, rv);
 
   ClearFields();
 
@@ -477,14 +482,14 @@ EventSource::OnStopRequest(nsIRequest *aRequest,
   rv = NS_DispatchToMainThread(event);
   NS_ENSURE_SUCCESS(rv, rv);
 
-  return healthOfRequestResult;
+  return NS_OK;
 }
 
 /**
  * Simple helper class that just forwards the redirect callback back
  * to the EventSource.
  */
-class AsyncVerifyRedirectCallbackFwr MOZ_FINAL : public nsIAsyncVerifyRedirectCallback
+class AsyncVerifyRedirectCallbackFwr final : public nsIAsyncVerifyRedirectCallback
 {
 public:
   explicit AsyncVerifyRedirectCallbackFwr(EventSource* aEventsource)
@@ -496,7 +501,7 @@ public:
   NS_DECL_CYCLE_COLLECTION_CLASS(AsyncVerifyRedirectCallbackFwr)
 
   // nsIAsyncVerifyRedirectCallback implementation
-  NS_IMETHOD OnRedirectVerifyCallback(nsresult aResult)
+  NS_IMETHOD OnRedirectVerifyCallback(nsresult aResult) override
   {
     nsresult rv = mEventSource->OnRedirectVerifyCallback(aResult);
     if (NS_FAILED(rv)) {
@@ -576,9 +581,9 @@ EventSource::AsyncOnChannelRedirect(nsIChannel *aOldChannel,
 nsresult
 EventSource::OnRedirectVerifyCallback(nsresult aResult)
 {
-  NS_ABORT_IF_FALSE(mRedirectCallback, "mRedirectCallback not set in callback");
-  NS_ABORT_IF_FALSE(mNewRedirectChannel,
-                    "mNewRedirectChannel not set in callback");
+  MOZ_ASSERT(mRedirectCallback, "mRedirectCallback not set in callback");
+  MOZ_ASSERT(mNewRedirectChannel,
+             "mNewRedirectChannel not set in callback");
 
   NS_ENSURE_SUCCESS(aResult, aResult);
 
@@ -692,6 +697,17 @@ EventSource::GetBaseURI(nsIURI **aBaseURI)
   return NS_OK;
 }
 
+net::ReferrerPolicy
+EventSource::GetReferrerPolicy()
+{
+  nsresult rv;
+  nsIScriptContext* sc = GetContextForEventHandlers(&rv);
+  NS_ENSURE_SUCCESS(rv, mozilla::net::RP_Default);
+
+  nsCOMPtr<nsIDocument> doc = nsContentUtils::GetDocumentFromScriptContext(sc);
+  return doc ? doc->GetReferrerPolicy() : mozilla::net::RP_Default;
+}
+
 nsresult
 EventSource::SetupHttpChannel()
 {
@@ -712,7 +728,7 @@ EventSource::SetupHttpChannel()
   nsCOMPtr<nsIURI> codebase;
   nsresult rv = GetBaseURI(getter_AddRefs(codebase));
   if (NS_SUCCEEDED(rv)) {
-    rv = mHttpChannel->SetReferrer(codebase);
+    rv = mHttpChannel->SetReferrerWithPolicy(codebase, this->GetReferrerPolicy());
     NS_ENSURE_SUCCESS(rv, rv);
   }
 
@@ -781,7 +797,7 @@ EventSource::InitChannelAndRequestEventSource()
 
   nsRefPtr<nsCORSListenerProxy> listener =
     new nsCORSListenerProxy(this, mPrincipal, mWithCredentials);
-  rv = listener->Init(mHttpChannel);
+  rv = listener->Init(mHttpChannel, DataURIHandling::Allow);
   NS_ENSURE_SUCCESS(rv, rv);
 
   // Start reading from the channel
@@ -866,11 +882,6 @@ void
 EventSource::ReestablishConnection()
 {
   if (mReadyState == CLOSED) {
-    return;
-  }
-
-  if (mReadyState != OPEN) {
-    NS_WARNING("Unexpected mReadyState!!!");
     return;
   }
 
@@ -994,7 +1005,7 @@ EventSource::ConsoleError()
   NS_ConvertUTF8toUTF16 specUTF16(targetSpec);
   const char16_t *formatStrings[] = { specUTF16.get() };
 
-  if (mReadyState == CONNECTING && !mInterrupted) {
+  if (mReadyState == CONNECTING) {
     rv = PrintErrorOnConsole("chrome://global/locale/appstrings.properties",
                              MOZ_UTF16("connectionFailure"),
                              formatStrings, ArrayLength(formatStrings));

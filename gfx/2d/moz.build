@@ -26,12 +26,15 @@ EXPORTS.mozilla.gfx += [
     'Helpers.h',
     'Logging.h',
     'Matrix.h',
+    'NumericTools.h',
     'PathHelpers.h',
     'PatternHelpers.h',
     'Point.h',
+    'Quaternion.h',
     'Rect.h',
     'Scale.h',
     'ScaleFactor.h',
+    'ScaleFactors2D.h',
     'SourceSurfaceCairo.h',
     'Tools.h',
     'Types.h',
@@ -52,22 +55,18 @@ if CONFIG['MOZ_WIDGET_TOOLKIT'] == 'cocoa':
 elif CONFIG['MOZ_WIDGET_TOOLKIT'] == 'windows':
     SOURCES += [
         'DrawTargetD2D.cpp',
+        'DrawTargetD2D1.cpp',
+        'ExtendInputEffectD2D1.cpp',
+        'FilterNodeD2D1.cpp',
         'PathD2D.cpp',
+        'RadialGradientEffectD2D1.cpp',
         'ScaledFontDWrite.cpp',
         'ScaledFontWin.cpp',
         'SourceSurfaceD2D.cpp',
+        'SourceSurfaceD2D1.cpp',
         'SourceSurfaceD2DTarget.cpp',
     ]
     DEFINES['WIN32'] = True
-    # For Direct2D 1.1 we require WINSDK_MAXVER 0x06020000 or higher.
-    if CONFIG['MOZ_ENABLE_DIRECT2D1_1']:
-        SOURCES += [
-            'DrawTargetD2D1.cpp',
-            'FilterNodeD2D1.cpp',
-            'RadialGradientEffectD2D1.cpp',
-            'SourceSurfaceD2D1.cpp'
-        ]
-        DEFINES['USE_D2D1_1'] = True
 
 if CONFIG['MOZ_ENABLE_SKIA']:
     UNIFIED_SOURCES += [
@@ -85,20 +84,22 @@ if CONFIG['MOZ_ENABLE_SKIA']:
 
 # Are we targeting x86 or x64?  If so, build SSE2 files.
 if CONFIG['INTEL_ARCHITECTURE']:
-    # VC2005 doesn't support _mm_castsi128_ps, so SSE2 is turned off
-    if CONFIG['_MSC_VER'] != '1400':
+    SOURCES += [
+        'BlurSSE2.cpp',
+        'FilterProcessingSSE2.cpp',
+        'ImageScalingSSE2.cpp',
+    ]
+    if CONFIG['MOZ_ENABLE_SKIA']:
         SOURCES += [
-            'BlurSSE2.cpp',
             'convolverSSE2.cpp',
-            'FilterProcessingSSE2.cpp',
-            'ImageScalingSSE2.cpp',
         ]
-        DEFINES['USE_SSE2'] = True
-        # The file uses SSE2 intrinsics, so it needs special compile flags on some
-        # compilers.
-        SOURCES['BlurSSE2.cpp'].flags += CONFIG['SSE2_FLAGS']
-        SOURCES['FilterProcessingSSE2.cpp'].flags += CONFIG['SSE2_FLAGS']
-        SOURCES['ImageScalingSSE2.cpp'].flags += CONFIG['SSE2_FLAGS']
+    DEFINES['USE_SSE2'] = True
+    # The file uses SSE2 intrinsics, so it needs special compile flags on some
+    # compilers.
+    SOURCES['BlurSSE2.cpp'].flags += CONFIG['SSE2_FLAGS']
+    SOURCES['FilterProcessingSSE2.cpp'].flags += CONFIG['SSE2_FLAGS']
+    SOURCES['ImageScalingSSE2.cpp'].flags += CONFIG['SSE2_FLAGS']
+    if CONFIG['MOZ_ENABLE_SKIA']:
         SOURCES['convolverSSE2.cpp'].flags += CONFIG['SSE2_FLAGS']
 
 UNIFIED_SOURCES += [
@@ -111,6 +112,7 @@ UNIFIED_SOURCES += [
     'DrawTargetCapture.cpp',
     'DrawTargetDual.cpp',
     'DrawTargetRecording.cpp',
+    'DrawTargetTiled.cpp',
     'Factory.cpp',
     'FilterNodeSoftware.cpp',
     'FilterProcessing.cpp',
@@ -119,8 +121,8 @@ UNIFIED_SOURCES += [
     'Matrix.cpp',
     'Path.cpp',
     'PathCairo.cpp',
-    'PathHelpers.cpp',
     'PathRecording.cpp',
+    'Quaternion.cpp',
     'RecordedEvent.cpp',
     'Scale.cpp',
     'ScaledFontBase.cpp',
@@ -130,7 +132,7 @@ UNIFIED_SOURCES += [
 ]
 
 SOURCES += [
-    'DrawTargetTiled.cpp',
+    'PathHelpers.cpp', # Uses _USE_MATH_DEFINES
 ]
 
 if CONFIG['MOZ_WIDGET_TOOLKIT'] == 'cocoa':
@@ -139,9 +141,11 @@ if CONFIG['MOZ_WIDGET_TOOLKIT'] == 'cocoa':
         'QuartzSupport.mm',
     ]
 
-FAIL_ON_WARNINGS = True
+if CONFIG['CPU_ARCH'] == 'arm' and CONFIG['BUILD_ARM_NEON']:
+    SOURCES += ['BlurNEON.cpp']
+    SOURCES['BlurNEON.cpp'].flags += ['-mfpu=neon']
 
-MSVC_ENABLE_PGO = True
+FAIL_ON_WARNINGS = True
 
 include('/ipc/chromium/chromium-config.mozbuild')
 
@@ -157,7 +161,21 @@ if CONFIG['MOZ_DEBUG']:
     DEFINES['GFX_LOG_DEBUG'] = True
     DEFINES['GFX_LOG_WARNING'] = True
 
+# Define the GFX_LOG_WARNING in release builds (available, but controlled by a
+# preference), though we may want to consider only doing it in the nightly
+# build, if the size of gfxWarning() code ends up making a difference.
+# See bug 1074952.
+# if CONFIG['NIGHTLY_BUILD']:
+DEFINES['GFX_LOG_WARNING'] = True
+
 CXXFLAGS += CONFIG['MOZ_CAIRO_CFLAGS']
 
 if CONFIG['MOZ_WIDGET_TOOLKIT'] in ('android', 'gtk2', 'gtk3', 'gonk', 'qt'):
     CXXFLAGS += CONFIG['CAIRO_FT_CFLAGS']
+
+if CONFIG['OS_ARCH'] == 'WINNT':
+    # Due to bug 796023, we can't have -DUNICODE and -D_UNICODE; defining those
+    # macros changes the type of LOGFONT to LOGFONTW instead of LOGFONTA. This
+    # changes the symbol names of exported C++ functions that use LOGFONT.
+    del DEFINES['UNICODE']
+    del DEFINES['_UNICODE']

@@ -13,7 +13,6 @@
 
 class nsISupports;
 class nsIEventTarget;
-class nsIThread;
 
 namespace mozilla {
 namespace net {
@@ -33,11 +32,9 @@ class ChannelEvent
 // instance) to be dispatched and called before mListener->OnStartRequest has
 // completed.
 
-class AutoEventEnqueuerBase;
-
-class ChannelEventQueue MOZ_FINAL
+class ChannelEventQueue final
 {
-  NS_INLINE_DECL_REFCOUNTING(ChannelEventQueue)
+  NS_INLINE_DECL_THREADSAFE_REFCOUNTING(ChannelEventQueue)
 
  public:
   explicit ChannelEventQueue(nsISupports *owner)
@@ -105,8 +102,8 @@ ChannelEventQueue::ShouldEnqueue()
 {
   bool answer =  mForced || mSuspended || mFlushing;
 
-  NS_ABORT_IF_FALSE(answer == true || mEventQueue.IsEmpty(),
-                    "Should always enqueue if ChannelEventQueue not empty");
+  MOZ_ASSERT(answer == true || mEventQueue.IsEmpty(),
+             "Should always enqueue if ChannelEventQueue not empty");
 
   return answer;
 }
@@ -162,7 +159,7 @@ ChannelEventQueue::MaybeFlushQueue()
 // Ensures that ShouldEnqueue() will be true during its lifetime (letting
 // caller know incoming IPDL msgs should be queued). Flushes the queue when it
 // goes out of scope.
-class AutoEventEnqueuer
+class MOZ_STACK_CLASS AutoEventEnqueuer
 {
  public:
   explicit AutoEventEnqueuer(ChannelEventQueue *queue) : mEventQueue(queue) {
@@ -172,7 +169,7 @@ class AutoEventEnqueuer
     mEventQueue->EndForcedQueueing();
   }
  private:
-  ChannelEventQueue* mEventQueue;
+  nsRefPtr<ChannelEventQueue> mEventQueue;
 };
 
 }

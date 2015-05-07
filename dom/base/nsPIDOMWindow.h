@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set ts=2 sw=2 et tw=80: */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -25,7 +25,6 @@ class nsIContent;
 class nsIDocShell;
 class nsIDocument;
 class nsIIdleObserver;
-class nsIPrincipal;
 class nsIScriptTimeoutHandler;
 class nsIURI;
 class nsPerformance;
@@ -37,6 +36,9 @@ namespace mozilla {
 namespace dom {
 class AudioContext;
 class Element;
+}
+namespace gfx {
+class VRHMDInfo;
 }
 }
 
@@ -60,8 +62,8 @@ enum UIStateChangeType
 };
 
 #define NS_PIDOMWINDOW_IID \
-{ 0x71412748, 0x6368, 0x4332, \
-  { 0x82, 0x66, 0xff, 0xaa, 0x19, 0xda, 0x09, 0x7c } }
+{ 0x2485d4d7, 0xf7cb, 0x481e, \
+  { 0x9c, 0x89, 0xb2, 0xa8, 0x12, 0x67, 0x7f, 0x97 } }
 
 class nsPIDOMWindow : public nsIDOMWindowInternal
 {
@@ -93,6 +95,17 @@ public:
   }
 
   // Outer windows only.
+  void SetDesktopModeViewport(bool aDesktopModeViewport)
+  {
+    MOZ_ASSERT(IsOuterWindow());
+    mDesktopModeViewport = aDesktopModeViewport;
+  }
+  bool IsDesktopModeViewport() const
+  {
+    MOZ_ASSERT(IsOuterWindow());
+    return mDesktopModeViewport;
+  }
+
   virtual void SetIsBackground(bool aIsBackground)
   {
     MOZ_ASSERT(IsOuterWindow());
@@ -147,7 +160,6 @@ public:
   }
 
   virtual void MaybeUpdateTouchState() {}
-  virtual void UpdateTouchState() {}
 
   nsIDocument* GetExtantDoc() const
   {
@@ -174,6 +186,18 @@ public:
   nsresult SetAudioVolume(float aVolume);
 
   float GetAudioGlobalVolume();
+
+  virtual void SetServiceWorkersTestingEnabled(bool aEnabled)
+  {
+    MOZ_ASSERT(IsOuterWindow());
+    mServiceWorkersTestingEnabled = aEnabled;
+  }
+
+  bool GetServiceWorkersTestingEnabled()
+  {
+    MOZ_ASSERT(IsOuterWindow());
+    return mServiceWorkersTestingEnabled;
+  }
 
 protected:
   // Lazily instantiate an about:blank document if necessary, and if
@@ -431,28 +455,10 @@ public:
    */
   void SetHasTouchEventListeners()
   {
-    mMayHaveTouchEventListener = true;
-    MaybeUpdateTouchState();
-  }
-
-  bool HasTouchEventListeners()
-  {
-    return mMayHaveTouchEventListener;
-  }
-
-   /**
-   * Will be called when touch caret visibility has changed. mMayHaveTouchCaret
-   * is set if that some node (this window, its document, or content in that
-   * document) has a visible touch caret.
-   */
-  void SetMayHaveTouchCaret(bool aSetValue)
-  {
-    mMayHaveTouchCaret = aSetValue;
-  }
-
-  bool MayHaveTouchCaret()
-  {
-    return mMayHaveTouchCaret;
+    if (!mMayHaveTouchEventListener) {
+      mMayHaveTouchEventListener = true;
+      MaybeUpdateTouchState();
+    }
   }
 
   /**
@@ -460,9 +466,13 @@ public:
    * otherwise exits fullscreen. If aRequireTrust is true, this method only
    * changes window state in a context trusted for write.
    *
+   * If aHMD is not null, the window is made full screen on the given VR HMD
+   * device instead of its currrent display.
+   *
    * Outer windows only.
    */
-  virtual nsresult SetFullScreenInternal(bool aIsFullScreen, bool aRequireTrust) = 0;
+  virtual nsresult SetFullScreenInternal(bool aIsFullScreen, bool aRequireTrust,
+                                         mozilla::gfx::VRHMDInfo *aHMD = nullptr) = 0;
 
   /**
    * Call this to check whether some node (this window, its document,
@@ -721,17 +731,6 @@ public:
     return mMarkedCCGeneration;
   }
 
-  // Sets the condition that we send an NS_AFTER_REMOTE_PAINT message just before the next
-  // composite.  Used in non-e10s implementations.
-  void SetRequestNotifyAfterRemotePaint()
-  {
-    mSendAfterRemotePaint = true;
-  }
-
-  // Sends an NS_AFTER_REMOTE_PAINT message if requested by
-  // SetRequestNotifyAfterRemotePaint().
-  void SendAfterRemotePaintIfRequested();
-
 protected:
   // The nsPIDOMWindow constructor. The aOuterWindow argument should
   // be null if and only if the created window itself is an outer
@@ -783,7 +782,6 @@ protected:
   bool                   mIsInnerWindow;
   bool                   mMayHavePaintEventListener;
   bool                   mMayHaveTouchEventListener;
-  bool                   mMayHaveTouchCaret;
   bool                   mMayHaveMouseEnterLeaveEventListener;
   bool                   mMayHavePointerEnterLeaveEventListener;
 
@@ -803,8 +801,11 @@ protected:
   bool                   mAudioMuted;
   float                  mAudioVolume;
 
+  // current desktop mode flag.
+  bool                   mDesktopModeViewport;
+
   // And these are the references between inner and outer windows.
-  nsPIDOMWindow         *mInnerWindow;
+  nsPIDOMWindow* MOZ_NON_OWNING_REF mInnerWindow;
   nsCOMPtr<nsPIDOMWindow> mOuterWindow;
 
   // the element within the document that is currently focused when this
@@ -824,9 +825,9 @@ protected:
 
   uint32_t mMarkedCCGeneration;
 
-  // If true, send an NS_AFTER_REMOTE_PAINT message before compositing in a
-  // non-e10s implementation.
-  bool mSendAfterRemotePaint;
+  // Let the service workers plumbing know that some feature are enabled while
+  // testing.
+  bool mServiceWorkersTestingEnabled;
 };
 
 

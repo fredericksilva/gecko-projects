@@ -159,6 +159,22 @@ static DllBlockInfo sWindowsDllBlocklist[] = {
   // Crashes with DesktopTemperature, bug 1046382
   { "dtwxsvc.dll", 0x53153234, DllBlockInfo::USE_TIMESTAMP },
 
+  // Startup crashes with Lenovo Onekey Theater, bug 1123778
+  { "activedetect32.dll", UNVERSIONED },
+  { "activedetect64.dll", UNVERSIONED },
+  { "windowsapihookdll32.dll", UNVERSIONED },
+  { "windowsapihookdll64.dll", UNVERSIONED },
+
+  // Flash crashes with RealNetworks RealDownloader, bug 1132663
+  { "rndlnpshimswf.dll", ALL_VERSIONS },
+  { "rndlmainbrowserrecordplugin.dll", ALL_VERSIONS },
+
+  // Crashes with CyberLink YouCam, bug 1136968
+  { "ycwebcamerasource.ax", MAKE_VERSION(2, 0, 0, 1611) },
+
+  // Old version of WebcamMax crashes WebRTC, bug 1130061
+  { "vwcsource.ax", MAKE_VERSION(1, 5, 0, 0) },
+
   { nullptr, 0 }
 };
 
@@ -562,6 +578,16 @@ patched_LdrLoadDll (PWCHAR filePath, PULONG flags, PUNICODE_STRING moduleFileNam
     char * end = nullptr;
     _strtoui64(dot+1, &end, 16);
     if (end == dot+13) {
+      return STATUS_DLL_NOT_FOUND;
+    }
+  }
+  // Block binaries where the filename is at least 16 hex digits
+  if (dot && ((dot - dllName) >= 16)) {
+    char * current = dllName;
+    while (current < dot && isxdigit(*current)) {
+      current++;
+    }
+    if (current == dot) {
       return STATUS_DLL_NOT_FOUND;
     }
   }

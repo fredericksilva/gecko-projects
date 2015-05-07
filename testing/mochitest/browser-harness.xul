@@ -229,11 +229,6 @@
         fileNames = skipTests(fileNames, gConfig.startAt, gConfig.endAt);
       }
 
-      if (gConfig.totalChunks && gConfig.thisChunk) {
-        fileNames = chunkifyTests(fileNames, gConfig.totalChunks,
-                                  gConfig.thisChunk, gConfig.chunkByDir);
-      }
-
       createTester(fileNames.map(function (f) { return new browserTest(f); }));
     }
 
@@ -245,7 +240,6 @@
       var windowMediator = Cc['@mozilla.org/appshell/window-mediator;1'].
                              getService(Ci.nsIWindowMediator);
       var winType = gConfig.testRoot == "browser" ? "navigator:browser" :
-                    gConfig.testRoot == "metro" ? "navigator:browser" :
                     gConfig.testRoot == "webapprtChrome" ? "webapprt:webapp" :
                     null;
       if (!winType) {

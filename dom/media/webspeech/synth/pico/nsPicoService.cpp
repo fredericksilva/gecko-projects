@@ -230,7 +230,7 @@ public:
   NS_DECL_ISUPPORTS_INHERITED
   NS_DECL_NSISPEECHTASKCALLBACK
 
-  NS_IMETHOD Run() MOZ_OVERRIDE;
+  NS_IMETHOD Run() override;
 
   bool IsCurrentTask() { return mService->mCurrentTask == mTask; }
 
@@ -342,7 +342,7 @@ void
 PicoCallbackRunnable::DispatchSynthDataRunnable(
   already_AddRefed<SharedBuffer>&& aBuffer, size_t aBufferSize)
 {
-  class PicoSynthDataRunnable MOZ_FINAL : public nsRunnable
+  class PicoSynthDataRunnable final : public nsRunnable
   {
   public:
     PicoSynthDataRunnable(already_AddRefed<SharedBuffer>& aBuffer,
@@ -462,7 +462,8 @@ nsPicoService::Observe(nsISupports* aSubject, const char* aTopic,
 
 NS_IMETHODIMP
 nsPicoService::Speak(const nsAString& aText, const nsAString& aUri,
-                     float aRate, float aPitch, nsISpeechTask* aTask)
+                     float aVolume, float aRate, float aPitch,
+                     nsISpeechTask* aTask)
 {
   NS_ENSURE_TRUE(mInitialized, NS_ERROR_NOT_AVAILABLE);
 
@@ -521,7 +522,10 @@ nsPicoService::Init()
   MOZ_ASSERT(!NS_IsMainThread());
   MOZ_ASSERT(!mInitialized);
 
-  sPicoApi.Init();
+  if (!sPicoApi.Init()) {
+    NS_WARNING("Failed to initialize pico library");
+    return;
+  }
 
   // Use environment variable, or default android/b2g path
   nsAutoCString langPath(PR_GetEnv("PICO_LANG_PATH"));

@@ -46,8 +46,6 @@
  *      contain an URL object.
  *      An URL cannot be longer than DB_URL_LENGTH_MAX, methods will throw if a
  *      longer value is provided.
- *  - keyword (string)
- *      The associated keyword, if any.
  *
  * Each successful operation notifies through the nsINavBookmarksObserver
  * interface.  To listen to such notifications you must register using
@@ -94,7 +92,7 @@ let Bookmarks = Object.freeze({
   TYPE_SEPARATOR: 3,
 
   /**
-   * Default index used to append a bookmark-item at the end of a folder. 
+   * Default index used to append a bookmark-item at the end of a folder.
    * This should stay consistent with nsINavBookmarksService.idl
    */
   DEFAULT_INDEX: -1,
@@ -142,14 +140,11 @@ let Bookmarks = Object.freeze({
     // dateAdded may be imposed by the caller.
     let time = (info && info.dateAdded) || new Date();
     let insertInfo = validateBookmarkObject(info,
-      { type: { required: true }
+      { type: { defaultValue: this.TYPE_BOOKMARK }
       , index: { defaultValue: this.DEFAULT_INDEX }
       , url: { requiredIf: b => b.type == this.TYPE_BOOKMARK
              , validIf: b => b.type == this.TYPE_BOOKMARK }
       , parentGuid: { required: true }
-      , keyword: { validIf: b => b.keyword &&
-                            b.keyword.length > 0 &&
-                            b.type == this.TYPE_BOOKMARK }
       , title: { validIf: b => [ this.TYPE_BOOKMARK
                                , this.TYPE_FOLDER ].indexOf(b.type) != -1 }
       , dateAdded: { defaultValue: time
@@ -185,15 +180,6 @@ let Bookmarks = Object.freeze({
                                          toPRTime(item.dateAdded), item.guid,
                                          item.parentGuid ]);
 
-      // If a keyword is defined, notify onItemChanged for it.
-      if (item.keyword) {
-        notify(observers, "onItemChanged", [ itemId, "keyword", false,
-                                             item.keyword,
-                                             toPRTime(item.lastModified),
-                                             item.type, parent._id, item.guid,
-                                             item.parentGuid ]);
-      }
-
       // If it's a tag, notify OnItemChanged to all bookmarks for this URL.
       let isTagging = parent._parentId == PlacesUtils.tagsFolderId;
       if (isTagging) {
@@ -217,8 +203,6 @@ let Bookmarks = Object.freeze({
    * won't be taken into account).
    * Moreover, the item's type or dateAdded cannot be changed, since they are
    * immutable after creation.  Trying to change them will reject.
-   * Passing an empty string as keyword clears any keyword associated with
-   * this bookmark.
    *
    * Note that any known properties that don't apply to the specific item type
    * cause an exception.
@@ -238,7 +222,7 @@ let Bookmarks = Object.freeze({
     let updateInfo = validateBookmarkObject(info,
       { guid: { required: true }
       , index: { requiredIf: b => b.hasOwnProperty("parentGuid")
-               , validIf: b => b.index >= 0 }
+               , validIf: b => b.index >= 0 || b.index == this.DEFAULT_INDEX }
       , parentGuid: { requiredIf: b => b.hasOwnProperty("index") }
       });
 
@@ -268,14 +252,13 @@ let Bookmarks = Object.freeze({
       let time = (updateInfo && updateInfo.dateAdded) || new Date();
       updateInfo = validateBookmarkObject(updateInfo,
         { url: { validIf: () => item.type == this.TYPE_BOOKMARK }
-        , keyword: { validIf: () => item.type == this.TYPE_BOOKMARK }
         , title: { validIf: () => [ this.TYPE_BOOKMARK
                                   , this.TYPE_FOLDER ].indexOf(item.type) != -1 }
         , lastModified: { defaultValue: new Date()
                         , validIf: b => b.lastModified >= item.dateAdded }
         });
 
-      let db = yield DBConnPromised;
+      let db = yield PlacesUtils.promiseWrappedConnection();
       let parent;
       if (updateInfo.hasOwnProperty("parentGuid")) {
         if (item.type == this.TYPE_FOLDER) {
@@ -307,9 +290,15 @@ let Bookmarks = Object.freeze({
         // the same container.  Thus we know it exists.
         if (!parent)
           parent = yield fetchBookmark({ guid: item.parentGuid });
-        // Set index in the appending case.
-        if (updateInfo.index > parent._childCount)
-          updateInfo.index = parent._childCount;
+
+        if (updateInfo.index >= parent._childCount ||
+            updateInfo.index == this.DEFAULT_INDEX) {
+           updateInfo.index = parent._childCount;
+
+          // Fix the index when moving within the same container.
+          if (parent.guid == item.parentGuid)
+             updateInfo.index--;
+        }
       }
 
       let updatedItem = yield updateBookmark(updateInfo, item, parent);
@@ -355,23 +344,14 @@ let Bookmarks = Object.freeze({
                                              updatedItem.guid,
                                              updatedItem.parentGuid ]);
       }
-      if (updateInfo.hasOwnProperty("keyword")) {
-        notify(observers, "onItemChanged", [ updatedItem._id, "keyword",
-                                             false, updatedItem.keyword,
-                                             toPRTime(updatedItem.lastModified),
-                                             updatedItem.type,
-                                             updatedItem._parentId,
-                                             updatedItem.guid,
-                                             updatedItem.parentGuid ]);
-      }
-      // If the item was move, notify onItemMoved.
+      // If the item was moved, notify onItemMoved.
       if (item.parentGuid != updatedItem.parentGuid ||
           item.index != updatedItem.index) {
         notify(observers, "onItemMoved", [ updatedItem._id, item._parentId,
                                            item.index, updatedItem._parentId,
                                            updatedItem.index, updatedItem.type,
                                            updatedItem.guid, item.parentGuid,
-                                           updatedItem.newParentGuid ]);
+                                           updatedItem.parentGuid ]);
       }
 
       // Remove non-enumerable properties.
@@ -395,8 +375,13 @@ let Bookmarks = Object.freeze({
     let info = guidOrInfo;
     if (!info)
       throw new Error("Input should be a valid object");
-    if (typeof(guidOrInfo) != "object") {
+    if (typeof(guidOrInfo) != "object")
       info = { guid: guidOrInfo };
+
+    // Disallow removing the root folders.
+    if ([this.rootGuid, this.menuGuid, this.toolbarGuid, this.unfiledGuid,
+         this.tagsGuid].indexOf(info.guid) != -1) {
+      throw new Error("It's not possible to remove Places root folders.");
     }
 
     // Even if we ignore any other unneeded property, we still validate any
@@ -407,10 +392,6 @@ let Bookmarks = Object.freeze({
       let item = yield fetchBookmark(removeInfo);
       if (!item)
         throw new Error("No bookmarks found for the provided GUID.");
-
-      // Disallow removing the root folders.
-      if (!item._parentId || item._parentId == PlacesUtils.placesRootId)
-        throw new Error("It's not possible to remove Places root folders.");
 
       item = yield removeBookmark(item);
 
@@ -445,84 +426,16 @@ let Bookmarks = Object.freeze({
    * @resolves once the removal is complete.
    */
   eraseEverything: Task.async(function* () {
-    let db = yield DBConnPromised;
-
+    let db = yield PlacesUtils.promiseWrappedConnection();
     yield db.executeTransaction(function* () {
-      let rows = yield db.executeCached(
-        `WITH RECURSIVE
-         descendants(did) AS (
-           SELECT b.id FROM moz_bookmarks b
-           JOIN moz_bookmarks p ON b.parent = p.id
-           WHERE p.guid IN ( :toolbarGuid, :menuGuid, :unfiledGuid )
-           UNION ALL
-           SELECT id FROM moz_bookmarks
-           JOIN descendants ON parent = did
-         )
-         SELECT b.id AS _id, b.parent AS _parentId, b.position AS 'index',
-                b.type, url, b.guid, p.guid AS parentGuid, b.dateAdded,
-                b.lastModified, b.title, p.parent AS _grandParentId,
-                NULL AS _childCount, NULL AS keyword
-         FROM moz_bookmarks b
-         JOIN moz_bookmarks p ON p.id = b.parent
-         LEFT JOIN moz_places h ON b.fk = h.id
-         WHERE b.id IN descendants
-        `, { menuGuid: this.menuGuid, toolbarGuid: this.toolbarGuid,
-             unfiledGuid: this.unfiledGuid });
-      let items = rowsToItemsArray(rows);
-
-      yield db.executeCached(
-        `WITH RECURSIVE
-         descendants(did) AS (
-           SELECT b.id FROM moz_bookmarks b
-           JOIN moz_bookmarks p ON b.parent = p.id
-           WHERE p.guid IN ( :toolbarGuid, :menuGuid, :unfiledGuid )
-           UNION ALL
-           SELECT id FROM moz_bookmarks
-           JOIN descendants ON parent = did
-         )
-         DELETE FROM moz_bookmarks WHERE id IN descendants
-        `, { menuGuid: this.menuGuid, toolbarGuid: this.toolbarGuid,
-             unfiledGuid: this.unfiledGuid });
-
-      // Clenup orphans.
-      yield removeOrphanAnnotations(db);
-      yield removeOrphanKeywords(db);
-
-      // TODO (Bug 1087576): this may leave orphan tags behind.
-
-      // Update roots' lastModified.
-      yield db.executeCached(
-        `UPDATE moz_bookmarks SET lastModified = :time
-         WHERE id IN (SELECT id FROM moz_bookmarks
-                      WHERE guid IN ( :rootGuid, :toolbarGuid, :menuGuid, :unfiledGuid ))
-        `, { time: toPRTime(new Date()), rootGuid: this.rootGuid,
-             menuGuid: this.menuGuid, toolbarGuid: this.toolbarGuid,
-             unfiledGuid: this.unfiledGuid });
-
-      let urls = [for (item of items) if (item.url) item.url];
-      updateFrecency(db, urls).then(null, Cu.reportError);
-
-      // Send onItemRemoved notifications to listeners.
-      // TODO (Bug 1087580): this should send a single clear bookmarks
-      // notification rather than notifying for each bookmark.
-
-      // Notify listeners in reverse order to serve children before parents.
-      let observers = PlacesUtils.bookmarks.getObservers();
-      for (let item of items.reverse()) {
-        let uri = item.hasOwnProperty("url") ? toURI(item.url) : null;
-        notify(observers, "onItemRemoved", [ item._id, item._parentId,
-                                             item.index, item.type, uri,
-                                             item.guid, item.parentGuid ]);
-
-        let isUntagging = item._grandParentId == PlacesUtils.tagsFolderId;
-        if (isUntagging) {
-          for (let entry of (yield fetchBookmarksByURL(item))) {
-            notify(observers, "onItemChanged", [ entry._id, "tags", false, "",
-                                                 toPRTime(entry.lastModified),
-                                                 entry.type, entry._parentId,
-                                                 entry.guid, entry.parentGuid ]);
-          }
-        }
+      const folderGuids = [this.toolbarGuid, this.menuGuid, this.unfiledGuid];
+      yield removeFoldersContents(db, folderGuids);
+      const time = toPRTime(new Date());
+      for (let folderGuid of folderGuids) {
+        yield db.executeCached(
+          `UPDATE moz_bookmarks SET lastModified = :time
+           WHERE id IN (SELECT id FROM moz_bookmarks WHERE guid = :folderGuid )
+          `, { folderGuid, time });
       }
     }.bind(this));
   }),
@@ -532,7 +445,7 @@ let Bookmarks = Object.freeze({
    *
    * REMARK: any successful call to this method resolves to a single
    *         bookmark-item (or null), even when multiple bookmarks may exist
-   *         (fetching by url or keyword,).  If you wish to retrieve all of the
+   *         (e.g. fetching by url).  If you wish to retrieve all of the
    *         bookmarks for a given match, use the callback instead.
    *
    * Input can be either a guid or an object with one, and only one, of these
@@ -544,10 +457,6 @@ let Bookmarks = Object.freeze({
    *  - url
    *      retrieves the most recent bookmark having the given URL.
    *      To retrieve ALL of the bookmarks for that URL, you must pass in an
-   *      onResult callback, that will be invoked once for each found bookmark.
-   *  - keyword
-   *      retrieves an array of items having the given keyword.
-   *      To retrieve ALL of the bookmarks for that keyword, you must pass in an
    *      onResult callback, that will be invoked once for each found bookmark.
    *
    * @param guidOrInfo
@@ -579,8 +488,7 @@ let Bookmarks = Object.freeze({
     let conditionsCount = [
       v => v.hasOwnProperty("guid"),
       v => v.hasOwnProperty("parentGuid") && v.hasOwnProperty("index"),
-      v => v.hasOwnProperty("url"),
-      v => v.hasOwnProperty("keyword")
+      v => v.hasOwnProperty("url")
     ].reduce((old, fn) => old + fn(info)|0, 0);
     if (conditionsCount != 1)
       throw new Error(`Unexpected number of conditions provided: ${conditionsCount}`);
@@ -591,9 +499,7 @@ let Bookmarks = Object.freeze({
       { parentGuid: { requiredIf: b => b.hasOwnProperty("index") }
       , index: { requiredIf: b => b.hasOwnProperty("parentGuid")
                , validIf: b => typeof(b.index) == "number" &&
-                               b.index >= 0 }
-      , keyword: { validIf: b => typeof(b.keyword) == "string" &&
-                                 b.keyword.length > 0 }
+                               b.index >= 0 || b.index == this.DEFAULT_INDEX }
       });
 
     return Task.spawn(function* () {
@@ -604,8 +510,6 @@ let Bookmarks = Object.freeze({
         results = yield fetchBookmarkByPosition(fetchInfo);
       else if (fetchInfo.hasOwnProperty("url"))
         results = yield fetchBookmarksByURL(fetchInfo);
-      else if (fetchInfo.hasOwnProperty("keyword"))
-        results = yield fetchBookmarksByKeyword(fetchInfo);
 
       if (!results)
         return null;
@@ -712,13 +616,38 @@ let Bookmarks = Object.freeze({
    * @rejects if an error happens while reordering.
    * @throws if the arguments are invalid.
    */
-  // TODO must implement these methods yet:
-  // void setItemIndex(in long long aItemId, in long aNewIndex);
   reorder(parentGuid, orderedChildrenGuids) {
-    throw new Error("Not yet implemented");
+    let info = { guid: parentGuid };
+    info = validateBookmarkObject(info, { guid: { required: true } });
+
+    if (!Array.isArray(orderedChildrenGuids) || !orderedChildrenGuids.length)
+      throw new Error("Must provide a sorted array of children GUIDs.");
+    try {
+      orderedChildrenGuids.forEach(VALIDATORS.guid);
+    } catch (ex) {
+      throw new Error("Invalid GUID found in the sorted children array.");
+    }
+
+    return Task.spawn(function* () {
+      let parent = yield fetchBookmark(info);
+      if (!parent || parent.type != this.TYPE_FOLDER)
+        throw new Error("No folder found for the provided GUID.");
+
+      let sortedChildren = yield reorderChildren(parent, orderedChildrenGuids);
+
+      let observers = PlacesUtils.bookmarks.getObservers();
+      // Note that child.index is the old index.
+      for (let i = 0; i < sortedChildren.length; ++i) {
+        let child = sortedChildren[i];
+        notify(observers, "onItemMoved", [ child._id, child._parentId,
+                                           child.index, child._parentId,
+                                           i, child.type,
+                                           child.guid, child.parentGuid,
+                                           child.parentGuid ]);
+      }
+    }.bind(this));
   }
 });
-
 
 ////////////////////////////////////////////////////////////////////////////////
 // Globals.
@@ -741,29 +670,11 @@ function notify(observers, notification, args) {
   }
 }
 
-XPCOMUtils.defineLazyGetter(this, "DBConnPromised",
-  () => new Promise((resolve, reject) => {
-    Sqlite.wrapStorageConnection({ connection: PlacesUtils.history.DBConnection } )
-          .then(db => {
-      try {
-        Sqlite.shutdown.addBlocker("Places Bookmarks.jsm wrapper closing",
-                                   db.close.bind(db));
-      }
-      catch (ex) {
-        // It's too late to block shutdown, just close the connection.
-        db.close();
-        reject(ex);
-      }
-      resolve(db);
-    });
-  })
-);
-
 ////////////////////////////////////////////////////////////////////////////////
 // Update implementation.
 
 function* updateBookmark(info, item, newParent) {
-  let db = yield DBConnPromised;
+  let db = yield PlacesUtils.promiseWrappedConnection();
 
   let tuples = new Map();
   if (info.hasOwnProperty("lastModified"))
@@ -772,13 +683,6 @@ function* updateBookmark(info, item, newParent) {
     tuples.set("title", { value: info.title });
 
   yield db.executeTransaction(function* () {
-    if (info.hasOwnProperty("keyword")) {
-      if (info.keyword.length > 0)
-        yield maybeCreateKeyword(db, info.keyword);
-      tuples.set("keyword", { value: info.keyword
-                            , fragment: "keyword_id = (SELECT id FROM moz_keywords WHERE keyword = :keyword)" });
-    }
-
     if (info.hasOwnProperty("url")) {
       // Ensure a page exists in moz_places for this URL.
       yield db.executeCached(
@@ -833,10 +737,6 @@ function* updateBookmark(info, item, newParent) {
        WHERE guid = :guid
       `, Object.assign({ guid: info.guid },
                        [...tuples.entries()].reduce((p, c) => { p[c[0]] = c[1].value; return p; }, {})));
-
-
-    if (info.hasOwnProperty("keyword") && info.keyword === "")
-      yield removeOrphanKeywords(db);
   });
 
   // If the parent changed, update related non-enumerable properties.
@@ -850,11 +750,9 @@ function* updateBookmark(info, item, newParent) {
 
   let updatedItem = mergeIntoNewObject(item, info, additionalParentInfo);
 
-  // Don't return an empty title or keyword to the caller.
+  // Don't return an empty title to the caller.
   if (updatedItem.hasOwnProperty("title") && updatedItem.title === null)
     delete updatedItem.title;
-  if (updatedItem.hasOwnProperty("keyword") && updatedItem.keyword === "")
-    delete updatedItem.keyword;
 
   return updatedItem;
 }
@@ -863,7 +761,7 @@ function* updateBookmark(info, item, newParent) {
 // Insert implementation.
 
 function* insertBookmark(item, parent) {
-  let db = yield DBConnPromised;
+  let db = yield PlacesUtils.promiseWrappedConnection();
 
   // If a guid was not provided, generate one, so we won't need to fetch the
   // bookmark just after having created it.
@@ -887,22 +785,16 @@ function* insertBookmark(item, parent) {
        AND position >= :index
       `, { parent: parent._id, index: item.index });
 
-    // If a keyword was provided, add it.
-    if (item.hasOwnProperty("keyword"))
-      yield maybeCreateKeyword(db, item.keyword);
-
     // Insert the bookmark into the database.
     yield db.executeCached(
       `INSERT INTO moz_bookmarks (fk, type, parent, position, title,
-                                  dateAdded, lastModified, guid, keyword_id)
+                                  dateAdded, lastModified, guid)
        VALUES ((SELECT id FROM moz_places WHERE url = :url), :type, :parent,
-               :index, :title, :date_added, :last_modified, :guid,
-               (SELECT id FROM moz_keywords WHERE keyword = :keyword))
+               :index, :title, :date_added, :last_modified, :guid)
       `, { url: item.hasOwnProperty("url") ? item.url.href : "nonexistent",
            type: item.type, parent: parent._id, index: item.index,
            title: item.title, date_added: toPRTime(item.dateAdded),
-           last_modified: toPRTime(item.lastModified), guid: item.guid,
-           keyword: item.keyword || "" });
+           last_modified: toPRTime(item.lastModified), guid: item.guid });
 
     yield setAncestorsLastModified(db, item.parentGuid, item.dateAdded);
   });
@@ -924,17 +816,16 @@ function* insertBookmark(item, parent) {
 // Fetch implementation.
 
 function* fetchBookmark(info) {
-  let db = yield DBConnPromised;
+  let db = yield PlacesUtils.promiseWrappedConnection();
 
   let rows = yield db.executeCached(
     `SELECT b.guid, IFNULL(p.guid, "") AS parentGuid, b.position AS 'index',
             b.dateAdded, b.lastModified, b.type, b.title, h.url AS url,
-            keyword, b.id AS _id, b.parent AS _parentId,
+            b.id AS _id, b.parent AS _parentId,
             (SELECT count(*) FROM moz_bookmarks WHERE parent = b.id) AS _childCount,
             p.parent AS _grandParentId
      FROM moz_bookmarks b
      LEFT JOIN moz_bookmarks p ON p.id = b.parent
-     LEFT JOIN moz_keywords k ON k.id = b.keyword_id
      LEFT JOIN moz_places h ON h.id = b.fk
      WHERE b.guid = :guid
     `, { guid: info.guid });
@@ -943,73 +834,80 @@ function* fetchBookmark(info) {
 }
 
 function* fetchBookmarkByPosition(info) {
-  let db = yield DBConnPromised;
+  let db = yield PlacesUtils.promiseWrappedConnection();
+  let index = info.index == Bookmarks.DEFAULT_INDEX ? null : info.index;
 
   let rows = yield db.executeCached(
     `SELECT b.guid, IFNULL(p.guid, "") AS parentGuid, b.position AS 'index',
             b.dateAdded, b.lastModified, b.type, b.title, h.url AS url,
-            keyword, b.id AS _id, b.parent AS _parentId,
+            b.id AS _id, b.parent AS _parentId,
             (SELECT count(*) FROM moz_bookmarks WHERE parent = b.id) AS _childCount,
             p.parent AS _grandParentId
      FROM moz_bookmarks b
      LEFT JOIN moz_bookmarks p ON p.id = b.parent
-     LEFT JOIN moz_keywords k ON k.id = b.keyword_id
      LEFT JOIN moz_places h ON h.id = b.fk
-     WHERE p.guid = :parentGuid AND b.position = :index
-    `, { parentGuid: info.parentGuid, index: info.index });
+     WHERE p.guid = :parentGuid
+     AND b.position = IFNULL(:index, (SELECT count(*) - 1
+                                      FROM moz_bookmarks
+                                      WHERE parent = p.id))
+    `, { parentGuid: info.parentGuid, index });
 
   return rows.length ? rowsToItemsArray(rows)[0] : null;
 }
 
 function* fetchBookmarksByURL(info) {
-  let db = yield DBConnPromised;
+  let db = yield PlacesUtils.promiseWrappedConnection();
 
   let rows = yield db.executeCached(
     `SELECT b.guid, IFNULL(p.guid, "") AS parentGuid, b.position AS 'index',
             b.dateAdded, b.lastModified, b.type, b.title, h.url AS url,
-            keyword, b.id AS _id, b.parent AS _parentId,
+            b.id AS _id, b.parent AS _parentId,
             (SELECT count(*) FROM moz_bookmarks WHERE parent = b.id) AS _childCount,
             p.parent AS _grandParentId
      FROM moz_bookmarks b
      LEFT JOIN moz_bookmarks p ON p.id = b.parent
-     LEFT JOIN moz_keywords k ON k.id = b.keyword_id
      LEFT JOIN moz_places h ON h.id = b.fk
      WHERE h.url = :url
+     AND _grandParentId <> :tags_folder
      ORDER BY b.lastModified DESC
-    `, { url: info.url.href });
+    `, { url: info.url.href,
+         tags_folder: PlacesUtils.tagsFolderId });
 
   return rows.length ? rowsToItemsArray(rows) : null;
 }
 
-function* fetchBookmarksByKeyword(info) {
-  let db = yield DBConnPromised;
+function* fetchBookmarksByParent(info) {
+  let db = yield PlacesUtils.promiseWrappedConnection();
 
   let rows = yield db.executeCached(
     `SELECT b.guid, IFNULL(p.guid, "") AS parentGuid, b.position AS 'index',
             b.dateAdded, b.lastModified, b.type, b.title, h.url AS url,
-            keyword, b.id AS _id, b.parent AS _parentId,
+            b.id AS _id, b.parent AS _parentId,
             (SELECT count(*) FROM moz_bookmarks WHERE parent = b.id) AS _childCount,
             p.parent AS _grandParentId
      FROM moz_bookmarks b
      LEFT JOIN moz_bookmarks p ON p.id = b.parent
-     LEFT JOIN moz_keywords k ON k.id = b.keyword_id
      LEFT JOIN moz_places h ON h.id = b.fk
-     WHERE keyword = :keyword
-     ORDER BY b.lastModified DESC
-    `, { keyword: info.keyword });
+     WHERE p.guid = :parentGuid
+     ORDER BY b.position ASC
+    `, { parentGuid: info.parentGuid });
 
-  return rows.length ? rowsToItemsArray(rows) : null;
+  return rowsToItemsArray(rows);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 // Remove implementation.
 
 function* removeBookmark(item) {
-  let db = yield DBConnPromised;
+  let db = yield PlacesUtils.promiseWrappedConnection();
 
   let isUntagging = item._grandParentId == PlacesUtils.tagsFolderId;
 
   yield db.executeTransaction(function* transaction() {
+    // If it's a folder, remove its contents first.
+    if (item.type == Bookmarks.TYPE_FOLDER)
+      yield removeFoldersContents(db, [item.guid]);
+
     // Remove annotations first.  If it's a tag, we can avoid paying that cost.
     if (!isUntagging) {
       // We don't go through the annotations service for this cause otherwise
@@ -1029,10 +927,6 @@ function* removeBookmark(item) {
       `, { parentId: item._parentId, index: item.index });
 
     yield setAncestorsLastModified(db, item.parentGuid, new Date());
-
-    // If the bookmark had a keyword, it might now be an orphan.
-    if (item.keyword)
-      removeOrphanKeywords(db);
   });
 
   // If not a tag recalculate frecency...
@@ -1042,6 +936,77 @@ function* removeBookmark(item) {
   }
 
   return item;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Reorder implementation.
+
+function* reorderChildren(parent, orderedChildrenGuids) {
+  let db = yield PlacesUtils.promiseWrappedConnection();
+
+  return db.executeTransaction(function* () {
+    // Select all of the direct children for the given parent.
+    let children = yield fetchBookmarksByParent({ parentGuid: parent.guid });
+    if (!children.length)
+      return;
+
+    // Reorder the children array according to the specified order, provided
+    // GUIDs come first, others are appended in somehow random order.
+    children.sort((a, b) => {
+      let i = orderedChildrenGuids.indexOf(a.guid);
+      let j = orderedChildrenGuids.indexOf(b.guid);
+      // This works provided fetchBookmarksByParent returns sorted children.
+      return (i == -1 && j == -1) ? 0 :
+               (i != -1 && j != -1 && i < j) || (i != -1 && j == -1) ? -1 : 1;
+     });
+
+    // Update the bookmarks position now.  If any unknown guid have been
+    // inserted meanwhile, its position will be set to -position, and we'll
+    // handle it later.
+    // To do the update in a single step, we build a VALUES (guid, position)
+    // table.  We then use count() in the sorting table to avoid skipping values
+    // when no more existing GUIDs have been provided.
+    let valuesTable = children.map((child, i) => `("${child.guid}", ${i})`)
+                              .join();
+    yield db.execute(
+      `WITH sorting(g, p) AS (
+         VALUES ${valuesTable}
+       )
+       UPDATE moz_bookmarks SET position = (
+         SELECT CASE count(a.g) WHEN 0 THEN -position
+                                ELSE count(a.g) - 1
+                END
+         FROM sorting a
+         JOIN sorting b ON b.p <= a.p
+         WHERE a.g = guid
+           AND parent = :parentId
+      )`, { parentId: parent._id});
+
+    // Update position of items that could have been inserted in the meanwhile.
+    // Since this can happen rarely and it's only done for schema coherence
+    // resonds, we won't notify about these changes.
+    yield db.executeCached(
+      `CREATE TEMP TRIGGER moz_bookmarks_reorder_trigger
+         AFTER UPDATE OF position ON moz_bookmarks
+         WHEN NEW.position = -1
+       BEGIN
+         UPDATE moz_bookmarks
+         SET position = (SELECT MAX(position) FROM moz_bookmarks
+                         WHERE parent = NEW.parent) +
+                        (SELECT count(*) FROM moz_bookmarks
+                         WHERE parent = NEW.parent
+                           AND position BETWEEN OLD.position AND -1)
+         WHERE guid = NEW.guid;
+       END
+      `);
+
+    yield db.executeCached(
+      `UPDATE moz_bookmarks SET position = -1 WHERE position < 0`);
+
+    yield db.executeCached(`DROP TRIGGER moz_bookmarks_reorder_trigger`);
+
+    return children;
+  }.bind(this));
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1085,10 +1050,6 @@ function removeSameValueProperties(dest, src) {
       case "url":
         remove = src.hasOwnProperty(prop) && dest[prop].href == src[prop].href;
         break;
-      case "keyword":
-        remove = (dest.keyword == "" && !src.hasOwnProperty("keyword")) ||
-                 dest[prop] == src[prop];
-        break;
       default:
         remove = dest[prop] == src[prop];
     }
@@ -1104,7 +1065,9 @@ function removeSameValueProperties(dest, src) {
  *        the URL object to convert.
  * @return nsIURI for the given URL.
  */
-function toURI(url) NetUtil.newURI(url.href);
+function toURI(url) {
+  return NetUtil.newURI(url.href);
+}
 
 /**
  * Convert a Date object to a PRTime (microseconds).
@@ -1113,7 +1076,9 @@ function toURI(url) NetUtil.newURI(url.href);
  *        the Date object to convert.
  * @return microseconds from the epoch.
  */
-function toPRTime(date) date * 1000;
+function toPRTime(date) {
+  return date * 1000;
+}
 
 /**
  * Convert a PRTime to a Date object.
@@ -1122,7 +1087,9 @@ function toPRTime(date) date * 1000;
  *        microseconds from the epoch.
  * @return a Date object.
  */
-function toDate(time) new Date(parseInt(time / 1000));
+function toDate(time) {
+  return new Date(parseInt(time / 1000));
+}
 
 /**
  * Convert an array of mozIStorageRow objects to an array of bookmark objects.
@@ -1140,7 +1107,7 @@ function rowsToItemsArray(rows) {
     for (let prop of ["dateAdded", "lastModified"]) {
       item[prop] = toDate(row.getResultByName(prop));
     }
-    for (let prop of ["title", "keyword", "parentGuid", "url" ]) {
+    for (let prop of ["title", "parentGuid", "url" ]) {
       let val = row.getResultByName(prop);
       if (val)
         item[prop] = prop === "url" ? new URL(val) : val;
@@ -1158,7 +1125,7 @@ function rowsToItemsArray(rows) {
     }
 
     return item;
-  });  
+  });
 }
 
 /**
@@ -1211,8 +1178,7 @@ const VALIDATORS = Object.freeze({
     if (v instanceof Ci.nsIURI)
       return new URL(v.spec);
     return v;
-  },
-  keyword: simpleValidateFunc(v => typeof(v) == "string" && /^\S*$/.test(v)),
+  }
 });
 
 /**
@@ -1251,13 +1217,17 @@ function validateBookmarkObject(input, behavior={}) {
       throw new Error(`Invalid value for property '${prop}': ${input[prop]}`);
     }
     if (behavior[prop].hasOwnProperty("defaultValue") && input[prop] === undefined) {
-      normalizedInput[prop] = behavior[prop].defaultValue;
+      input[prop] = behavior[prop].defaultValue;
     }
   }
 
   for (let prop in input) {
-    if (required.has(prop))
+    if (required.has(prop)) {
       required.delete(prop);
+    } else if (input[prop] === undefined) {
+      // Skip undefined properties that are not required.
+      continue;
+    }
     if (VALIDATORS.hasOwnProperty(prop)) {
       try {
         normalizedInput[prop] = VALIDATORS[prop](input[prop], input);
@@ -1267,7 +1237,7 @@ function validateBookmarkObject(input, behavior={}) {
     }
   }
   if (required.size > 0)
-    throw new Error(`The following properties were expected: ${[...required].join(", ")}`); 
+    throw new Error(`The following properties were expected: ${[...required].join(", ")}`);
   return normalizedInput;
 }
 
@@ -1296,34 +1266,6 @@ let updateFrecency = Task.async(function* (db, urls) {
 });
 
 /**
- * Creates a keyword entry, if it's missing.
- *
- * @param db
- *        the Sqlite.jsm connection handle.
- * @param keyword
- *        the keyword string to create.
- */
-let maybeCreateKeyword = Task.async(function* (db, keyword) {
-  yield db.executeCached(
-    `INSERT OR IGNORE INTO moz_keywords (keyword)
-     VALUES (:keyword)
-    `, { keyword: keyword });
-});
-
-/**
- * Removes any orphan keyword entries.
- *
- * @param db
- *        the Sqlite.jsm connection handle.
- */
-let removeOrphanKeywords = Task.async(function* (db) {
-  yield db.executeCached(
-    `DELETE FROM moz_keywords
-     WHERE NOT EXISTS(SELECT 1 FROM moz_bookmarks
-                      WHERE keyword_id = moz_keywords.id)`);
-});
-
-/**
  * Removes any orphan annotation entries.
  *
  * @param db
@@ -1332,8 +1274,8 @@ let removeOrphanKeywords = Task.async(function* (db) {
 let removeOrphanAnnotations = Task.async(function* (db) {
   yield db.executeCached(
     `DELETE FROM moz_items_annos
-     WHERE id IN (SELECT a.id from moz_items_annos a 
-                  LEFT JOIN moz_bookmarks b ON a.item_id = b.id 
+     WHERE id IN (SELECT a.id from moz_items_annos a
+                  LEFT JOIN moz_bookmarks b ON a.item_id = b.id
                   WHERE b.id ISNULL)
     `);
   yield db.executeCached(
@@ -1361,8 +1303,9 @@ let removeAnnotationsForItem = Task.async(function* (db, itemId) {
   yield db.executeCached(
     `DELETE FROM moz_anno_attributes
      WHERE id IN (SELECT n.id from moz_anno_attributes n
-                  LEFT JOIN moz_items_annos a ON a.anno_attribute_id = n.id
-                  WHERE a.id ISNULL)
+                  LEFT JOIN moz_annos a1 ON a1.anno_attribute_id = n.id
+                  LEFT JOIN moz_items_annos a2 ON a2.anno_attribute_id = n.id
+                  WHERE a1.id ISNULL AND a2.id ISNULL)
     `);
 });
 
@@ -1392,4 +1335,83 @@ let setAncestorsLastModified = Task.async(function* (db, folderGuid, time) {
      WHERE id IN ancestors
     `, { guid: folderGuid, type: Bookmarks.TYPE_FOLDER,
          time: toPRTime(time) });
+});
+
+/**
+ * Remove all descendants of one or more bookmark folders.
+ *
+ * @param db
+ *        the Sqlite.jsm connection handle.
+ * @param folderGuids
+ *        array of folder guids.
+ */
+let removeFoldersContents =
+Task.async(function* (db, folderGuids) {
+  let itemsRemoved = [];
+  for (let folderGuid of folderGuids) {
+    let rows = yield db.executeCached(
+      `WITH RECURSIVE
+       descendants(did) AS (
+         SELECT b.id FROM moz_bookmarks b
+         JOIN moz_bookmarks p ON b.parent = p.id
+         WHERE p.guid = :folderGuid
+         UNION ALL
+         SELECT id FROM moz_bookmarks
+         JOIN descendants ON parent = did
+       )
+       SELECT b.id AS _id, b.parent AS _parentId, b.position AS 'index',
+              b.type, url, b.guid, p.guid AS parentGuid, b.dateAdded,
+              b.lastModified, b.title, p.parent AS _grandParentId,
+              NULL AS _childCount
+       FROM moz_bookmarks b
+       JOIN moz_bookmarks p ON p.id = b.parent
+       LEFT JOIN moz_places h ON b.fk = h.id
+       WHERE b.id IN descendants`, { folderGuid });
+
+    itemsRemoved = itemsRemoved.concat(rowsToItemsArray(rows));
+
+    yield db.executeCached(
+      `WITH RECURSIVE
+       descendants(did) AS (
+         SELECT b.id FROM moz_bookmarks b
+         JOIN moz_bookmarks p ON b.parent = p.id
+         WHERE p.guid = :folderGuid
+         UNION ALL
+         SELECT id FROM moz_bookmarks
+         JOIN descendants ON parent = did
+       )
+       DELETE FROM moz_bookmarks WHERE id IN descendants`, { folderGuid });
+  }
+
+  // Cleanup orphans.
+  yield removeOrphanAnnotations(db);
+
+  // TODO (Bug 1087576): this may leave orphan tags behind.
+
+  let urls = [for (item of itemsRemoved) if (item.url) item.url];
+  updateFrecency(db, urls).then(null, Cu.reportError);
+
+  // Send onItemRemoved notifications to listeners.
+  // TODO (Bug 1087580): for the case of eraseEverything, this should send a
+  // single clear bookmarks notification rather than notifying for each
+  // bookmark.
+
+  // Notify listeners in reverse order to serve children before parents.
+  let observers = PlacesUtils.bookmarks.getObservers();
+  for (let item of itemsRemoved.reverse()) {
+    let uri = item.hasOwnProperty("url") ? toURI(item.url) : null;
+    notify(observers, "onItemRemoved", [ item._id, item._parentId,
+                                         item.index, item.type, uri,
+                                         item.guid, item.parentGuid ]);
+
+    let isUntagging = item._grandParentId == PlacesUtils.tagsFolderId;
+    if (isUntagging) {
+      for (let entry of (yield fetchBookmarksByURL(item))) {
+        notify(observers, "onItemChanged", [ entry._id, "tags", false, "",
+                                             toPRTime(entry.lastModified),
+                                             entry.type, entry._parentId,
+                                             entry.guid, entry.parentGuid ]);
+      }
+    }
+  }
 });

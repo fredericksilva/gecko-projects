@@ -35,10 +35,10 @@ public:
     }
   }
 
-  operator bool() const { return mHeld; }
+  MOZ_IMPLICIT operator bool() const { return mHeld; }
 
-  SelfReference(const SelfReference& aOther) MOZ_DELETE;
-  void operator=(const SelfReference& aOther) MOZ_DELETE;
+  SelfReference(const SelfReference& aOther) = delete;
+  void operator=(const SelfReference& aOther) = delete;
 private:
   bool mHeld;
 };

@@ -12,9 +12,8 @@
 #include <stagefright/MetaData.h>
 #include "stagefright/MediaErrors.h"
 
-#define LOG_TAG "MediaCodecProxy"
 #include <android/log.h>
-#define ALOG(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
+#define MCP_LOG(...) __android_log_print(ANDROID_LOG_DEBUG, "MediaCodecProxy", __VA_ARGS__)
 #define TIMEOUT_DEQUEUE_INPUTBUFFER_MS 1000000ll
 
 namespace android {
@@ -79,46 +78,38 @@ sp<MediaCodecProxy>
 MediaCodecProxy::CreateByType(sp<ALooper> aLooper,
                               const char *aMime,
                               bool aEncoder,
-                              bool aAsync,
                               wp<CodecResourceListener> aListener)
 {
-  sp<MediaCodecProxy> codec = new MediaCodecProxy(aLooper, aMime, aEncoder, aAsync, aListener);
-  if ((!aAsync && codec->allocated()) || codec->requestResource()) {
-    return codec;
-  }
-  return nullptr;
+  sp<MediaCodecProxy> codec = new MediaCodecProxy(aLooper,
+                                                  aMime,
+                                                  aEncoder,
+                                                  aListener);
+  return codec;
 }
 
 MediaCodecProxy::MediaCodecProxy(sp<ALooper> aLooper,
                                  const char *aMime,
                                  bool aEncoder,
-                                 bool aAsync,
                                  wp<CodecResourceListener> aListener)
   : mCodecLooper(aLooper)
   , mCodecMime(aMime)
   , mCodecEncoder(aEncoder)
   , mListener(aListener)
+  , mMediaCodecLock("MediaCodecProxy::mMediaCodecLock")
+  , mPendingRequestMediaResource(false)
 {
   MOZ_ASSERT(mCodecLooper != nullptr, "ALooper should not be nullptr.");
-  if (aAsync) {
-    mResourceHandler = new MediaResourceHandler(this);
-  } else {
-    allocateCodec();
-  }
+  mResourceHandler = new MediaResourceHandler(this);
 }
 
 MediaCodecProxy::~MediaCodecProxy()
 {
   releaseCodec();
-
-  // Complete all pending Binder ipc transactions
-  IPCThreadState::self()->flushCommands();
-
-  cancelResource();
+  SetMediaCodecFree();
 }
 
 bool
-MediaCodecProxy::requestResource()
+MediaCodecProxy::AskMediaCodecAndWait()
 {
   if (mResourceHandler == nullptr) {
     return false;
@@ -129,24 +120,39 @@ MediaCodecProxy::requestResource()
         ? IMediaResourceManagerService::HW_VIDEO_ENCODER
         : IMediaResourceManagerService::HW_VIDEO_DECODER);
   } else if (strncasecmp(mCodecMime.get(), "audio/", 6) == 0) {
-    mResourceHandler->requestResource(mCodecEncoder
-        ? IMediaResourceManagerService::HW_AUDIO_ENCODER
-        : IMediaResourceManagerService::HW_AUDIO_DECODER);
+    if (allocateCodec()) {
+      return true;
+    }
   } else {
     return false;
   }
+
+  mozilla::MonitorAutoLock mon(mMediaCodecLock);
+  mPendingRequestMediaResource = true;
+
+  while (mPendingRequestMediaResource) {
+    mMediaCodecLock.Wait();
+  }
+  MCP_LOG("AskMediaCodecAndWait complete");
 
   return true;
 }
 
 void
-MediaCodecProxy::cancelResource()
+MediaCodecProxy::SetMediaCodecFree()
 {
   if (mResourceHandler == nullptr) {
     return;
   }
 
+  mozilla::MonitorAutoLock mon(mMediaCodecLock);
+  if (mPendingRequestMediaResource) {
+    mPendingRequestMediaResource = false;
+    mon.NotifyAll();
+  }
+
   mResourceHandler->cancelResource();
+  mResourceHandler = nullptr;
 }
 
 bool
@@ -181,6 +187,7 @@ MediaCodecProxy::releaseCodec()
 
     // Release MediaCodec
     if (mCodec != nullptr) {
+      mCodec->stop();
       mCodec->release();
       mCodec = nullptr;
     }
@@ -190,6 +197,10 @@ MediaCodecProxy::releaseCodec()
     // this value come from stagefright's AwesomePlayer.
     usleep(1000);
   }
+
+  // Complete all pending Binder ipc transactions
+  IPCThreadState::self()->flushCommands();
+
 }
 
 bool
@@ -456,12 +467,18 @@ MediaCodecProxy::getCapability(uint32_t *aCapability)
 void
 MediaCodecProxy::resourceReserved()
 {
+  MCP_LOG("resourceReserved");
   // Create MediaCodec
   releaseCodec();
   if (!allocateCodec()) {
-    cancelResource();
+    SetMediaCodecFree();
     return;
   }
+
+  // Notify initialization waiting.
+  mozilla::MonitorAutoLock mon(mMediaCodecLock);
+  mPendingRequestMediaResource = false;
+  mon.NotifyAll();
 
   // Notification
   sp<CodecResourceListener> listener = mListener.promote();
@@ -470,34 +487,19 @@ MediaCodecProxy::resourceReserved()
   }
 }
 
-// Called on a Binder thread
-void
-MediaCodecProxy::resourceCanceled()
-{
-  // Release MediaCodec
-  releaseCodec();
-
-  // Notification
-  sp<CodecResourceListener> listener = mListener.promote();
-  if (listener != nullptr) {
-    listener->codecCanceled();
-  }
-}
-
 bool MediaCodecProxy::Prepare()
 {
 
-  status_t err;
   if (start() != OK) {
-    ALOG("Couldn't start MediaCodec");
+    MCP_LOG("Couldn't start MediaCodec");
     return false;
   }
   if (getInputBuffers(&mInputBuffers) != OK) {
-    ALOG("Couldn't get input buffers from MediaCodec");
+    MCP_LOG("Couldn't get input buffers from MediaCodec");
     return false;
   }
   if (getOutputBuffers(&mOutputBuffers) != OK) {
-    ALOG("Couldn't get output buffers from MediaCodec");
+    MCP_LOG("Couldn't get output buffers from MediaCodec");
     return false;
   }
 
@@ -506,14 +508,18 @@ bool MediaCodecProxy::Prepare()
 
 bool MediaCodecProxy::UpdateOutputBuffers()
 {
-  if (mCodec == nullptr) {
-    ALOG("MediaCodec has not been inited from input!");
-    return false;
+  // Read Lock for mCodec
+  {
+    RWLock::AutoRLock autolock(mCodecLock);
+    if (mCodec == nullptr) {
+      MCP_LOG("MediaCodec has not been inited from UpdateOutputBuffers");
+      return false;
+    }
   }
 
   status_t err = getOutputBuffers(&mOutputBuffers);
   if (err != OK){
-    ALOG("Couldn't update output buffers from MediaCodec");
+    MCP_LOG("Couldn't update output buffers from MediaCodec");
     return false;
   }
   return true;
@@ -522,15 +528,19 @@ bool MediaCodecProxy::UpdateOutputBuffers()
 status_t MediaCodecProxy::Input(const uint8_t* aData, uint32_t aDataSize,
                                 int64_t aTimestampUsecs, uint64_t aflags)
 {
-  if (mCodec == nullptr) {
-    ALOG("MediaCodec has not been inited from input!");
-    return NO_INIT;
+  // Read Lock for mCodec
+  {
+    RWLock::AutoRLock autolock(mCodecLock);
+    if (mCodec == nullptr) {
+      MCP_LOG("MediaCodec has not been inited from input!");
+      return NO_INIT;
+    }
   }
 
   size_t index;
   status_t err = dequeueInputBuffer(&index, TIMEOUT_DEQUEUE_INPUTBUFFER_MS);
   if (err != OK) {
-    ALOG("dequeueInputBuffer returned %d", err);
+    MCP_LOG("dequeueInputBuffer returned %d", err);
     return err;
   }
 
@@ -547,7 +557,7 @@ status_t MediaCodecProxy::Input(const uint8_t* aData, uint32_t aDataSize,
   }
 
   if (err != OK) {
-    ALOG("queueInputBuffer returned %d", err);
+    MCP_LOG("queueInputBuffer returned %d", err);
     return err;
   }
   return err;
@@ -555,9 +565,13 @@ status_t MediaCodecProxy::Input(const uint8_t* aData, uint32_t aDataSize,
 
 status_t MediaCodecProxy::Output(MediaBuffer** aBuffer, int64_t aTimeoutUs)
 {
-  if (mCodec == nullptr) {
-    ALOG("MediaCodec has not been inited from output!");
-    return NO_INIT;
+  // Read Lock for mCodec
+  {
+    RWLock::AutoRLock autolock(mCodecLock);
+    if (mCodec == nullptr) {
+      MCP_LOG("MediaCodec has not been inited from output!");
+      return NO_INIT;
+    }
   }
 
   size_t index = 0;
@@ -571,7 +585,6 @@ status_t MediaCodecProxy::Output(MediaBuffer** aBuffer, int64_t aTimeoutUs)
   status_t err = dequeueOutputBuffer(&index, &offset, &size,
                                       &timeUs, &flags, aTimeoutUs);
   if (err != OK) {
-    ALOG("Output returned %d", err);
     return err;
   }
 
@@ -595,23 +608,10 @@ status_t MediaCodecProxy::Output(MediaBuffer** aBuffer, int64_t aTimeoutUs)
   return err;
 }
 
-bool MediaCodecProxy::IsWaitingResources()
-{
-  return mCodec == nullptr;
-}
-
-bool MediaCodecProxy::IsDormantNeeded()
-{
-  return mCodecLooper.get() ? true : false;
-}
-
 void MediaCodecProxy::ReleaseMediaResources()
 {
-  if (mCodec.get()) {
-    mCodec->stop();
-    mCodec->release();
-    mCodec.clear();
-  }
+  releaseCodec();
+  SetMediaCodecFree();
 }
 
 void MediaCodecProxy::ReleaseMediaBuffer(MediaBuffer* aBuffer) {
