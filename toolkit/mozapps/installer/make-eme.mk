@@ -14,3 +14,4 @@ ifdef MOZ_SIGN_CMD
     endif
   endif
 endif
+

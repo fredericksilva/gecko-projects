@@ -1226,6 +1226,7 @@ chrome::
 	$(MAKE) realchrome
 	$(LOOP_OVER_DIRS)
 
+# $(info mshal says FINAL_TARGET is $(FINAL_TARGET) with origin $(origin FINAL_TARGET))
 $(FINAL_TARGET)/chrome: $(call mkdir_deps,$(FINAL_TARGET)/chrome)
 
 ifneq (,$(JAR_MANIFEST))
