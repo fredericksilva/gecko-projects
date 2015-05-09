@@ -87,8 +87,6 @@ public:
 
   virtual void DisableHardwareAcceleration() override;
 
-  static bool IsVideoAccelerated(layers::LayersBackend aBackend);
-
 private:
 
   bool InitDemuxer();
@@ -163,6 +161,9 @@ private:
     }
     virtual void ReleaseMediaResources() override {
       mReader->ReleaseMediaResources();
+    }
+    virtual bool OnReaderTaskQueue() override {
+      return mReader->OnTaskQueue();
     }
   private:
     MP4Reader* mReader;

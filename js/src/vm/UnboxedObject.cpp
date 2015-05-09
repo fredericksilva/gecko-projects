@@ -11,6 +11,7 @@
 
 #include "jsobjinlines.h"
 
+#include "gc/Nursery-inl.h"
 #include "vm/Shape-inl.h"
 
 using mozilla::ArrayLength;
@@ -70,6 +71,8 @@ static const uintptr_t CLEAR_CONSTRUCTOR_CODE_TOKEN = 0x1;
 /* static */ bool
 UnboxedLayout::makeConstructorCode(JSContext* cx, HandleObjectGroup group)
 {
+    gc::AutoSuppressGC suppress(cx);
+
     using namespace jit;
 
     if (!cx->compartment()->ensureJitCompartmentExists(cx))
@@ -106,8 +109,7 @@ UnboxedLayout::makeConstructorCode(JSContext* cx, HandleObjectGroup group)
     Register object = regs.takeAny(), scratch1 = regs.takeAny(), scratch2 = regs.takeAny();
 
     LiveGeneralRegisterSet savedNonVolatileRegisters = SavedNonVolatileRegisters(regs);
-    for (GeneralRegisterForwardIterator iter(savedNonVolatileRegisters); iter.more(); ++iter)
-        masm.Push(*iter);
+    masm.PushRegsInMask(savedNonVolatileRegisters);
 
     // The scratch double register might be used by MacroAssembler methods.
     if (ScratchDoubleReg.volatile_())
@@ -147,11 +149,19 @@ UnboxedLayout::makeConstructorCode(JSContext* cx, HandleObjectGroup group)
     masm.jump(&allocated);
     masm.bind(&postBarrier);
 
+    LiveGeneralRegisterSet liveVolatileRegisters;
+    liveVolatileRegisters.add(propertiesReg);
+    if (object.volatile_())
+        liveVolatileRegisters.add(object);
+    masm.PushRegsInMask(liveVolatileRegisters);
+
     masm.mov(ImmPtr(cx->runtime()), scratch1);
     masm.setupUnalignedABICall(2, scratch2);
     masm.passABIArg(scratch1);
     masm.passABIArg(object);
     masm.callWithABI(JS_FUNC_TO_DATA_PTR(void*, PostWriteBarrier));
+
+    masm.PopRegsInMask(liveVolatileRegisters);
 
     masm.bind(&allocated);
 
@@ -212,8 +222,7 @@ UnboxedLayout::makeConstructorCode(JSContext* cx, HandleObjectGroup group)
     // Restore non-volatile registers which were saved on entry.
     if (ScratchDoubleReg.volatile_())
         masm.pop(ScratchDoubleReg);
-    for (GeneralRegisterBackwardIterator iter(savedNonVolatileRegisters); iter.more(); ++iter)
-        masm.Pop(*iter);
+    masm.PopRegsInMask(savedNonVolatileRegisters);
 
     masm.abiret();
 
@@ -326,7 +335,7 @@ SetUnboxedValue(ExclusiveContext* cx, JSObject* unboxedObject, jsid id,
 }
 
 static inline Value
-GetUnboxedValue(uint8_t* p, JSValueType type)
+GetUnboxedValue(uint8_t* p, JSValueType type, bool maybeUninitialized)
 {
     switch (type) {
       case JSVAL_TYPE_BOOLEAN:
@@ -335,8 +344,16 @@ GetUnboxedValue(uint8_t* p, JSValueType type)
       case JSVAL_TYPE_INT32:
         return Int32Value(*reinterpret_cast<int32_t*>(p));
 
-      case JSVAL_TYPE_DOUBLE:
-        return DoubleValue(*reinterpret_cast<double*>(p));
+      case JSVAL_TYPE_DOUBLE: {
+        // During unboxed plain object creation, non-GC thing properties are
+        // left uninitialized. This is normally fine, since the properties will
+        // be filled in shortly, but if they are read before that happens we
+        // need to make sure that doubles are canonical.
+        double d = *reinterpret_cast<double*>(p);
+        if (maybeUninitialized)
+            return DoubleValue(JS::CanonicalizeNaN(d));
+        return DoubleValue(d);
+      }
 
       case JSVAL_TYPE_STRING:
         return StringValue(*reinterpret_cast<JSString**>(p));
@@ -362,10 +379,11 @@ UnboxedPlainObject::setValue(ExclusiveContext* cx, const UnboxedLayout::Property
 }
 
 Value
-UnboxedPlainObject::getValue(const UnboxedLayout::Property& property)
+UnboxedPlainObject::getValue(const UnboxedLayout::Property& property,
+                             bool maybeUninitialized /* = false */)
 {
     uint8_t* p = &data_[property.offset];
-    return GetUnboxedValue(p, property.type);
+    return GetUnboxedValue(p, property.type, maybeUninitialized);
 }
 
 void
@@ -409,6 +427,12 @@ UnboxedPlainObject::ensureExpando(JSContext* cx, Handle<UnboxedPlainObject*> obj
     UnboxedExpandoObject* expando = NewObjectWithGivenProto<UnboxedExpandoObject>(cx, NullPtr());
     if (!expando)
         return nullptr;
+
+    // If the expando is tenured then the original object must also be tenured.
+    // Otherwise barriers triggered on the original object for writes to the
+    // expando (as can happen in the JIT) won't see the tenured->nursery edge.
+    // See WholeCellEdges::mark.
+    MOZ_ASSERT_IF(!IsInsideNursery(expando), !IsInsideNursery(obj));
 
     // As with setValue(), we need to manually trigger post barriers on the
     // whole object. If we treat the field as a HeapPtrObject and later convert
@@ -577,9 +601,14 @@ UnboxedPlainObject::convertToNative(JSContext* cx, JSObject* obj)
 
     AutoValueVector values(cx);
     for (size_t i = 0; i < layout.properties().length(); i++) {
-        if (!values.append(obj->as<UnboxedPlainObject>().getValue(layout.properties()[i])))
+        // We might be reading properties off the object which have not been
+        // initialized yet. Make sure any double values we read here are
+        // canonicalized.
+        if (!values.append(obj->as<UnboxedPlainObject>().getValue(layout.properties()[i], true)))
             return false;
     }
+
+    JSObject::writeBarrierPre(expando);
 
     obj->setGroup(layout.nativeGroup());
     obj->as<PlainObject>().setLastPropertyMakeNative(cx, layout.nativeShape());
@@ -934,7 +963,9 @@ const Class UnboxedExpandoObject::class_ = {
 
 const Class UnboxedPlainObject::class_ = {
     js_Object_str,
-    Class::NON_NATIVE | JSCLASS_IMPLEMENTS_BARRIERS,
+    Class::NON_NATIVE |
+    JSCLASS_IMPLEMENTS_BARRIERS |
+    JSCLASS_HAS_CACHED_PROTO(JSProto_Object),
     nullptr,        /* addProperty */
     nullptr,        /* delProperty */
     nullptr,        /* getProperty */
@@ -1034,16 +1065,18 @@ UnboxedArrayObject::create(ExclusiveContext* cx, HandleObjectGroup group, uint32
         size_t capacity = (GetGCKindBytes(allocKind) - offsetOfInlineElements()) / elementSize;
         res->setCapacityIndex(exactCapacityIndex(capacity));
     } else {
-        UniquePtr<uint8_t[], JS::FreePolicy> elements(
-            cx->zone()->pod_malloc<uint8_t>(length * elementSize));
-        if (!elements)
-            return nullptr;
-
         res = NewObjectWithGroup<UnboxedArrayObject>(cx, group, gc::AllocKind::OBJECT0, newKind);
         if (!res)
             return nullptr;
 
-        res->elements_ = elements.release();
+        res->elements_ = AllocateObjectBuffer<uint8_t>(cx, res, length * elementSize);
+        if (!res->elements_) {
+            // Make the object safe for GC.
+            res->setInlineElements();
+            res->setInitializedLength(0);
+            return nullptr;
+        }
+
         res->setCapacityIndex(CapacityMatchesLengthIndex);
     }
 
@@ -1096,7 +1129,7 @@ UnboxedArrayObject::getElement(size_t index)
 {
     MOZ_ASSERT(index < initializedLength());
     uint8_t* p = elements() + index * elementSize();
-    return GetUnboxedValue(p, elementType());
+    return GetUnboxedValue(p, elementType(), /* maybeUninitialized = */ false);
 }
 
 /* static */ void
@@ -1145,8 +1178,49 @@ UnboxedArrayObject::objectMoved(JSObject* obj, const JSObject* old)
 /* static */ void
 UnboxedArrayObject::finalize(FreeOp* fop, JSObject* obj)
 {
+    MOZ_ASSERT(!IsInsideNursery(obj));
     if (!obj->as<UnboxedArrayObject>().hasInlineElements())
         js_free(obj->as<UnboxedArrayObject>().elements());
+}
+
+/* static */ size_t
+UnboxedArrayObject::objectMovedDuringMinorGC(JSTracer* trc, JSObject* dst, JSObject* src,
+                                             gc::AllocKind allocKind)
+{
+    UnboxedArrayObject* ndst = &dst->as<UnboxedArrayObject>();
+    UnboxedArrayObject* nsrc = &src->as<UnboxedArrayObject>();
+    MOZ_ASSERT(ndst->elements() == nsrc->elements());
+
+    Nursery& nursery = trc->runtime()->gc.nursery;
+
+    if (!nursery.isInside(nsrc->elements())) {
+        nursery.removeMallocedBuffer(nsrc->elements());
+        return 0;
+    }
+
+    // Determine if we can use inline data for the target array. If this is
+    // possible, the nursery will have picked an allocation size that is large
+    // enough.
+    size_t nbytes = nsrc->capacity() * nsrc->elementSize();
+    if (offsetOfInlineElements() + nbytes <= GetGCKindBytes(allocKind)) {
+        ndst->setInlineElements();
+    } else {
+        MOZ_ASSERT(allocKind == gc::AllocKind::OBJECT0);
+
+        uint8_t* data = nsrc->zone()->pod_malloc<uint8_t>(nbytes);
+        if (!data)
+            CrashAtUnhandlableOOM("Failed to allocate unboxed array elements while tenuring.");
+        ndst->elements_ = data;
+    }
+
+    PodCopy(ndst->elements(), nsrc->elements(), nsrc->initializedLength() * nsrc->elementSize());
+
+    // Set a forwarding pointer for the element buffers in case they were
+    // preserved on the stack by Ion.
+    bool direct = nsrc->capacity() * nsrc->elementSize() >= sizeof(uintptr_t);
+    nursery.maybeSetForwardingPointer(trc, nsrc->elements(), ndst->elements(), direct);
+
+    return ndst->hasInlineElements() ? 0 : nbytes;
 }
 
 // Possible capacities for unboxed arrays. Some of these capacities might seem
@@ -1266,13 +1340,14 @@ UnboxedArrayObject::growElements(ExclusiveContext* cx, size_t cap)
 
     uint8_t* newElements;
     if (hasInlineElements()) {
-        newElements = cx->zone()->pod_malloc<uint8_t>(newCapacity * elementSize());
+        newElements = AllocateObjectBuffer<uint8_t>(cx, this, newCapacity * elementSize());
         if (!newElements)
             return false;
         js_memcpy(newElements, elements(), initializedLength() * elementSize());
     } else {
-        newElements = cx->zone()->pod_realloc<uint8_t>(elements(), oldCapacity * elementSize(),
-                                                       newCapacity * elementSize());
+        newElements = ReallocateObjectBuffer<uint8_t>(cx, this, elements(),
+                                                      oldCapacity * elementSize(),
+                                                      newCapacity * elementSize());
         if (!newElements)
             return false;
     }
@@ -1299,9 +1374,9 @@ UnboxedArrayObject::shrinkElements(ExclusiveContext* cx, size_t cap)
     if (newCapacity >= oldCapacity)
         return;
 
-    uint8_t* newElements =
-        cx->zone()->pod_realloc<uint8_t>(elements(), oldCapacity * elementSize(),
-                                         newCapacity * elementSize());
+    uint8_t* newElements = ReallocateObjectBuffer<uint8_t>(cx, this, elements(),
+                                                           oldCapacity * elementSize(),
+                                                           newCapacity * elementSize());
     if (!newElements)
         return;
 
@@ -1496,7 +1571,8 @@ const Class UnboxedArrayObject::class_ = {
     "Array",
     Class::NON_NATIVE |
     JSCLASS_IMPLEMENTS_BARRIERS |
-    0 /* FIXME using this flag can severely hurt performance: JSCLASS_BACKGROUND_FINALIZE */,
+    JSCLASS_SKIP_NURSERY_FINALIZE |
+    JSCLASS_BACKGROUND_FINALIZE,
     nullptr,        /* addProperty */
     nullptr,        /* delProperty */
     nullptr,        /* getProperty */
@@ -1885,7 +1961,7 @@ js::TryConvertToUnboxedLayout(ExclusiveContext* cx, Shape* templateShape,
         layoutSize = ComputePlainObjectLayout(cx, templateShape, properties);
 
         // The entire object must be allocatable inline.
-        if (sizeof(JSObject) + layoutSize > JSObject::MAX_BYTE_SIZE)
+        if (UnboxedPlainObject::offsetOfData() + layoutSize > JSObject::MAX_BYTE_SIZE)
             return true;
     }
 

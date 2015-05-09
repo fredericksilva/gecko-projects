@@ -142,7 +142,7 @@ function handleError(aError) {
 }
 
 function once(aTarget, aEventName, aUseCapture = false, spread = false) {
-  info("Waiting for event: '" + aEventName + "' on " + aTarget + ".");
+  info(`Waiting for event: '${aEventName}' on ${aTarget}`);
 
   let deferred = Promise.defer();
 
@@ -153,6 +153,7 @@ function once(aTarget, aEventName, aUseCapture = false, spread = false) {
   ]) {
     if ((add in aTarget) && (remove in aTarget)) {
       aTarget[add](aEventName, function onEvent(...aArgs) {
+        info(`Received event: '${aEventName}' on ${aTarget}`);
         aTarget[remove](aEventName, onEvent, aUseCapture);
         deferred.resolve(spread ? aArgs : aArgs[0]);
       }, aUseCapture);
@@ -194,6 +195,7 @@ function initBackend(aUrl, targetOps={}) {
     // may not exist. Possible options that will actually work:
     // TEST_MOCK_MEMORY_ACTOR = true
     // TEST_MOCK_TIMELINE_ACTOR = true
+    // TEST_MOCK_BUFFER_CHECK_TIMER = number
     merge(target, targetOps);
 
     let connection = getPerformanceActorsConnection(target);
@@ -305,13 +307,13 @@ function consoleMethod (...args) {
 }
 
 function* consoleProfile(win, label) {
-  let profileStart = once(win.PerformanceController, win.EVENTS.CONSOLE_RECORDING_STARTED);
+  let profileStart = once(win.PerformanceController, win.EVENTS.RECORDING_STARTED);
   consoleMethod("profile", label);
   yield profileStart;
 }
 
 function* consoleProfileEnd(win, label) {
-  let ended = once(win.PerformanceController, win.EVENTS.CONSOLE_RECORDING_STOPPED);
+  let ended = once(win.PerformanceController, win.EVENTS.RECORDING_STOPPED);
   consoleMethod("profileEnd", label);
   yield ended;
 }
@@ -475,15 +477,15 @@ function waitUntil(predicate, interval = 10) {
 function dragStart(graph, x, y = 1) {
   x /= window.devicePixelRatio;
   y /= window.devicePixelRatio;
-  graph._onMouseMove({ clientX: x, clientY: y });
-  graph._onMouseDown({ clientX: x, clientY: y });
+  graph._onMouseMove({ testX: x, testY: y });
+  graph._onMouseDown({ testX: x, testY: y });
 }
 
 function dragStop(graph, x, y = 1) {
   x /= window.devicePixelRatio;
   y /= window.devicePixelRatio;
-  graph._onMouseMove({ clientX: x, clientY: y });
-  graph._onMouseUp({ clientX: x, clientY: y });
+  graph._onMouseMove({ testX: x, testY: y });
+  graph._onMouseUp({ testX: x, testY: y });
 }
 
 function dropSelection(graph) {

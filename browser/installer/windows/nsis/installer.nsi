@@ -254,10 +254,7 @@ Section "-InstallStartCleanup"
   ${CleanUpdateDirectories} "Mozilla\Firefox" "Mozilla\updates"
 
   ${RemoveDeprecatedFiles}
-
-  StrCpy $R2 "false"
-  StrCpy $R3 "false"
-  ${RemovePrecompleteEntries} "$R2" "$R3"
+  ${RemovePrecompleteEntries} "false"
 
   ${If} ${FileExists} "$INSTDIR\defaults\pref\channel-prefs.js"
     Delete "$INSTDIR\defaults\pref\channel-prefs.js"
@@ -795,11 +792,7 @@ Function LaunchApp
   ${GetParameters} $0
   ${GetOptions} "$0" "/UAC:" $1
   ${If} ${Errors}
-    StrCpy $1 "0"
-    StrCpy $2 "0"
-    ${If} $1 == "1"
-      Exec "$\"$INSTDIR\${FileMainEXE}$\""
-    ${EndIf}
+    Exec "$\"$INSTDIR\${FileMainEXE}$\""
   ${Else}
     GetFunctionAddress $0 LaunchAppFromElevatedProcess
     UAC::ExecCodeSegment $0
@@ -816,12 +809,7 @@ Function LaunchAppFromElevatedProcess
   ; Set our current working directory to the application's install directory
   ; otherwise the 7-Zip temp directory will be in use and won't be deleted.
   SetOutPath "$1"
-  StrCpy $2 "0"
-  StrCpy $3 "0"
-  ${If} $2 == "1"
-    ; Launch into desktop
-    Exec "$\"$0$\""
-  ${EndIf}
+  Exec "$\"$0$\""
 FunctionEnd
 
 ################################################################################

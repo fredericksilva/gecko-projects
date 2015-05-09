@@ -23,6 +23,7 @@ struct objectURLOptions;
 BEGIN_WORKERS_NAMESPACE
 
 class URLProxy;
+class ConstructorRunnable;
 
 class URL final : public mozilla::dom::URLSearchParamsObserver
 {
@@ -53,6 +54,9 @@ public:
               URL& aBase, ErrorResult& aRv);
   static already_AddRefed<URL>
   Constructor(const GlobalObject& aGlobal, const nsAString& aUrl,
+              const Optional<nsAString>& aBase, ErrorResult& aRv);
+  static already_AddRefed<URL>
+  Constructor(const GlobalObject& aGlobal, const nsAString& aUrl,
               const nsAString& aBase, ErrorResult& aRv);
 
   static void
@@ -61,7 +65,8 @@ public:
                   nsAString& aResult, ErrorResult& aRv);
 
   static void
-  RevokeObjectURL(const GlobalObject& aGlobal, const nsAString& aUrl);
+  RevokeObjectURL(const GlobalObject& aGlobal, const nsAString& aUrl,
+                  ErrorResult& aRv);
 
   void GetHref(nsAString& aHref, ErrorResult& aRv) const;
 
@@ -122,6 +127,10 @@ private:
   {
     return mURLProxy;
   }
+
+  static already_AddRefed<URL>
+  FinishConstructor(JSContext* aCx, WorkerPrivate* aPrivate,
+                    ConstructorRunnable* aRunnable, ErrorResult& aRv);
 
   void CreateSearchParamsIfNeeded();
 

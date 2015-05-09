@@ -22,6 +22,7 @@ Cu.import("resource://gre/modules/Task.jsm", this);
 Cu.import("resource://gre/modules/DeferredTask.jsm", this);
 Cu.import("resource://gre/modules/Preferences.jsm");
 Cu.import("resource://gre/modules/Timer.jsm");
+Cu.import("resource://gre/modules/TelemetryUtils.jsm", this);
 
 const LOGGER_NAME = "Toolkit.Telemetry";
 const LOGGER_PREFIX = "TelemetryController::";
@@ -55,6 +56,8 @@ const PING_SUBMIT_TIMEOUT_MS = 2 * 60 * 1000;
 
 // We treat pings before midnight as happening "at midnight" with this tolerance.
 const MIDNIGHT_TOLERANCE_MS = 15 * 60 * 1000;
+// For midnight fuzzing we want to affect pings around midnight with this tolerance.
+const MIDNIGHT_TOLERANCE_FUZZ_MS = 5 * 60 * 1000;
 // We try to spread "midnight" pings out over this interval.
 const MIDNIGHT_FUZZING_INTERVAL_MS = 60 * 60 * 1000;
 const MIDNIGHT_FUZZING_DELAY_MS = Math.random() * MIDNIGHT_FUZZING_INTERVAL_MS;
@@ -126,16 +129,6 @@ function isNewPingFormat(aPing) {
          ("version" in aPing) && (aPing.version >= 2);
 }
 
-/**
- * Takes a date and returns it trunctated to a date with daily precision.
- */
-function truncateToDays(date) {
-  return new Date(date.getFullYear(),
-                  date.getMonth(),
-                  date.getDate(),
-                  0, 0, 0, 0);
-}
-
 function tomorrow(date) {
   let d = new Date(date);
   d.setDate(d.getDate() + 1);
@@ -193,19 +186,6 @@ this.TelemetryController = Object.freeze({
    */
   setServer: function(aServer) {
     return Impl.setServer(aServer);
-  },
-
-  /**
-   * Adds a ping to the pending ping list by moving it to the saved pings directory
-   * and adding it to the pending ping list.
-   *
-   * @param {String} aPingPath The path of the ping to add to the pending ping list.
-   * @param {Boolean} [aRemoveOriginal] If true, deletes the ping at aPingPath after adding
-   *                  it to the saved pings directory.
-   * @return {Promise} Resolved when the ping is correctly moved to the saved pings directory.
-   */
-  addPendingPingFromFile: function(aPingPath, aRemoveOriginal) {
-    return Impl.addPendingPingFromFile(aPingPath, aRemoveOriginal);
   },
 
   /**
@@ -282,6 +262,16 @@ this.TelemetryController = Object.freeze({
     options.overwrite = aOptions.overwrite || false;
 
     return Impl.addPendingPing(aType, aPayload, options);
+  },
+
+  /**
+   * Save an aborted-session ping to the pending pings and archive it.
+   *
+   * @param {String} aFilePath The path to the aborted-session checkpoint ping.
+   * @return {Promise} Promise that is resolved when the ping is saved.
+   */
+  addAbortedSessionPing: function addAbortedSessionPing(aFilePath) {
+    return Impl.addAbortedSessionPing(aFilePath);
   },
 
   /**
@@ -501,23 +491,6 @@ let Impl = {
   },
 
   /**
-   * Adds a ping to the pending ping list by moving it to the saved pings directory
-   * and adding it to the pending ping list.
-   *
-   * @param {String} aPingPath The path of the ping to add to the pending ping list.
-   * @param {Boolean} [aRemoveOriginal] If true, deletes the ping at aPingPath after adding
-   *                  it to the saved pings directory.
-   * @return {Promise} Resolved when the ping is correctly moved to the saved pings directory.
-   */
-  addPendingPingFromFile: function(aPingPath, aRemoveOriginal) {
-    return TelemetryStorage.addPendingPingFromFile(aPingPath).then(() => {
-        if (aRemoveOriginal) {
-          return OS.File.remove(aPingPath);
-        }
-      }, error => this._log.error("addPendingPingFromFile - Unable to add the pending ping", error));
-  },
-
-  /**
    * This helper calculates the next time that we can send pings at.
    * Currently this mostly redistributes ping sends around midnight to avoid submission
    * spikes around local midnight for daily pings.
@@ -526,17 +499,20 @@ let Impl = {
    * @return Number The next time (ms from UNIX epoch) when we can send pings.
    */
   _getNextPingSendTime: function(now) {
-    const todayDate = truncateToDays(now);
-    const tomorrowDate = tomorrow(todayDate);
-    const nextMidnightRangeStart = tomorrowDate.getTime() - MIDNIGHT_TOLERANCE_MS;
-    const currentMidnightRangeEnd = todayDate.getTime() - MIDNIGHT_TOLERANCE_MS + Policy.midnightPingFuzzingDelay();
+    const midnight = TelemetryUtils.getNearestMidnight(now, MIDNIGHT_FUZZING_INTERVAL_MS);
 
-    if (now.getTime() < currentMidnightRangeEnd) {
-      return currentMidnightRangeEnd;
+    // Don't delay ping if we are not close to midnight.
+    if (!midnight) {
+      return now.getTime();
     }
 
-    if (now.getTime() >= nextMidnightRangeStart) {
-      return nextMidnightRangeStart + Policy.midnightPingFuzzingDelay();
+    // Delay ping send if we are within the midnight fuzzing range.
+    // This is from: |midnight - MIDNIGHT_TOLERANCE_FUZZ_MS|
+    // to: |midnight + MIDNIGHT_FUZZING_INTERVAL_MS|
+    const midnightRangeStart = midnight.getTime() - MIDNIGHT_TOLERANCE_FUZZ_MS;
+    if (now.getTime() >= midnightRangeStart) {
+      // We spread those ping sends out between |midnight| and |midnight + midnightPingFuzzingDelay|.
+      return midnight.getTime() + Policy.midnightPingFuzzingDelay();
     }
 
     return now.getTime();
@@ -719,6 +695,26 @@ let Impl = {
     return TelemetryStorage.savePingToFile(pingData, aFilePath, aOptions.overwrite)
                         .then(() => pingData.id);
   },
+
+  /**
+   * Save an aborted-session ping to the pending pings and archive it.
+   *
+   * @param {String} aFilePath The path to the aborted-session checkpoint ping.
+   * @return {Promise} Promise that is resolved when the ping is saved.
+   */
+  addAbortedSessionPing: Task.async(function* addAbortedSessionPing(aFilePath) {
+    this._log.trace("addAbortedSessionPing");
+
+    let ping = yield TelemetryStorage.loadPingFile(aFilePath);
+    try {
+      yield TelemetryStorage.addPendingPing(ping);
+      yield TelemetryArchive.promiseArchivePing(ping);
+    } catch (e) {
+      this._log.error("addAbortedSessionPing - Unable to add the pending ping", e);
+    } finally {
+      yield OS.File.remove(aFilePath);
+    }
+  }),
 
   onPingRequestFinished: function(success, startTime, ping, isPersisted) {
     this._log.trace("onPingRequestFinished - success: " + success + ", persisted: " + isPersisted);
