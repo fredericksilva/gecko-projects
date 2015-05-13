@@ -412,6 +412,7 @@ gfxWindowsPlatform::gfxWindowsPlatform()
   : mD3D11DeviceInitialized(false)
   , mIsWARP(false)
   , mCanInitMediaDevice(false)
+  , mHasDeviceReset(false)
 {
     mUseClearTypeForDownloadableFonts = UNINITIALIZED_VALUE;
     mUseClearTypeAlways = UNINITIALIZED_VALUE;
@@ -482,6 +483,8 @@ gfxWindowsPlatform::UpdateRenderMode()
       mD3D11Device = nullptr;
       mD3D11ContentDevice = nullptr;
       mAdapter = nullptr;
+      mDeviceResetReason = DeviceResetReason::OK;
+      mHasDeviceReset = false;
 
       imgLoader::Singleton()->ClearCache(true);
       imgLoader::Singleton()->ClearCache(false);
@@ -1155,36 +1158,47 @@ static DeviceResetReason HResultToResetReason(HRESULT hr)
 }
 
 bool
+gfxWindowsPlatform::IsDeviceReset(HRESULT hr, DeviceResetReason* aResetReason)
+{
+  if (hr != S_OK) {
+    mDeviceResetReason = HResultToResetReason(hr);
+    mHasDeviceReset = true;
+    if (aResetReason) {
+      *aResetReason = mDeviceResetReason;
+    }
+    return true;
+  }
+  return false;
+}
+
+bool
 gfxWindowsPlatform::DidRenderingDeviceReset(DeviceResetReason* aResetReason)
 {
+  if (mHasDeviceReset) {
+    if (aResetReason) {
+      *aResetReason = mDeviceResetReason;
+    }
+    return true;
+  }
   if (aResetReason) {
     *aResetReason = DeviceResetReason::OK;
   }
 
   if (mD3D11Device) {
     HRESULT hr = mD3D11Device->GetDeviceRemovedReason();
-    if (hr != S_OK) {
-      if (aResetReason) {
-        *aResetReason = HResultToResetReason(hr);
-      }
+    if (IsDeviceReset(hr, aResetReason)) {
       return true;
     }
   }
   if (mD3D11ContentDevice) {
     HRESULT hr = mD3D11ContentDevice->GetDeviceRemovedReason();
-    if (hr != S_OK) {
-      if (aResetReason) {
-        *aResetReason = HResultToResetReason(hr);
-      }
+    if (IsDeviceReset(hr, aResetReason)) {
       return true;
     }
   }
   if (GetD3D10Device()) {
     HRESULT hr = GetD3D10Device()->GetDeviceRemovedReason();
-    if (hr != S_OK) {
-      if (aResetReason) {
-        *aResetReason = HResultToResetReason(hr);
-      }
+    if (IsDeviceReset(hr, aResetReason)) {
       return true;
     }
   }
@@ -1876,8 +1890,8 @@ gfxWindowsPlatform::InitD3D11Devices()
     if (NS_SUCCEEDED(gfxInfo->GetFeatureStatus(nsIGfxInfo::FEATURE_DIRECT3D_11_LAYERS, &status))) {
       if (status != nsIGfxInfo::FEATURE_STATUS_OK) {
 
-        // It seems like nvdxgiwrapper makes a mess of WARP. See bug 1154703 for more.
-        if (gfxPrefs::LayersD3D11DisableWARP() || GetModuleHandleA("nvdxgiwrapper.dll")) {
+        // It seems like nvdxgiwrap makes a mess of WARP. See bug 1154703 for more.
+        if (gfxPrefs::LayersD3D11DisableWARP() || GetModuleHandleA("nvdxgiwrap.dll")) {
           return;
         }
 

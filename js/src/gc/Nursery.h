@@ -39,6 +39,7 @@ namespace gc {
 struct Cell;
 class MinorCollectionTracer;
 class RelocationOverlay;
+struct TenureCountCache;
 } /* namespace gc */
 
 namespace jit {
@@ -67,9 +68,24 @@ class TenuringTracer : public JSTracer
 
   public:
     const Nursery& nursery() const { return nursery_; }
-    JSObject* moveToTenured(JSObject* thing);
+
+    // Returns true if the pointer was updated.
+    template <typename T> void traverse(T* thingp);
 
     void insertIntoFixupList(gc::RelocationOverlay* entry);
+
+  private:
+    Nursery& nursery() { return nursery_; }
+
+    JSObject* moveToTenured(JSObject* src);
+    size_t moveObjectToTenured(JSObject* dst, JSObject* src, gc::AllocKind dstKind);
+    size_t moveElementsToTenured(NativeObject* dst, NativeObject* src, gc::AllocKind dstKind);
+    size_t moveSlotsToTenured(NativeObject* dst, NativeObject* src, gc::AllocKind dstKind);
+
+    void traceObject(JSObject* src);
+    void markSlots(JS::Value* vp, uint32_t nslots) { markSlots(vp, vp + nslots); }
+    void markSlots(JS::Value* vp, JS::Value* end);
+    void markTraceList(const int32_t* traceList, uint8_t* memory);
 };
 
 class Nursery
@@ -123,7 +139,7 @@ class Nursery
     JSObject* allocateObject(JSContext* cx, size_t size, size_t numDynamic, const js::Class* clasp);
 
     /* Allocate a buffer for a given zone, using the nursery if possible. */
-    void* allocateBuffer(Zone* zone, uint32_t nbytes);
+    void* allocateBuffer(JS::Zone* zone, uint32_t nbytes);
 
     /*
      * Allocate a buffer for a given object, using the nursery if possible and
@@ -312,8 +328,6 @@ class Nursery
     /* Allocates a new GC thing from the tenured generation during minor GC. */
     gc::TenuredCell* allocateFromTenured(JS::Zone* zone, gc::AllocKind thingKind);
 
-    struct TenureCountCache;
-
     /* Common internal allocator function. */
     void* allocate(size_t size);
 
@@ -321,19 +335,7 @@ class Nursery
      * Move the object at |src| in the Nursery to an already-allocated cell
      * |dst| in Tenured.
      */
-    void collectToFixedPoint(TenuringTracer& trc, TenureCountCache& tenureCounts);
-    MOZ_ALWAYS_INLINE void traceObject(TenuringTracer& trc, JSObject* src);
-    MOZ_ALWAYS_INLINE void markSlots(TenuringTracer& trc, HeapSlot* vp, uint32_t nslots);
-    MOZ_ALWAYS_INLINE void markSlots(TenuringTracer& trc, HeapSlot* vp, HeapSlot* end);
-    MOZ_ALWAYS_INLINE void markSlot(TenuringTracer& trc, HeapSlot* slotp);
-    MOZ_ALWAYS_INLINE void markTraceList(TenuringTracer& trc,
-                                         const int32_t* traceList, uint8_t* memory);
-    MOZ_ALWAYS_INLINE bool markObject(TenuringTracer& trc, JSObject** pobj);
-    void* moveToTenured(TenuringTracer& trc, JSObject* src);
-    size_t moveObjectToTenured(TenuringTracer& trc, JSObject* dst, JSObject* src,
-                               gc::AllocKind dstKind);
-    size_t moveElementsToTenured(NativeObject* dst, NativeObject* src, gc::AllocKind dstKind);
-    size_t moveSlotsToTenured(NativeObject* dst, NativeObject* src, gc::AllocKind dstKind);
+    void collectToFixedPoint(TenuringTracer& trc, gc::TenureCountCache& tenureCounts);
 
     /* Handle relocation of slots/elements pointers stored in Ion frames. */
     void setForwardingPointer(void* oldData, void* newData, bool direct);

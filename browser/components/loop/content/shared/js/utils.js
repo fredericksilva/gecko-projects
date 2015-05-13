@@ -261,6 +261,25 @@ var inChrome = typeof Components != "undefined" && "utils" in Components;
   };
 
   /**
+   * Helper to get the current short platform string, based on the return value
+   * of `getOS`.
+   * Possible return values are 'mac', 'win' or 'other'.
+   *
+   * @param  {String} [os] Optional string for the OS, used in tests only.
+   * @return {String} 'mac', 'win' or 'other'.
+   */
+  var getPlatform = function(os) {
+    os = getOS(os);
+    var platform = "other";
+    if (os.indexOf("mac") > -1) {
+      platform = "mac";
+    } else if (os.indexOf("win") > -1) {
+      platform = "win";
+    }
+    return platform;
+  };
+
+  /**
    * Helper to allow getting some of the location data in a way that's compatible
    * with stubbing for unit tests.
    */
@@ -302,25 +321,51 @@ var inChrome = typeof Components != "undefined" && "utils" in Components;
    * Generates and opens a mailto: url with call URL information prefilled.
    * Note: This only works for Desktop.
    *
-   * @param  {String} callUrl   The call URL.
-   * @param  {String} recipient The recipient email address (optional).
+   * @param {String} callUrl              The call URL.
+   * @param {String} [recipient]          The recipient email address (optional).
+   * @param {String} [contextDescription] The context description (optional).
    */
-  function composeCallUrlEmail(callUrl, recipient) {
+  function composeCallUrlEmail(callUrl, recipient, contextDescription) {
     if (typeof navigator.mozLoop === "undefined") {
       console.warn("composeCallUrlEmail isn't available for Loop standalone.");
       return;
     }
-    navigator.mozLoop.composeEmail(
-      mozL10n.get("share_email_subject5", {
-        clientShortname2: mozL10n.get("clientShortname2")
-      }),
-      mozL10n.get("share_email_body5", {
+
+    var subject, body;
+    var brandShortname = mozL10n.get("brandShortname");
+    var clientShortname2 = mozL10n.get("clientShortname2");
+    var clientSuperShortname = mozL10n.get("clientSuperShortname");
+    var learnMoreUrl = navigator.mozLoop.getLoopPref("learnMoreUrl");
+
+    if (contextDescription) {
+      subject = mozL10n.get("share_email_subject_context", {
+        clientShortname2: clientShortname2,
+        title: contextDescription
+      });
+      body = mozL10n.get("share_email_body_context", {
         callUrl: callUrl,
-        brandShortname: mozL10n.get("brandShortname"),
-        clientShortname2: mozL10n.get("clientShortname2"),
-        clientSuperShortname: mozL10n.get("clientSuperShortname"),
-        learnMoreUrl: navigator.mozLoop.getLoopPref("learnMoreUrl")
-      }).replace(/\r\n/g, "\n").replace(/\n/g, "\r\n"),
+        brandShortname: brandShortname,
+        clientShortname2: clientShortname2,
+        clientSuperShortname: clientSuperShortname,
+        learnMoreUrl: learnMoreUrl,
+        title: contextDescription
+      });
+    } else {
+      subject = mozL10n.get("share_email_subject5", {
+        clientShortname2: clientShortname2
+      });
+      body = mozL10n.get("share_email_body5", {
+        callUrl: callUrl,
+        brandShortname: brandShortname,
+        clientShortname2: clientShortname2,
+        clientSuperShortname: clientSuperShortname,
+        learnMoreUrl: learnMoreUrl
+      });
+    }
+
+    navigator.mozLoop.composeEmail(
+      subject,
+      body.replace(/\r\n/g, "\n").replace(/\n/g, "\r\n"),
       recipient
     );
   }
@@ -632,6 +677,7 @@ var inChrome = typeof Components != "undefined" && "utils" in Components;
     getBoolPreference: getBoolPreference,
     getOS: getOS,
     getOSVersion: getOSVersion,
+    getPlatform: getPlatform,
     isChrome: isChrome,
     isFirefox: isFirefox,
     isFirefoxOS: isFirefoxOS,

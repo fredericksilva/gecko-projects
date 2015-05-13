@@ -113,6 +113,7 @@ loop.roomViews = (function(mozL10n) {
       var shareDropdown = cx({
         "share-service-dropdown": true,
         "dropdown-menu": true,
+        "visually-hidden": true,
         "share-button-unavailable": !this.props.socialShareButtonAvailable,
         "hide": !this.props.show
       });
@@ -170,7 +171,7 @@ loop.roomViews = (function(mozL10n) {
    * Desktop room invitation view (overlay).
    */
   var DesktopRoomInvitationView = React.createClass({displayName: "DesktopRoomInvitationView",
-    mixins: [sharedMixins.DropdownMenuMixin],
+    mixins: [sharedMixins.DropdownMenuMixin(".room-invitation-overlay")],
 
     propTypes: {
       dispatcher: React.PropTypes.instanceOf(loop.Dispatcher).isRequired,
@@ -185,15 +186,21 @@ loop.roomViews = (function(mozL10n) {
     getInitialState: function() {
       return {
         copiedUrl: false,
-        editMode: false
+        editMode: false,
+        newRoomName: ""
       };
     },
 
     handleEmailButtonClick: function(event) {
       event.preventDefault();
 
+      var roomData = this.props.roomData;
+      var contextURL = roomData.roomContextUrls && roomData.roomContextUrls[0];
       this.props.dispatcher.dispatch(
-        new sharedActions.EmailRoomUrl({roomUrl: this.props.roomData.roomUrl}));
+        new sharedActions.EmailRoomUrl({
+          roomUrl: roomData.roomUrl,
+          roomDescription: contextURL && contextURL.description
+        }));
     },
 
     handleCopyButtonClick: function(event) {
@@ -239,31 +246,31 @@ loop.roomViews = (function(mozL10n) {
             React.createElement("a", {className: cx({hide: !canAddContext, "room-invitation-addcontext": true}), 
                onClick: this.handleAddContextClick}, 
               mozL10n.get("context_add_some_label")
-            ), 
-            React.createElement("div", {className: "btn-group call-action-group"}, 
-              React.createElement("button", {className: "btn btn-info btn-email", 
-                      onClick: this.handleEmailButtonClick}, 
-                mozL10n.get("email_link_button")
-              ), 
-              React.createElement("button", {className: "btn btn-info btn-copy", 
-                      onClick: this.handleCopyButtonClick}, 
-                this.state.copiedUrl ? mozL10n.get("copied_url_button") :
-                                        mozL10n.get("copy_url_button2")
-              ), 
-              React.createElement("button", {className: "btn btn-info btn-share", 
-                      ref: "anchor", 
-                      onClick: this.handleShareButtonClick}, 
-                mozL10n.get("share_button3")
-              )
-            ), 
-            React.createElement(SocialShareDropdown, {
-              dispatcher: this.props.dispatcher, 
-              roomUrl: this.props.roomData.roomUrl, 
-              show: this.state.showMenu, 
-              socialShareButtonAvailable: this.props.socialShareButtonAvailable, 
-              socialShareProviders: this.props.socialShareProviders, 
-              ref: "menu"})
+            )
           ), 
+          React.createElement("div", {className: "btn-group call-action-group"}, 
+            React.createElement("button", {className: "btn btn-info btn-email", 
+                    onClick: this.handleEmailButtonClick}, 
+              mozL10n.get("email_link_button")
+            ), 
+            React.createElement("button", {className: "btn btn-info btn-copy", 
+                    onClick: this.handleCopyButtonClick}, 
+              this.state.copiedUrl ? mozL10n.get("copied_url_button") :
+                                      mozL10n.get("copy_url_button2")
+            ), 
+            React.createElement("button", {className: "btn btn-info btn-share", 
+                    ref: "anchor", 
+                    onClick: this.handleShareButtonClick}, 
+              mozL10n.get("share_button3")
+            )
+          ), 
+          React.createElement(SocialShareDropdown, {
+            dispatcher: this.props.dispatcher, 
+            roomUrl: this.props.roomData.roomUrl, 
+            show: this.state.showMenu, 
+            socialShareButtonAvailable: this.props.socialShareButtonAvailable, 
+            socialShareProviders: this.props.socialShareProviders, 
+            ref: "menu"}), 
           React.createElement(DesktopRoomContextView, {
             dispatcher: this.props.dispatcher, 
             editMode: this.state.editMode, 
@@ -459,8 +466,9 @@ loop.roomViews = (function(mozL10n) {
     },
 
     render: function() {
-      if (!this.state.show && !this.state.editMode)
+      if (!this.state.show && !this.state.editMode) {
         return null;
+      }
 
       var url = this._getURL();
       var thumbnail = url && url.thumbnail || "";

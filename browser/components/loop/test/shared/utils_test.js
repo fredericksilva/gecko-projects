@@ -177,8 +177,14 @@ describe("loop.shared.utils", function() {
       // fake mozL10n
       sandbox.stub(navigator.mozL10n, "get", function(id) {
         switch(id) {
-          case "share_email_subject5": return "subject";
-          case "share_email_body5":    return "body";
+          case "share_email_subject5":
+            return "subject";
+          case "share_email_body5":
+            return "body";
+          case "share_email_subject_context":
+            return "subject_context";
+          case "share_email_body_context":
+            return "body_context";
         }
       });
       composeEmail = sandbox.spy();
@@ -194,6 +200,13 @@ describe("loop.shared.utils", function() {
       sinon.assert.calledOnce(composeEmail);
       sinon.assert.calledWith(composeEmail,
                               "subject", "body", "fake@invalid.tld");
+    });
+
+    it("should compose a different email when context info is provided", function() {
+      sharedUtils.composeCallUrlEmail("http://invalid", null, "Hello, is me you're looking for?");
+
+      sinon.assert.calledOnce(composeEmail);
+      sinon.assert.calledWith(composeEmail, "subject_context", "body_context");
     });
   });
 
@@ -316,6 +329,43 @@ describe("loop.shared.utils", function() {
 
       // Linux version can't be determined correctly.
       expect(result).eql({ major: Infinity, minor: 0 });
+    });
+  });
+
+  describe("#getPlatform", function() {
+    it("should recognize the OSX userAgent string", function() {
+      var UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.10; rv:37.0) Gecko/20100101 Firefox/37.0";
+      var result = sharedUtils.getPlatform(UA);
+
+      expect(result).eql("mac");
+    });
+
+    it("should recognize the Windows userAgent string", function() {
+      var UA = "Mozilla/5.0 (Windows NT 6.1; Win64; x64; rv:10.0) Gecko/20100101 Firefox/10.0";
+      var result = sharedUtils.getPlatform(UA);
+
+      expect(result).eql("win");
+    });
+
+    it("should recognize the Linux userAgent string", function() {
+      var UA = "Mozilla/5.0 (X11; Linux i686 on x86_64; rv:10.0) Gecko/20100101 Firefox/10.0";
+      var result = sharedUtils.getPlatform(UA);
+
+      expect(result).eql("other");
+    });
+
+    it("should recognize the OSX oscpu string", function() {
+      var oscpu = "Intel Mac OS X 10.10";
+      var result = sharedUtils.getPlatform(oscpu);
+
+      expect(result).eql("mac");
+    });
+
+    it("should recognize the Windows oscpu string", function() {
+      var oscpu = "Windows NT 5.3; Win64; x64";
+      var result = sharedUtils.getPlatform(oscpu);
+
+      expect(result).eql("win");
     });
   });
 

@@ -2713,6 +2713,27 @@ TabChild::RecvAppOfflineStatus(const uint32_t& aId, const bool& aOffline)
 }
 
 bool
+TabChild::RecvSwappedWithOtherRemoteLoader()
+{
+  nsCOMPtr<nsIDocShell> ourDocShell = do_GetInterface(WebNavigation());
+  if (NS_WARN_IF(!ourDocShell)) {
+    return true;
+  }
+
+  nsCOMPtr<nsPIDOMWindow> ourWindow = ourDocShell->GetWindow();
+  if (NS_WARN_IF(!ourWindow)) {
+    return true;
+  }
+
+  nsCOMPtr<EventTarget> ourEventTarget = ourWindow->GetParentTarget();
+
+  nsContentUtils::FirePageShowEvent(ourDocShell, ourEventTarget, false);
+  nsContentUtils::FirePageHideEvent(ourDocShell, ourEventTarget);
+  nsContentUtils::FirePageShowEvent(ourDocShell, ourEventTarget, true);
+  return true;
+}
+
+bool
 TabChild::RecvDestroy()
 {
   MOZ_ASSERT(mDestroyed == false);
@@ -3039,7 +3060,7 @@ TabChild::DoSendBlockingMessage(JSContext* aCx,
                                 const StructuredCloneData& aData,
                                 JS::Handle<JSObject *> aCpows,
                                 nsIPrincipal* aPrincipal,
-                                InfallibleTArray<nsString>* aJSONRetVal,
+                                nsTArray<OwningSerializedStructuredCloneBuffer>* aRetVal,
                                 bool aIsSync)
 {
   ClonedMessageData data;
@@ -3052,11 +3073,11 @@ TabChild::DoSendBlockingMessage(JSContext* aCx,
   }
   if (aIsSync) {
     return SendSyncMessage(PromiseFlatString(aMessage), data, cpows,
-                           Principal(aPrincipal), aJSONRetVal);
+                           Principal(aPrincipal), aRetVal);
   }
 
   return SendRpcMessage(PromiseFlatString(aMessage), data, cpows,
-                        Principal(aPrincipal), aJSONRetVal);
+                        Principal(aPrincipal), aRetVal);
 }
 
 bool

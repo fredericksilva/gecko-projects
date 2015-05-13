@@ -10,7 +10,10 @@
 
 #include "gc/Nursery.h"
 
+#include "jscntxt.h"
+
 #include "gc/Heap.h"
+#include "gc/Zone.h"
 #include "js/TracingAPI.h"
 #include "vm/Runtime.h"
 
@@ -22,7 +25,6 @@ js::Nursery::getForwardedPointer(JSObject** ref) const
     const gc::RelocationOverlay* overlay = reinterpret_cast<const gc::RelocationOverlay*>(*ref);
     if (!overlay->isForwarded())
         return false;
-    /* This static cast from Cell* restricts T to valid (GC thing) types. */
     *ref = static_cast<JSObject*>(overlay->forwardingAddress());
     return true;
 }

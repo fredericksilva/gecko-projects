@@ -97,7 +97,6 @@ public:
 
   virtual JSObject* WrapObject(JSContext* aCx, JS::Handle<JSObject*> aGivenProto) override;
 
-  UserFontSet* EnsureUserFontSet(nsPresContext* aPresContext);
   UserFontSet* GetUserFontSet() { return mUserFontSet; }
 
   // Called when this font set is no longer associated with a presentation.
@@ -176,7 +175,7 @@ public:
 
   FontFaceSet* Add(FontFace& aFontFace, mozilla::ErrorResult& aRv);
   void Clear();
-  bool Delete(FontFace& aFontFace, mozilla::ErrorResult& aRv);
+  bool Delete(FontFace& aFontFace);
   bool Has(FontFace& aFontFace);
   uint32_t Size();
   mozilla::dom::FontFaceSetIterator* Entries();
@@ -197,6 +196,8 @@ private:
    * Removes any listeners and observers.
    */
   void Disconnect();
+
+  void RemoveDOMContentLoadedListener();
 
   /**
    * Returns whether there might be any pending font loads, which should cause
