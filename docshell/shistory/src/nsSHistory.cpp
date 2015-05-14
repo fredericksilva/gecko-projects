@@ -1,6 +1,6 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*-
- *
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* vim: set ts=8 sts=2 et sw=2 tw=80: */
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
@@ -59,8 +59,6 @@ int32_t nsSHistory::sHistoryMaxTotalViewers = -1;
 // entries were touched, so that we can evict older entries first.
 static uint32_t gTouchCounter = 0;
 
-#ifdef PR_LOGGING
-
 static PRLogModuleInfo*
 GetSHistoryLog()
 {
@@ -104,14 +102,6 @@ GetSHistoryLog()
       LOG_SPEC(format, uri);                               \
     }                                                      \
   PR_END_MACRO
-
-#else // !PR_LOGGING
-
-#define LOG(format)
-#define LOG_SPEC(format, uri)
-#define LOG_SHENTRY_SPEC(format, shentry)
-
-#endif // PR_LOGGING
 
 // Iterates over all registered session history listeners.
 #define ITERATE_LISTENERS(body)                            \

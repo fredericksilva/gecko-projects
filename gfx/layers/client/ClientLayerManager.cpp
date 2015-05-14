@@ -199,7 +199,7 @@ ClientLayerManager::BeginTransactionWithTarget(gfxContext* aTarget)
     hal::GetCurrentScreenConfiguration(&currentConfig);
     orientation = currentConfig.orientation();
   }
-  nsIntRect targetBounds = mWidget->GetNaturalBounds();
+  IntRect targetBounds = mWidget->GetNaturalBounds();
   targetBounds.x = targetBounds.y = 0;
   mForwarder->BeginTransaction(targetBounds, mTargetRotation, orientation);
 
@@ -466,10 +466,10 @@ ClientLayerManager::MakeSnapshotIfRequired()
       // The compositor doesn't draw to a different sized surface
       // when there's a rotation. Instead we rotate the result
       // when drawing into dt
-      nsIntRect outerBounds;
+      IntRect outerBounds;
       mWidget->GetBounds(outerBounds);
 
-      nsIntRect bounds = ToOutsideIntRect(mShadowTarget->GetClipExtents());
+      IntRect bounds = ToOutsideIntRect(mShadowTarget->GetClipExtents());
       if (mTargetRotation) {
         bounds = RotateRect(bounds, outerBounds, mTargetRotation);
       }
@@ -740,7 +740,6 @@ ClientLayerManager::GetBackendName(nsAString& aName)
     case LayersBackend::LAYERS_BASIC: aName.AssignLiteral("Basic"); return;
     case LayersBackend::LAYERS_OPENGL: aName.AssignLiteral("OpenGL"); return;
     case LayersBackend::LAYERS_D3D9: aName.AssignLiteral("Direct3D 9"); return;
-    case LayersBackend::LAYERS_D3D10: aName.AssignLiteral("Direct3D 10"); return;
     case LayersBackend::LAYERS_D3D11: {
 #ifdef XP_WIN
       if (gfxWindowsPlatform::GetPlatform()->IsWARP()) {
@@ -791,5 +790,5 @@ ClientLayer::~ClientLayer()
   MOZ_COUNT_DTOR(ClientLayer);
 }
 
-} // layers
-} // mozilla
+} // namespace layers
+} // namespace mozilla

@@ -60,7 +60,7 @@ struct
 ConsoleStructuredCloneData
 {
   nsCOMPtr<nsISupports> mParent;
-  nsTArray<nsRefPtr<FileImpl>> mFiles;
+  nsTArray<nsRefPtr<BlobImpl>> mBlobs;
 };
 
 /**
@@ -84,13 +84,13 @@ ConsoleStructuredCloneCallbacksRead(JSContext* aCx,
   MOZ_ASSERT(data);
 
   if (aTag == CONSOLE_TAG_BLOB) {
-    MOZ_ASSERT(data->mFiles.Length() > aIndex);
+    MOZ_ASSERT(data->mBlobs.Length() > aIndex);
 
     JS::Rooted<JS::Value> val(aCx);
     {
-      nsRefPtr<File> file =
-        new File(data->mParent, data->mFiles.ElementAt(aIndex));
-      if (!GetOrCreateDOMReflector(aCx, file, &val)) {
+      nsRefPtr<Blob> blob =
+        Blob::Create(data->mParent, data->mBlobs.ElementAt(aIndex));
+      if (!ToJSValue(aCx, blob, &val)) {
         return nullptr;
       }
     }
@@ -114,14 +114,14 @@ ConsoleStructuredCloneCallbacksWrite(JSContext* aCx,
     static_cast<ConsoleStructuredCloneData*>(aClosure);
   MOZ_ASSERT(data);
 
-  nsRefPtr<File> file;
-  if (NS_SUCCEEDED(UNWRAP_OBJECT(Blob, aObj, file)) &&
-      file->Impl()->MayBeClonedToOtherThreads()) {
-    if (!JS_WriteUint32Pair(aWriter, CONSOLE_TAG_BLOB, data->mFiles.Length())) {
+  nsRefPtr<Blob> blob;
+  if (NS_SUCCEEDED(UNWRAP_OBJECT(Blob, aObj, blob)) &&
+      blob->Impl()->MayBeClonedToOtherThreads()) {
+    if (!JS_WriteUint32Pair(aWriter, CONSOLE_TAG_BLOB, data->mBlobs.Length())) {
       return false;
     }
 
-    data->mFiles.AppendElement(file->Impl());
+    data->mBlobs.AppendElement(blob->Impl());
     return true;
   }
 
@@ -847,6 +847,19 @@ Console::TimeEnd(JSContext* aCx, const JS::Handle<JS::Value> aTime)
 }
 
 void
+Console::TimeStamp(JSContext* aCx, const JS::Handle<JS::Value> aData)
+{
+  Sequence<JS::Value> data;
+  SequenceRooter<JS::Value> rooter(aCx, &data);
+
+  if (aData.isString()) {
+    data.AppendElement(aData);
+  }
+
+  Method(aCx, MethodTimeStamp, NS_LITERAL_STRING("timeStamp"), data);
+}
+
+void
 Console::Profile(JSContext* aCx, const Sequence<JS::Value>& aData)
 {
   ProfileMethod(aCx, NS_LITERAL_STRING("profile"), aData);
@@ -1016,6 +1029,27 @@ public:
   }
 };
 
+class TimestampTimelineMarker : public TimelineMarker
+{
+public:
+  TimestampTimelineMarker(nsDocShell* aDocShell,
+                          TracingMetadata aMetaData,
+                          const nsAString& aCause)
+    : TimelineMarker(aDocShell, "TimeStamp", aMetaData, aCause)
+  {
+    CaptureStack();
+    MOZ_ASSERT(aMetaData == TRACING_TIMESTAMP);
+  }
+
+  virtual void AddDetails(mozilla::dom::ProfileTimelineMarker& aMarker) override
+  {
+    if (!GetCause().IsEmpty()) {
+      aMarker.mCauseName.Construct(GetCause());
+    }
+    aMarker.mEndStack = GetStack();
+  }
+};
+
 // Queue a call to a console method. See the CALL_DELAY constant.
 void
 Console::Method(JSContext* aCx, MethodName aMethodName,
@@ -1090,7 +1124,9 @@ Console::Method(JSContext* aCx, MethodName aMethodName,
   }
 
   // Monotonic timer for 'time' and 'timeEnd'
-  if ((aMethodName == MethodTime || aMethodName == MethodTimeEnd)) {
+  if (aMethodName == MethodTime ||
+      aMethodName == MethodTimeEnd ||
+      aMethodName == MethodTimeStamp) {
     if (mWindow) {
       nsGlobalWindow *win = static_cast<nsGlobalWindow*>(mWindow.get());
       MOZ_ASSERT(win);
@@ -1109,7 +1145,23 @@ Console::Method(JSContext* aCx, MethodName aMethodName,
         docShell->GetRecordProfileTimelineMarkers(&isTimelineRecording);
       }
 
-      if (isTimelineRecording && aData.Length() == 1) {
+      // 'timeStamp' recordings do not need an argument; use empty string
+      // if no arguments passed in
+      if (isTimelineRecording && aMethodName == MethodTimeStamp) {
+        JS::Rooted<JS::Value> value(aCx, aData.Length() == 0 ?
+                                    JS_GetEmptyStringValue(aCx) : aData[0]);
+        JS::Rooted<JSString*> jsString(aCx, JS::ToString(aCx, value));
+        nsAutoJSString key;
+        if (jsString) {
+          key.init(aCx, jsString);
+        }
+
+        mozilla::UniquePtr<TimelineMarker> marker =
+          MakeUnique<TimestampTimelineMarker>(docShell, TRACING_TIMESTAMP, key);
+        docShell->AddProfileTimelineMarker(Move(marker));
+      }
+      // For `console.time(foo)` and `console.timeEnd(foo)`
+      else if (isTimelineRecording && aData.Length() == 1) {
         JS::Rooted<JS::Value> value(aCx, aData[0]);
         JS::Rooted<JSString*> jsString(aCx, JS::ToString(aCx, value));
         if (jsString) {

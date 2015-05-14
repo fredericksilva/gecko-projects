@@ -110,6 +110,9 @@ function Toolbox(target, selectedTool, hostType, hostOptions) {
   this._toolPanels = new Map();
   this._telemetry = new Telemetry();
 
+  this._initInspector = null;
+  this._inspector = null;
+
   this._toolRegistered = this._toolRegistered.bind(this);
   this._toolUnregistered = this._toolUnregistered.bind(this);
   this._refreshHostTitle = this._refreshHostTitle.bind(this);
@@ -133,9 +136,6 @@ function Toolbox(target, selectedTool, hostType, hostOptions) {
   }
   if (!selectedTool) {
     selectedTool = Services.prefs.getCharPref(this._prefs.LAST_TOOL);
-  }
-  if (!gDevTools.getToolDefinition(selectedTool)) {
-    selectedTool = "webconsole";
   }
   this._defaultToolId = selectedTool;
 
@@ -367,7 +367,15 @@ Toolbox.prototype = {
 
       this._pingTelemetry();
 
-      let panel = yield this.selectTool(this._defaultToolId);
+      // The isTargetSupported check needs to happen after the target is
+      // remoted, otherwise we could have done it in the toolbox constructor
+      // (bug 1072764).
+      let toolDef = gDevTools.getToolDefinition(this._defaultToolId);
+      if (!toolDef || !toolDef.isTargetSupported(this._target)) {
+        this._defaultToolId = "webconsole";
+      }
+
+      yield this.selectTool(this._defaultToolId);
 
       // Wait until the original tool is selected so that the split
       // console input will receive focus.

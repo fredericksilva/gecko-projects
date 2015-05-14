@@ -261,6 +261,25 @@ var inChrome = typeof Components != "undefined" && "utils" in Components;
   };
 
   /**
+   * Helper to get the current short platform string, based on the return value
+   * of `getOS`.
+   * Possible return values are 'mac', 'win' or 'other'.
+   *
+   * @param  {String} [os] Optional string for the OS, used in tests only.
+   * @return {String} 'mac', 'win' or 'other'.
+   */
+  var getPlatform = function(os) {
+    os = getOS(os);
+    var platform = "other";
+    if (os.indexOf("mac") > -1) {
+      platform = "mac";
+    } else if (os.indexOf("win") > -1) {
+      platform = "win";
+    }
+    return platform;
+  };
+
+  /**
    * Helper to allow getting some of the location data in a way that's compatible
    * with stubbing for unit tests.
    */
@@ -302,25 +321,51 @@ var inChrome = typeof Components != "undefined" && "utils" in Components;
    * Generates and opens a mailto: url with call URL information prefilled.
    * Note: This only works for Desktop.
    *
-   * @param  {String} callUrl   The call URL.
-   * @param  {String} recipient The recipient email address (optional).
+   * @param {String} callUrl              The call URL.
+   * @param {String} [recipient]          The recipient email address (optional).
+   * @param {String} [contextDescription] The context description (optional).
    */
-  function composeCallUrlEmail(callUrl, recipient) {
+  function composeCallUrlEmail(callUrl, recipient, contextDescription) {
     if (typeof navigator.mozLoop === "undefined") {
       console.warn("composeCallUrlEmail isn't available for Loop standalone.");
       return;
     }
-    navigator.mozLoop.composeEmail(
-      mozL10n.get("share_email_subject5", {
-        clientShortname2: mozL10n.get("clientShortname2")
-      }),
-      mozL10n.get("share_email_body5", {
+
+    var subject, body;
+    var brandShortname = mozL10n.get("brandShortname");
+    var clientShortname2 = mozL10n.get("clientShortname2");
+    var clientSuperShortname = mozL10n.get("clientSuperShortname");
+    var learnMoreUrl = navigator.mozLoop.getLoopPref("learnMoreUrl");
+
+    if (contextDescription) {
+      subject = mozL10n.get("share_email_subject_context", {
+        clientShortname2: clientShortname2,
+        title: contextDescription
+      });
+      body = mozL10n.get("share_email_body_context", {
         callUrl: callUrl,
-        brandShortname: mozL10n.get("brandShortname"),
-        clientShortname2: mozL10n.get("clientShortname2"),
-        clientSuperShortname: mozL10n.get("clientSuperShortname"),
-        learnMoreUrl: navigator.mozLoop.getLoopPref("learnMoreUrl")
-      }).replace(/\r\n/g, "\n").replace(/\n/g, "\r\n"),
+        brandShortname: brandShortname,
+        clientShortname2: clientShortname2,
+        clientSuperShortname: clientSuperShortname,
+        learnMoreUrl: learnMoreUrl,
+        title: contextDescription
+      });
+    } else {
+      subject = mozL10n.get("share_email_subject5", {
+        clientShortname2: clientShortname2
+      });
+      body = mozL10n.get("share_email_body5", {
+        callUrl: callUrl,
+        brandShortname: brandShortname,
+        clientShortname2: clientShortname2,
+        clientSuperShortname: clientSuperShortname,
+        learnMoreUrl: learnMoreUrl
+      });
+    }
+
+    navigator.mozLoop.composeEmail(
+      subject,
+      body.replace(/\r\n/g, "\n").replace(/\n/g, "\r\n"),
       recipient
     );
   }
@@ -553,6 +598,71 @@ var inChrome = typeof Components != "undefined" && "utils" in Components;
     return result;
   }
 
+  /**
+   * Get the difference after comparing two different objects. It compares property
+   * names and their respective values if necessary.
+   * This function does _not_ recurse into object values to keep this functions'
+   * complexity predictable to O(2).
+   *
+   * @param  {Object} a Object number 1, the comparator.
+   * @param  {Object} b Object number 2, the comparison.
+   * @return {Object}   The diff output, which is itself an object structured as:
+   *                    {
+   *                      updated: [prop1, prop6],
+   *                      added: [prop2],
+   *                      removed: [prop3]
+   *                    }
+   */
+  function objectDiff(a, b) {
+    var propsA = a ? Object.getOwnPropertyNames(a) : [];
+    var propsB = b ? Object.getOwnPropertyNames(b) : [];
+    var diff = {
+      updated: [],
+      added: [],
+      removed: []
+    };
+
+    var prop;
+    for (var i = 0, lA = propsA.length; i < lA; ++i) {
+      prop = propsA[i];
+      if (propsB.indexOf(prop) == -1) {
+        diff.removed.push(prop);
+      } else if (a[prop] !== b[prop]) {
+        diff.updated.push(prop);
+      }
+    }
+
+    for (var j = 0, lB = propsB.length; j < lB; ++j) {
+      prop = propsB[j];
+      if (propsA.indexOf(prop) == -1) {
+        diff.added.push(prop);
+      }
+    }
+
+    return diff;
+  }
+
+  /**
+   * When comparing two object, you sometimes want to ignore falsy values when
+   * they're not persisted on the server, for example.
+   * This function removes all the empty/ falsy properties from the target object.
+   *
+   * @param  {Object} obj Target object to strip the falsy properties from
+   * @return {Object}
+   */
+  function stripFalsyValues(obj) {
+    var props = Object.getOwnPropertyNames(obj);
+    var prop;
+    for (var i = props.length; i >= 0; --i) {
+      prop = props[i];
+      // If the value of the object property evaluates to |false|, delete it.
+      if (!obj[prop]) {
+        delete obj[prop];
+      }
+    }
+    return obj;
+  }
+
   this.utils = {
     CALL_TYPES: CALL_TYPES,
     FAILURE_DETAILS: FAILURE_DETAILS,
@@ -567,6 +677,7 @@ var inChrome = typeof Components != "undefined" && "utils" in Components;
     getBoolPreference: getBoolPreference,
     getOS: getOS,
     getOSVersion: getOSVersion,
+    getPlatform: getPlatform,
     isChrome: isChrome,
     isFirefox: isFirefox,
     isFirefoxOS: isFirefoxOS,
@@ -576,6 +687,8 @@ var inChrome = typeof Components != "undefined" && "utils" in Components;
     atob: atob,
     btoa: btoa,
     strToUint8Array: strToUint8Array,
-    Uint8ArrayToStr: Uint8ArrayToStr
+    Uint8ArrayToStr: Uint8ArrayToStr,
+    objectDiff: objectDiff,
+    stripFalsyValues: stripFalsyValues
   };
 }).call(inChrome ? this : loop.shared);

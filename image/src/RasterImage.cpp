@@ -805,6 +805,18 @@ RasterImage::GetCurrentImage(ImageContainer* aContainer, uint32_t aFlags)
   return MakePair(result.first(), Move(image));
 }
 
+NS_IMETHODIMP_(bool)
+RasterImage::IsImageContainerAvailable(LayerManager* aManager, uint32_t aFlags)
+{
+  int32_t maxTextureSize = aManager->GetMaxTextureSize();
+  if (!mHasSize ||
+      mSize.width > maxTextureSize ||
+      mSize.height > maxTextureSize) {
+    return false;
+  }
+
+  return true;
+}
 
 NS_IMETHODIMP_(already_AddRefed<ImageContainer>)
 RasterImage::GetImageContainer(LayerManager* aManager, uint32_t aFlags)
@@ -1945,6 +1957,22 @@ RasterImage::DoError()
 
   // Put the container in an error state.
   mError = true;
+
+  // Stop animation and release our FrameAnimator.
+  if (mAnimating) {
+    StopAnimation();
+  }
+  mAnim.release();
+
+  // Release all locks.
+  mLockCount = 0;
+  SurfaceCache::UnlockImage(ImageKey(this));
+
+  // Release all frames from the surface cache.
+  SurfaceCache::RemoveImage(ImageKey(this));
+
+  // Invalidate to get rid of any partially-drawn image content.
+  NotifyProgress(NoProgress, IntRect(0, 0, mSize.width, mSize.height));
 
   // Log our error
   LOG_CONTAINER_ERROR;

@@ -15,7 +15,7 @@
 
 namespace mozilla {
 namespace dom {
-class File;
+class Blob;
 struct objectURLOptions;
 }
 }
@@ -61,11 +61,12 @@ public:
 
   static void
   CreateObjectURL(const GlobalObject& aGlobal,
-                  File& aArg, const objectURLOptions& aOptions,
+                  Blob& aArg, const objectURLOptions& aOptions,
                   nsAString& aResult, ErrorResult& aRv);
 
   static void
-  RevokeObjectURL(const GlobalObject& aGlobal, const nsAString& aUrl);
+  RevokeObjectURL(const GlobalObject& aGlobal, const nsAString& aUrl,
+                  ErrorResult& aRv);
 
   void GetHref(nsAString& aHref, ErrorResult& aRv) const;
 

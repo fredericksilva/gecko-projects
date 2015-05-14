@@ -107,9 +107,7 @@ using mozilla::gfx::Matrix4x4;
 // out to the bounding-box if there are more
 #define MAX_RECTS_IN_REGION 100
 
-#ifdef PR_LOGGING
 PRLogModuleInfo* sCocoaLog = nullptr;
-#endif
 
 extern "C" {
   CG_EXTERN void CGContextResetCTM(CGContextRef);
@@ -275,11 +273,9 @@ FlipCocoaScreenCoordinate(NSPoint &inPoint)
 
 void EnsureLogInitialized()
 {
-#ifdef PR_LOGGING
   if (!sCocoaLog) {
     sCocoaLog = PR_NewLogModule("nsCocoaWidgets");
   }
-#endif // PR_LOGGING
 }
 
 namespace {
@@ -1931,16 +1927,6 @@ nsChildView::CreateCompositor()
   if (mCompositorChild) {
     [(ChildView *)mView setUsingOMTCompositor:true];
   }
-}
-
-bool
-nsChildView::IsMultiProcessWindow()
-{
-  // On OS X the XULWindowWidget object gets the widget's init-data, which
-  // is what has the electrolysis window flag. So here in the child view
-  // we need to get the flag from that window instead.
-  nsCocoaWindow* parent = GetXULWindowWidget();
-  return parent ? parent->IsMultiProcessWindow() : false;
 }
 
 void

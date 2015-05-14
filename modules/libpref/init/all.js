@@ -3608,6 +3608,18 @@ pref("intl.ime.use_simple_context_on_password_field", true);
 pref("intl.ime.use_simple_context_on_password_field", false);
 #endif
 
+# enable new platform fontlist for linux on GTK platforms
+# temporary pref to allow flipping back to the existing
+# gfxPangoFontGroup/gfxFontconfigUtils code for handling system fonts
+
+#ifdef MOZ_WIDGET_GTK
+#ifdef RELEASE_BUILD
+pref("gfx.font_rendering.fontconfig.fontlist.enabled", false);
+#else
+pref("gfx.font_rendering.fontconfig.fontlist.enabled", true);
+#endif
+#endif
+
 # XP_UNIX
 #endif
 #endif
@@ -4553,6 +4565,13 @@ pref("selectioncaret.inflatesize.threshold", 40);
 // Selection carets will fall-back to internal LongTap detector.
 pref("selectioncaret.detects.longtap", true);
 
+// New implementation to unify touch-caret and selection-carets.
+pref("layout.accessiblecaret.enabled", false);
+
+// Timeout in milliseconds to hide the accessiblecaret under cursor mode while
+// no one touches it. Set the value to 0 to disable this feature.
+pref("layout.accessiblecaret.timeout_ms", 3000);
+
 // Wakelock is disabled by default.
 pref("dom.wakelock.enabled", false);
 
@@ -4749,3 +4768,13 @@ pref("dom.secureelement.enabled", false);
 // both composition string and data attribute of compositionupdate
 // and compositionend events.
 pref("dom.compositionevent.allow_control_characters", false);
+
+#ifdef MOZ_WIDGET_GONK
+// Bug 1154053: Serialize B2G memory reports; smaller devices are
+// usually overcommitted on memory by using zRAM, so memory reporting
+// causes memory pressure from uncompressing cold heap memory.
+pref("memory.report_concurrency", 1);
+#else
+// Desktop probably doesn't have swapped-out children like that.
+pref("memory.report_concurrency", 10);
+#endif

@@ -77,6 +77,8 @@ public:
   // Selection caret preference
   static bool SelectionCaretPrefEnabled();
 
+  static bool AccessibleCaretEnabled();
+
   // BeforeAfterKeyboardEvent preference
   static bool BeforeAfterKeyboardEventEnabled();
 
@@ -240,6 +242,9 @@ public:
   virtual already_AddRefed<mozilla::SelectionCarets> GetSelectionCarets() const override;
   virtual mozilla::dom::Element* GetSelectionCaretsStartElement() const override;
   virtual mozilla::dom::Element* GetSelectionCaretsEndElement() const override;
+
+  virtual already_AddRefed<mozilla::AccessibleCaretEventHub> GetAccessibleCaretEventHub() const override;
+
   // caret handling
   virtual already_AddRefed<nsCaret> GetCaret() const override;
   NS_IMETHOD SetCaretEnabled(bool aInEnable) override;
@@ -319,9 +324,7 @@ public:
   virtual void VerifyStyleTree() override;
 #endif
 
-#ifdef PR_LOGGING
   static PRLogModuleInfo* gLog;
-#endif
 
   virtual void DisableNonTestMouseEvents(bool aDisable) override;
 
@@ -389,8 +392,6 @@ public:
                                           bool aEmbeddedCancelled) override;
 
   void SetNextPaintCompressed() { mNextPaintCompressed = true; }
-
-  virtual void FireResizeEvent() override;
 
 protected:
   virtual ~PresShell();
@@ -702,6 +703,9 @@ protected:
                                            mozilla::LayoutDeviceIntPoint& aTargetPt,
                                            nsIWidget *aRootWidget);
 
+  void FireResizeEvent();
+  static void AsyncResizeEventCallback(nsITimer* aTimer, void* aPresShell);
+
   virtual void SynthesizeMouseMove(bool aFromScroll) override;
 
   PresShell* GetRootPresShell();
@@ -791,6 +795,8 @@ protected:
   nsTArray<nsIFrame*>       mDirtyRoots;
 
   nsTArray<nsAutoPtr<DelayedEvent> > mDelayedEvents;
+  nsRevocableEventPtr<nsRunnableMethod<PresShell> > mResizeEvent;
+  nsCOMPtr<nsITimer>        mAsyncResizeEventTimer;
 private:
   nsIFrame*                 mCurrentEventFrame;
   nsCOMPtr<nsIContent>      mCurrentEventContent;
@@ -810,6 +816,7 @@ protected:
   // TouchCaret
   nsRefPtr<mozilla::TouchCaret> mTouchCaret;
   nsRefPtr<mozilla::SelectionCarets> mSelectionCarets;
+  nsRefPtr<mozilla::AccessibleCaretEventHub> mAccessibleCaretEventHub;
 
   // This timer controls painting suppression.  Until it fires
   // or all frames are constructed, we won't paint anything but
@@ -858,7 +865,8 @@ protected:
   // have been processed.
   bool                      mShouldUnsuppressPainting : 1;
 
-  bool                      mResizeEventPending : 1;
+  bool                      mAsyncResizeTimerIsActive : 1;
+  bool                      mInResize : 1;
 
   bool                      mImageVisibilityVisited : 1;
 

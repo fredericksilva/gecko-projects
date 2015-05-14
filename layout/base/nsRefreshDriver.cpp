@@ -73,12 +73,8 @@ using namespace mozilla::widget;
 using namespace mozilla::ipc;
 using namespace mozilla::layout;
 
-#ifdef PR_LOGGING
 static PRLogModuleInfo *gLog = nullptr;
 #define LOG(...) PR_LOG(gLog, PR_LOG_NOTICE, (__VA_ARGS__))
-#else
-#define LOG(...) do { } while(0)
-#endif
 
 #define DEFAULT_FRAME_RATE 60
 #define DEFAULT_THROTTLED_FRAME_RATE 1
@@ -902,11 +898,9 @@ GetFirstFrameDelay(imgIRequest* req)
 /* static */ void
 nsRefreshDriver::InitializeStatics()
 {
-#ifdef PR_LOGGING
   if (!gLog) {
     gLog = PR_NewLogModule("nsRefreshDriver");
   }
-#endif
 }
 
 /* static */ void
@@ -1330,7 +1324,6 @@ nsRefreshDriver::ObserverCount() const
   // changes can trigger transitions which fire events when they complete, and
   // layout changes can affect media queries on child documents, triggering
   // style changes, etc.
-  sum += mResizeEventFlushObservers.Length();
   sum += mStyleFlushObservers.Length();
   sum += mLayoutFlushObservers.Length();
   sum += mFrameRequestCallbackDocs.Length();
@@ -1627,24 +1620,6 @@ nsRefreshDriver::Tick(int64_t aNowEpoch, TimeStamp aNowTime)
 
   AutoRestore<TimeStamp> restoreTickStart(mTickStart);
   mTickStart = TimeStamp::Now();
-
-  // Resize events should be fired before layout flushes or
-  // calling animation frame callbacks.
-  nsAutoTArray<nsIPresShell*, 16> observers;
-  observers.AppendElements(mResizeEventFlushObservers);
-  for (uint32_t i = observers.Length(); i; --i) {
-    if (!mPresContext || !mPresContext->GetPresShell()) {
-      break;
-    }
-    // Make sure to not process observers which might have been removed
-    // during previous iterations.
-    nsIPresShell* shell = observers[i - 1];
-    if (!mResizeEventFlushObservers.Contains(shell)) {
-      continue;
-    }
-    mResizeEventFlushObservers.RemoveElement(shell);
-    shell->FireResizeEvent();
-  }
 
   /*
    * The timer holds a reference to |this| while calling |Notify|.

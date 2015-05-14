@@ -57,11 +57,6 @@
 }
 
 /*** global informations ***/
-#addons-page .global-info-container {
-  background-color: #f3f7fb;
-  border-top-right-radius: 2px;
-  border-top-left-radius: 2px;
-}
 
 /* Plugins aren't yet disabled by safemode (bug 342333),
    so don't show that warning when viewing plugins. */
@@ -353,8 +348,16 @@
 .list {
   -moz-appearance: none;
   margin: 0;
-  border-color: transparent;
+  border-width: 0 !important;
   background-color: transparent;
+}
+
+.list > scrollbox > .scrollbox-innerbox {
+  border: 1px dotted transparent;
+}
+
+.list:-moz-focusring > scrollbox > .scrollbox-innerbox {
+  border-color: #0095dd;
 }
 
 .addon {
@@ -1016,4 +1019,24 @@ button.button-link:not([disabled="true"]):active:hover {
 .addon[active="true"] .experiment-bullet,
 #detail-view[active="true"] #detail-experiment-bullet {
   fill: rgb(106, 201, 20);
+}
+
+/*** info UI for add-ons that have been disabled for being unsigned ***/
+
+#show-disabled-unsigned-extensions:not(:hover) {
+  background-color: #fcf8ed;
+}
+
+#disabled-unsigned-addons-info {
+  margin-bottom: 2em;
+}
+
+#disabled-unsigned-addons-heading {
+  font-size: 1.4em;
+  font-weight: bold;
+  margin-bottom: .5em;
+}
+
+#signing-dev-info {
+  font-style: italic;
 }

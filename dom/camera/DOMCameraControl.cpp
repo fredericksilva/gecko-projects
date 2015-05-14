@@ -1405,7 +1405,7 @@ nsDOMCameraControl::OnTakePictureComplete(nsIDOMBlob* aPicture)
     promise->MaybeResolve(picture);
   }
 
-  nsRefPtr<File> blob = static_cast<File*>(aPicture);
+  nsRefPtr<Blob> blob = static_cast<Blob*>(aPicture);
   BlobEventInit eventInit;
   eventInit.mData = blob;
 
@@ -1448,7 +1448,7 @@ nsDOMCameraControl::OnUserError(CameraControlListener::UserContext aContext, nsr
       break;
 
     case CameraControlListener::kInSetConfiguration:
-      if (mSetInitialConfig) {
+      if (mSetInitialConfig && mCameraControl) {
         // If the SetConfiguration() call in the constructor fails, there
         // is nothing we can do except release the camera hardware. This
         // will trigger a hardware state change, and when the flag that

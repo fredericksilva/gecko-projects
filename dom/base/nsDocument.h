@@ -1038,8 +1038,6 @@ public:
   virtual void
     EnumerateExternalResources(nsSubDocEnumFunc aCallback, void* aData) override;
 
-  nsTArray<nsCString> mHostObjectURIs;
-
   // Returns our (lazily-initialized) animation controller.
   // If HasAnimationController is true, this is guaranteed to return non-null.
   nsSMILAnimationController* GetAnimationController() override;
@@ -1128,9 +1126,6 @@ public:
 
   virtual mozilla::EventStates GetDocumentState() override;
 
-  virtual void RegisterHostObjectUri(const nsACString& aUri) override;
-  virtual void UnregisterHostObjectUri(const nsACString& aUri) override;
-
   // Only BlockOnload should call this!
   void AsyncBlockOnload();
 
@@ -1159,6 +1154,16 @@ public:
   // GetPlugins returns the plugin-related elements from
   // the frame and any subframes.
   virtual void GetPlugins(nsTArray<nsIObjectLoadingContent*>& aPlugins) override;
+
+  // Adds an element to mResponsiveContent when the element is
+  // added to the tree.
+  virtual nsresult AddResponsiveContent(nsIContent* aContent) override;
+  // Removes an element from mResponsiveContent when the element is
+  // removed from the tree.
+  virtual void RemoveResponsiveContent(nsIContent* aContent) override;
+  // Notifies any responsive content added by AddResponsiveContent upon media
+  // features values changing.
+  virtual void NotifyMediaFeatureValuesChanged() override;
 
   virtual nsresult GetStateObject(nsIVariant** aResult) override;
 
@@ -1758,6 +1763,9 @@ private:
   // AddStyleRelevantLink.
   bool mStyledLinksCleared;
 #endif
+
+  // A set of responsive images keyed by address pointer.
+  nsTHashtable< nsPtrHashKey<nsIContent> > mResponsiveContent;
 
   // Member to store out last-selected stylesheet set.
   nsString mLastStyleSheetSet;

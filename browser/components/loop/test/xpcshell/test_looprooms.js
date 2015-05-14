@@ -98,7 +98,7 @@ const kExpectedRooms = new Map([
   }]
 ]);
 
-let roomDetail = {
+const kRoomDetail = {
   decryptedContext: {
     roomName: "First Room Name"
   },
@@ -186,12 +186,12 @@ const normalizeRoom = function(room) {
   let newRoom = extend({}, room);
   let name = newRoom.decryptedContext.roomName;
 
-  for (let key of Object.getOwnPropertyNames(roomDetail)) {
+  for (let key of Object.getOwnPropertyNames(kRoomDetail)) {
     // Handle sub-objects if necessary (e.g. context, decryptedContext).
-    if (typeof roomDetail[key] == "object") {
-      newRoom[key] = extend({}, roomDetail[key]);
+    if (typeof kRoomDetail[key] == "object") {
+      newRoom[key] = extend({}, kRoomDetail[key]);
     } else {
-      newRoom[key] = roomDetail[key];
+      newRoom[key] = kRoomDetail[key];
     }
   }
 
@@ -317,8 +317,11 @@ add_task(function* setup_server() {
     res.finish();
   });
 
-  function returnRoomDetails(res, roomName) {
+  function returnRoomDetails(res, roomDetail, roomName) {
     roomDetail.roomName = roomName;
+    // The decrypted context and roomKey are never part of the server response.
+    delete roomDetail.decryptedContext;
+    delete roomDetail.roomKey;
     res.setStatusLine(null, 200, "OK");
     res.write(JSON.stringify(roomDetail));
     res.processAsync();
@@ -332,6 +335,7 @@ add_task(function* setup_server() {
   // Add a request handler for each room in the list.
   [...kRoomsResponses.values()].forEach(function(room) {
     loopServer.registerPathHandler("/rooms/" + encodeURIComponent(room.roomToken), (req, res) => {
+      let roomDetail = extend({}, kRoomDetail);
       if (req.method == "POST") {
         let data = getJSONData(req.bodyInputStream);
         res.setStatusLine(null, 200, "OK");
@@ -344,7 +348,7 @@ add_task(function* setup_server() {
         Assert.ok("context" in data, "should have encrypted context");
         // We return a fake encrypted name here as the context is
         // encrypted.
-        returnRoomDetails(res, "fakeEncrypted");
+        returnRoomDetails(res, roomDetail, "fakeEncrypted");
       } else {
         roomDetail.context = room.context;
         res.setStatusLine(null, 200, "OK");
@@ -458,7 +462,7 @@ add_task(function* test_refresh() {
 // Test if push updates function as expected.
 add_task(function* test_roomUpdates() {
   gExpectedUpdates.push("_nxD4V4FflQ");
-  gExpectedLeaves["_nxD4V4FflQ"] = [
+  gExpectedLeaves._nxD4V4FflQ = [
     "2a1787a6-4a73-43b5-ae3e-906ec1e763cb",
     "781f012b-f1ea-4ce1-9105-7cfc36fb4ec7"
   ];
@@ -467,21 +471,21 @@ add_task(function* test_roomUpdates() {
     gExpectedUpdates.length === 0);
 
   gExpectedUpdates.push("_nxD4V4FflQ");
-  gExpectedJoins["_nxD4V4FflQ"] = ["2a1787a6-4a73-43b5-ae3e-906ec1e763cb"];
+  gExpectedJoins._nxD4V4FflQ = ["2a1787a6-4a73-43b5-ae3e-906ec1e763cb"];
   roomsPushNotification("2", kChannelGuest);
   yield waitForCondition(() => Object.getOwnPropertyNames(gExpectedJoins).length === 0 &&
     gExpectedUpdates.length === 0);
 
   gExpectedUpdates.push("_nxD4V4FflQ");
-  gExpectedJoins["_nxD4V4FflQ"] = ["781f012b-f1ea-4ce1-9105-7cfc36fb4ec7"];
-  gExpectedLeaves["_nxD4V4FflQ"] = ["2a1787a6-4a73-43b5-ae3e-906ec1e763cb"];
+  gExpectedJoins._nxD4V4FflQ = ["781f012b-f1ea-4ce1-9105-7cfc36fb4ec7"];
+  gExpectedLeaves._nxD4V4FflQ = ["2a1787a6-4a73-43b5-ae3e-906ec1e763cb"];
   roomsPushNotification("3", kChannelGuest);
   yield waitForCondition(() => Object.getOwnPropertyNames(gExpectedLeaves).length === 0 &&
     Object.getOwnPropertyNames(gExpectedJoins).length === 0 &&
     gExpectedUpdates.length === 0);
 
   gExpectedUpdates.push("_nxD4V4FflQ");
-  gExpectedJoins["_nxD4V4FflQ"] = [
+  gExpectedJoins._nxD4V4FflQ = [
     "2a1787a6-4a73-43b5-ae3e-906ec1e763cb",
     "5de6281c-6568-455f-af08-c0b0a973100e"];
   roomsPushNotification("4", kChannelGuest);
@@ -503,7 +507,7 @@ add_task(function* test_channelIdsRespected() {
   MozLoopServiceInternal.fxAOAuthProfile = { email: "fake@invalid.com" };
 
   gExpectedUpdates.push("_nxD4V4FflQ");
-  gExpectedLeaves["_nxD4V4FflQ"] = [
+  gExpectedLeaves._nxD4V4FflQ = [
     "2a1787a6-4a73-43b5-ae3e-906ec1e763cb",
     "5de6281c-6568-455f-af08-c0b0a973100e"
   ];
@@ -574,11 +578,34 @@ add_task(function* test_sendConnectionStatus() {
   Assert.deepEqual(statusData, extraData);
 });
 
-// Test if renaming a room works as expected.
-add_task(function* test_renameRoom() {
+// Test if updating a room works as expected.
+add_task(function* test_updateRoom() {
   let roomToken = "_nxD4V4FflQ";
-  let renameData = yield LoopRooms.promise("rename", roomToken, "fakeName");
-  Assert.equal(renameData.roomName, "fakeEncrypted", "should have set the new name");
+  let fakeContext = {
+    description: "Hello, is it me you're looking for?",
+    location: "https://example.com",
+    thumbnail: "https://example.com/empty.gif"
+  };
+  let updateData = yield LoopRooms.promise("update", roomToken, {
+    roomName: "fakeEncrypted",
+    urls: [fakeContext]
+  });
+  Assert.equal(updateData.roomName, "fakeEncrypted", "should have set the new name");
+  let contextURL = updateData.decryptedContext.urls[0];
+  Assert.equal(contextURL.description, contextURL.description,
+    "should have set the new context URL description");
+  Assert.equal(contextURL.location, contextURL.location,
+    "should have set the new context URL location");
+  Assert.equal(contextURL.thumbnail, contextURL.thumbnail,
+    "should have set the new context URL thumbnail");
+});
+
+add_task(function* test_updateRoom_nameOnly() {
+  let roomToken = "_nxD4V4FflQ";
+  let updateData = yield LoopRooms.promise("update", roomToken, {
+    roomName: "fakeEncrypted"
+  });
+  Assert.equal(updateData.roomName, "fakeEncrypted", "should have set the new name");
 });
 
 add_task(function* test_roomDeleteNotifications() {
