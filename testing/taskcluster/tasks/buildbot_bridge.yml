@@ -30,11 +30,10 @@ task:
     #properties:
 
     sourcestamp:
-      # Should we be using {{base_repository}} instead?
-      # TODO: Buildbot needs a branch like "integration/mozilla-inbound"
+      # Buildbot needs a branch like "integration/mozilla-inbound"
       # but we can only provide a full URL ({{head_repository}}) or the
-      # last part of the path ({{project}}). The buildbot bridge should
-      # probably take care of shortening this.
+      # last part of the path ({{project}}). The buildbot bridge will take
+      # care of shortening this.
       branch: '{{head_repository}}'
       revision: '{{head_ref}}'
 

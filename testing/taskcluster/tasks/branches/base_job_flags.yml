@@ -25,6 +25,7 @@ flags:
     - aries-nightly
     - aries-eng
     - linux32_firefox
+    - linux64_firefox
 
   tests:
     - cppunit

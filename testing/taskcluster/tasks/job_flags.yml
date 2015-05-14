@@ -15,6 +15,7 @@ flags:
     - macosx64_gecko # b2g desktop osx 64 bit
     - win32_gecko    # b2g desktop win 32 bit
     - linux32_firefox
+    - linux64_firefox
 
   tests:
     - cppunit

@@ -11,7 +11,13 @@ builds:
       - linux
     types:
       opt:
-        task: tasks/buildbot_bridge/firefox_linux32_opt.yml
+        task: tasks/buildbot_bridge/linux32_firefox_opt.yml
+  linux64_firefox:
+    platforms:
+      - linux64
+    types:
+      opt:
+        task: tasks/buildbot_bridge/linux64_firefox_opt.yml
   linux64_gecko:
     platforms:
       - b2g
