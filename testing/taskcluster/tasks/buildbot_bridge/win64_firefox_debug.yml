@@ -1,0 +1,18 @@
+$inherits:
+  from: 'tasks/buildbot_bridge.yml'
+  variables:
+    build_name: 'win64_firefox'
+    build_type: 'debug'
+
+task:
+  metadata:
+    name: 'Windows x86-64 Debug Build'
+    description: 'Windows x86-64 Debug Build'
+
+  payload:
+    buildername: 'WINNT 6.1 x86-64 {{project}} leak test build'
+
+  extra:
+    treeherder:
+      machine:
+        platform: windows8-64

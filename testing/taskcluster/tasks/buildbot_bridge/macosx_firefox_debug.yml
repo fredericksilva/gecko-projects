@@ -1,0 +1,18 @@
+$inherits:
+  from: 'tasks/buildbot_bridge.yml'
+  variables:
+    build_name: 'macosx_firefox'
+    build_type: 'debug'
+
+task:
+  metadata:
+    name: 'OS X Debug Build'
+    description: 'OS X Debug Build'
+
+  payload:
+    buildername: 'OS X 10.7 64-bit {{project}} leak test build'
+
+  extra:
+    treeherder:
+      machine:
+        platform: osx-10-7

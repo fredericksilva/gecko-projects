@@ -1,0 +1,18 @@
+$inherits:
+  from: 'tasks/buildbot_bridge.yml'
+  variables:
+    build_name: 'linux32_firefox'
+    build_type: 'debug'
+
+task:
+  metadata:
+    name: 'Linux Debug Build'
+    description: 'Linux Debug Build'
+
+  payload:
+    buildername: 'Linux {{project}} leak test build'
+
+  extra:
+    treeherder:
+      machine:
+        platform: linux

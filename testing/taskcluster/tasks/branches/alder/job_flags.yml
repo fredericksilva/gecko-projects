@@ -12,30 +12,40 @@ builds:
     types:
       opt:
         task: tasks/buildbot_bridge/linux32_firefox_opt.yml
+      debug:
+        task: tasks/buildbot_bridge/linux32_firefox_debug.yml
   linux64_firefox:
     platforms:
       - linux64
     types:
       opt:
         task: tasks/buildbot_bridge/linux64_firefox_opt.yml
+      debug:
+        task: tasks/buildbot_bridge/linux64_firefox_debug.yml
   macosx_firefox:
     platforms:
       - macosx
     types:
       opt:
         task: tasks/buildbot_bridge/macosx_firefox_opt.yml
+      debug:
+        task: tasks/buildbot_bridge/macosx_firefox_debug.yml
   win32_firefox:
     platforms:
       - win32
     types:
       opt:
         task: tasks/buildbot_bridge/win32_firefox_opt.yml
+      debug:
+        task: tasks/buildbot_bridge/win32_firefox_debug.yml
   win64_firefox:
     platforms:
       - win64
     types:
       opt:
         task: tasks/buildbot_bridge/win64_firefox_opt.yml
+      debug:
+        task: tasks/buildbot_bridge/win64_firefox_debug.yml
   linux64_gecko:
     platforms:
       - b2g
