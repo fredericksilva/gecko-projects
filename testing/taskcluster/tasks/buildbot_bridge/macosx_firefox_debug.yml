@@ -16,3 +16,5 @@ task:
     treeherder:
       machine:
         platform: osx-10-7
+      collection:
+        debug: true
