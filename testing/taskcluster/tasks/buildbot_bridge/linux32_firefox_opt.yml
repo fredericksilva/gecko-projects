@@ -1,7 +1,7 @@
 $inherits:
   from: 'tasks/buildbot_bridge.yml'
   variables:
-    build_name: 'firefox_linux32'
+    build_name: 'linux32_firefox'
     build_type: 'opt'
 
 task:

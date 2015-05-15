@@ -1,0 +1,18 @@
+$inherits:
+  from: 'tasks/buildbot_bridge.yml'
+  variables:
+    build_name: 'linux64_firefox'
+    build_type: 'opt'
+
+task:
+  metadata:
+    name: 'Linux 64-bit Opt Build'
+    description: 'Linux 64-bit Opt Build'
+
+  payload:
+    buildername: 'Linux x86-64 {{project}} build'
+
+  extra:
+    treeherder:
+      machine:
+        platform: linux64
