@@ -1,0 +1,18 @@
+$inherits:
+  from: 'tasks/buildbot_bridge.yml'
+  variables:
+    build_name: 'win32_firefox'
+    build_type: 'opt'
+
+task:
+  metadata:
+    name: 'Windows Opt Build'
+    description: 'Windows Opt Build'
+
+  payload:
+    buildername: 'WINNT 5.2 {{project}} build'
+
+  extra:
+    treeherder:
+      machine:
+        platform: windowsxp

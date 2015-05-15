@@ -1,0 +1,18 @@
+$inherits:
+  from: 'tasks/buildbot_bridge.yml'
+  variables:
+    build_name: 'macosx_firefox'
+    build_type: 'opt'
+
+task:
+  metadata:
+    name: 'OS X Opt Build'
+    description: 'OS X Opt Build'
+
+  payload:
+    buildername: 'OS X 10.7 {{project}} build'
+
+  extra:
+    treeherder:
+      machine:
+        platform: osx-10-7

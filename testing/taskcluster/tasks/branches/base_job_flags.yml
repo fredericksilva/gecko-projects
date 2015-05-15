@@ -26,6 +26,9 @@ flags:
     - aries-eng
     - linux32_firefox
     - linux64_firefox
+    - macosx_firefox
+    - win32_firefox
+    - win64_firefox
 
   tests:
     - cppunit
